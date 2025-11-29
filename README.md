@@ -23,8 +23,7 @@ CC BY 4.0 - The underlying research is openly licensed
 ## Code Information
 
 **Code Implementation & Maintainer:**  
-Sebastián Labbé, Dipl.-Ing.  
-Karlsruher Institut für Technologie (KIT)
+Sebastián Labbé, Dipl.-Ing.
 
 **Based on Research Report:**  
 DZSF Bericht 53 (2024)
@@ -312,12 +311,12 @@ streamlit run railway_impact_simulator_refactored.py
 ```
 
 ### Features
-- ✅ Interactive parameter configuration
-- ✅ Real-time simulation visualization
-- ✅ Multiple train configurations (research locomotive, passenger trains, freight)
-- ✅ Various material and contact models
-- ✅ Export results (CSV, TXT, XLSX)
-- ✅ Force-time, penetration-time, and hysteresis plots
+- Interactive parameter configuration
+- Real-time simulation visualization
+- Multiple train configurations (research locomotive, passenger trains, freight)
+- Various material and contact models
+- Export results (CSV, TXT, XLSX)
+- Force-time, penetration-time, and hysteresis plots
 
 ---
 
@@ -354,14 +353,6 @@ This research and simulator are relevant for:
 ---
 
 ## Contact
-
-### Software/Code Questions
-**Sebastián Labbé, Dipl.-Ing.**  
-Karlsruher Institut für Technologie (KIT)  
-Institut für Massivbau und Baustofftechnologie  
-Gotthard-Franz-Straße 3  
-76131 Karlsruhe, Germany  
-Email: [your email if you want to include it]
 
 ### For Technical Questions about the Research Report
 **Karlsruher Institut für Technologie (KIT)**  

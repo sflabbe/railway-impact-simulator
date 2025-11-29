@@ -19,3 +19,34 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+
+ATTRIBUTION NOTICE
+
+This software implements methodologies described in the research report:
+
+  Stempniewski, L., Labbé, S., Siegel, S., & Bosch, R. (2024).
+  Überprüfung und Anpassung der Anpralllasten aus dem Eisenbahnverkehr.
+  Berichte des Deutschen Zentrums für Schienenverkehrsforschung, Bericht 53.
+  Deutsches Zentrum für Schienenverkehrsforschung beim Eisenbahn-Bundesamt.
+  https://doi.org/10.48755/dzsf.240006.01
+
+The research report is licensed under CC BY 4.0:
+  https://creativecommons.org/licenses/by/4.0/
+
+When using this software in research or publications, please cite both:
+  1. This software repository (if applicable)
+  2. The DZSF research report (see citation above)
+
+================================================================================
+
+DISCLAIMER
+
+This software is provided for research and educational purposes. The author
+makes no warranty regarding its suitability for any particular application,
+especially safety-critical engineering applications. Users are responsible for
+validating results for their specific use cases.
+
+For regulatory or safety-critical applications, consult with qualified
+professional engineers and relevant authorities (e.g., Eisenbahn-Bundesamt).

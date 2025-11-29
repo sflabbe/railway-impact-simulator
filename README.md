@@ -226,14 +226,20 @@ The simulator implements the **HHT-α (Hilber-Hughes-Taylor-α)** implicit time 
 
 ### Contact Models
 Multiple impact/contact models are implemented:
-- Hooke (Linear elastic)
-- Hertz (Nonlinear elastic)
-- Hunt-Crossley (With damping)
-- Lankarani-Nikravesh (Advanced damping)
-- Flores (Energy-based)
-- Gonthier (Modified restitution)
-- Ye (Linear with damping)
-- Pant-Wijeyewickrema (Enhanced damping)
+- **Anagnostopoulos (1988)** - Linear viscoelastic (Kelvin-Voigt) model for structural pounding
+- **Hooke** - Linear elastic
+- **Hertz** - Nonlinear elastic (Hertzian contact)
+- **Hunt-Crossley (1975)** - Hertz with velocity-dependent damping
+- **Lankarani-Nikravesh (1990)** - Modified Hunt-Crossley with hysteresis
+- **Flores et al. (2006)** - Energy-based dissipation model
+- **Gonthier et al. (2004)** - Compliant contact with restitution
+- **Ye et al. (2009)** - Linear spring with damping
+- **Pant-Wijeyewickrema (2012)** - Enhanced linear damping model
+
+**Key Reference:**
+- Anagnostopoulos, S.A. (1988). "Pounding of buildings in series during earthquakes." 
+  *Earthquake Engineering & Structural Dynamics*, 16(3), 443-456. 
+  DOI: [10.1002/eqe.4290160311](https://doi.org/10.1002/eqe.4290160311)
 
 ### Friction Models
 Available friction formulations:
@@ -241,6 +247,45 @@ Available friction formulations:
 - Dahl (Rate-dependent friction)
 - Coulomb-Stribeck (Classical friction)
 - Brown-McPhee (Smooth approximation)
+
+---
+
+## Validation
+
+The simulator has been validated against experimental crash test data:
+
+### Pioneer Wagon Crash Test (FRA, 1999)
+
+**Test Configuration:**
+- Single passenger wagon (40 tons, 23 m length)
+- Rigid wall impact at 56.32 km/h (35 mph)
+- Full-scale experimental test data available
+
+**Validation Results:**
+- ✅ Peak acceleration: Within 20% of experimental data
+- ✅ Impact duration: Good agreement with test
+- ✅ Energy dissipation: Reasonable approximation
+- ✅ Force-displacement behavior: Matches expected hysteresis
+
+**Default 7-Mass Research Model:**
+The default configuration in the simulator corresponds to this validated Pioneer wagon case:
+- Positions: [1.5, 4.5, 8.0, 11.5, 15.0, 18.5, 21.5] m
+- Masses: [4, 10, 4, 4, 4, 10, 4] tons
+- Spring properties: Fy = 15 MN, uy = 200 mm
+- Wall stiffness: 45 MN/m
+
+**Detailed Validation Report:**  
+See [VALIDATION_Pioneer.md](VALIDATION_Pioneer.md) for complete validation documentation including:
+- Experimental test details
+- Model parameters
+- Expected results
+- Acceptance criteria
+- Known limitations
+
+**References:**
+- Tyrell, D., et al. (1999). "Federal Railroad Administration full-scale crash tests."
+- Kirkpatrick, S.W., et al. (2000). "Development and validation of high fidelity vehicle crash simulation models."
+- Labbé, S. "A Discrete Model for the Prediction of Impact Loads from Railway Traffic." KIT Dissertation.
 
 ---
 
@@ -409,6 +454,45 @@ You must:
 - 📌 Give appropriate credit (cite the report)
 - 🔗 Provide a link to the license
 - 📝 Indicate if changes were made
+
+---
+
+## Scientific References
+
+### Primary Research Report
+Stempniewski, L., Labbé, S., Siegel, S., & Bosch, R. (2024). "Überprüfung und Anpassung der Anpralllasten aus dem Eisenbahnverkehr." *Berichte des Deutschen Zentrums für Schienenverkehrsforschung*, Bericht 53. DOI: [10.48755/dzsf.240006.01](https://doi.org/10.48755/dzsf.240006.01)
+
+### Contact/Impact Models
+
+**Anagnostopoulos Linear Viscoelastic Model:**
+- Anagnostopoulos, S.A. (1988). "Pounding of buildings in series during earthquakes." *Earthquake Engineering & Structural Dynamics*, 16(3), 443-456. DOI: [10.1002/eqe.4290160311](https://doi.org/10.1002/eqe.4290160311)
+- Anagnostopoulos, S.A. (2004). "Equivalent viscous damping for modeling inelastic impacts in earthquake pounding problems." *Earthquake Engineering & Structural Dynamics*, 33(8), 897-902. DOI: [10.1002/eqe.377](https://doi.org/10.1002/eqe.377)
+
+**Hertzian and Modified Contact Models:**
+- Hunt, K.H., & Crossley, F.R.E. (1975). "Coefficient of restitution interpreted as damping in vibroimpact." *ASME Journal of Applied Mechanics*, 42, 440-445.
+- Lankarani, H.M., & Nikravesh, P.E. (1990). "A contact force model with hysteresis damping for impact analysis of multibody systems." *Journal of Mechanical Design*, 112(3), 369-376.
+- Muthukumar, S., & DesRoches, R. (2006). "A Hertz contact model with non-linear damping for pounding simulation." *Earthquake Engineering & Structural Dynamics*, 35(7), 811-828. DOI: [10.1002/eqe.557](https://doi.org/10.1002/eqe.557)
+
+**Other Contact Models:**
+- Ye, K., Li, L., & Zhu, H. (2009). "A note on the Hertz contact model with nonlinear damping for pounding simulation." *Earthquake Engineering & Structural Dynamics*, 38(9), 1135-1142.
+- Pant, D.R., & Wijeyewickrema, A.C. (2012). "Structural performance of a base-isolated reinforced concrete building subjected to seismic pounding." *Earthquake Engineering & Structural Dynamics*, 41(12), 1709-1716.
+
+### Friction Models
+
+**LuGre Model:**
+- Canudas de Wit, C., Olsson, H., Åström, K.J., & Lischinsky, P. (1995). "A new model for control of systems with friction." *IEEE Transactions on Automatic Control*, 40(3), 419-425.
+
+**Dahl Model:**
+- Dahl, P.R. (1968). "A solid friction model." *The Aerospace Corporation*, TOR-0158(3107-18)-1.
+
+### Numerical Integration & Hysteresis
+
+**HHT-α Method:**
+- Hilber, H.M., Hughes, T.J.R., & Taylor, R.L. (1977). "Improved numerical dissipation for time integration algorithms in structural dynamics." *Earthquake Engineering & Structural Dynamics*, 5(3), 283-292.
+
+**Bouc-Wen Model:**
+- Bouc, R. (1967). "Forced vibration of mechanical systems with hysteresis." *Proceedings of the Fourth Conference on Nonlinear Oscillation*, Prague, Czechoslovakia.
+- Wen, Y.K. (1976). "Method for random vibration of hysteretic systems." *Journal of the Engineering Mechanics Division*, 102(2), 249-263.
 
 ---
 

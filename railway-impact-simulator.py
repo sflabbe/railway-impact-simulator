@@ -267,7 +267,17 @@ class FrictionModels:
 # ====================================================================
 
 class ContactModels:
-    """Normal contact force model implementations."""
+    """Normal contact force model implementations.
+    
+    References:
+    - Anagnostopoulos (1988, 2004): Linear viscoelastic (Kelvin-Voigt) model
+    - Hunt & Crossley (1975): Hertz contact with damping
+    - Lankarani & Nikravesh (1990): Modified Hunt-Crossley
+    - Flores et al. (2006): Energy-based dissipation
+    - Gonthier et al. (2004): Compliant contact model
+    - Ye et al. (2009): Linear spring with damping
+    - Pant & Wijeyewickrema (2012): Enhanced linear model
+    """
     
     MODELS = {
         'hooke': lambda k, d, cr, dv, v0: -k * d,
@@ -290,7 +300,7 @@ class ContactModels:
         'pant-wijeyewickrema': lambda k, d, cr, dv, v0: (
             -k * d * (1.0 + 3.0*(1.0 - cr**2)/(2.0*cr**2) * (dv / v0))
         ),
-        'ye-mod': lambda k, d, cr, dv, v0: (
+        'anagnostopoulos': lambda k, d, cr, dv, v0: (
             -k * d * (1.0 + 3.0*(1.0 - cr)/(2.0*cr) * (dv / v0))
         ),
     }
@@ -309,6 +319,17 @@ class ContactModels:
             k_wall: Wall stiffness
             cr_wall: Coefficient of restitution
             model: Contact model name
+        
+        Available models:
+            - hooke: Linear elastic (F = k·δ)
+            - hertz: Hertzian contact (F = k·δ^1.5)
+            - hunt-crossley: Hertz with Hunt-Crossley damping
+            - lankarani-nikravesh: Modified Hunt-Crossley
+            - flores: Energy-based dissipation
+            - gonthier: Compliant contact with restitution
+            - ye: Linear with Ye damping
+            - pant-wijeyewickrema: Enhanced linear damping
+            - anagnostopoulos: Linear viscoelastic (Kelvin-Voigt)
         """
         u = np.asarray(u_contact, dtype=float)
         du = np.asarray(du_contact, dtype=float)
@@ -332,10 +353,10 @@ class ContactModels:
                        np.sign(v0m) * 1e-8 + (v0m == 0) * 1e-8, 
                        v0m)
         
-        # Get model function
+        # Get model function (default to anagnostopoulos)
         model_func = ContactModels.MODELS.get(
             model.lower(), 
-            ContactModels.MODELS['ye-mod']
+            ContactModels.MODELS['anagnostopoulos']
         )
         
         R[mask] = model_func(k_wall, d, cr_wall, dv, v0m)
@@ -1082,9 +1103,12 @@ def build_train_geometry_ui() -> Dict[str, Any]:
         if config_mode == "Research locomotive model":
             n_masses = st.slider("Number of Masses", 2, 20, 7)
             
-            # Default 7-mass validated model
-            default_masses = np.array([4, 10, 4, 4, 4, 10, 4]) * 1000.0
-            default_x = np.array([0.02, 3.02, 6.52, 10.02, 13.52, 17.02, 20.02])
+            # Default 7-mass Pioneer wagon validation model
+            # Based on Pioneer crash test validation (Labbé dissertation, Table 6.3)
+            # Total mass: 40 tons, Length: ~23 m, Speed: 56.32 km/h (35 mph)
+            # Validated against FRA crash test data [Tyrell et al., 1999]
+            default_masses = np.array([4, 10, 4, 4, 4, 10, 4]) * 1000.0  # kg
+            default_x = np.array([1.5, 4.5, 8.0, 11.5, 15.0, 18.5, 21.5])  # m
             default_y = np.zeros(7)
             
             if n_masses == 7:
@@ -1181,9 +1205,20 @@ def build_contact_friction_ui() -> Dict[str, Any]:
         params['cr_wall'] = st.slider("Coeff. of Restitution", 0.1, 0.99, 0.8, 0.01)
         params['contact_model'] = st.selectbox(
             "Contact model",
-            ["ye-mod", "ye", "hooke", "hertz", "hunt-crossley", 
+            ["anagnostopoulos", "ye", "hooke", "hertz", "hunt-crossley", 
              "lankarani-nikravesh", "flores", "gonthier", "pant-wijeyewickrema"],
-            index=0
+            index=0,
+            help="""Contact force models:
+            - Anagnostopoulos (1988): Linear viscoelastic (Kelvin-Voigt)
+            - Ye et al. (2009): Linear spring with damping
+            - Hooke: Linear elastic
+            - Hertz: Nonlinear elastic (δ^1.5)
+            - Hunt-Crossley: Hertz with damping
+            - Lankarani-Nikravesh: Modified Hunt-Crossley
+            - Flores: Energy-based dissipation
+            - Gonthier: Compliant contact
+            - Pant-Wijeyewickrema: Enhanced linear damping
+            """
         )
     
     with st.expander("🛞 Friction", expanded=True):

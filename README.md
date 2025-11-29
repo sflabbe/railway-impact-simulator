@@ -495,7 +495,7 @@ When using this software, please provide attribution in two ways:
 ```
 Labbé, S. (2025). Railway Impact Simulator: HHT-α Implicit Integration 
 with Bouc-Wen Hysteresis [Computer software]. 
-https://github.com/[your-repo] (or appropriate link)
+https://github.com/sflabbe/railway-impact-simulator
 ```
 
 ### 2. Research Report Citation (Methodology)

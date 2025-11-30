@@ -20,8 +20,15 @@ import yaml
 from .core.engine import run_simulation
 from .core.parametric import ScenarioDefinition, run_parametric_envelope
 
-app = typer.Typer(add_completion=False, help="Railway impact simulator CLI")
-
+app = typer.Typer(
+    add_completion=False,
+    help=(
+        "Railway impact simulator CLI\n\n"
+        "Run HHT-α/Bouc–Wen impact simulations based on DZSF Bericht 53 (2024).\n"
+        "Use 'run' for a single scenario or 'parametric' for speed mixes\n"
+        "with envelopes, performance metrics, and optional PDF reports."
+    ),
+)
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -315,7 +322,6 @@ def _compute_parametric_performance(
 # Commands
 # ----------------------------------------------------------------------
 
-
 @app.command()
 def run(
     config: Path = typer.Option(
@@ -356,8 +362,25 @@ def run(
 ) -> None:
     """
     Run a single impact simulation.
+
+    Examples
+    --------
+    Basic ICE-1 / Pioneer-style impact at 80 km/h:
+
+        railway-sim run \\
+          --config configs/ice1_80kmh.yml \\
+          --output-dir results/ice1_80
+
+    Same run with ASCII plot, matplotlib popup and PDF report:
+
+        railway-sim run \\
+          --config configs/ice1_80kmh.yml \\
+          --output-dir results/ice1_80 \\
+          --ascii-plot --plot --pdf-report
     """
     _ensure_output_dir(output_dir)
+    ...
+
 
     if prefix:
         base = f"{prefix}_"
@@ -509,6 +532,19 @@ def parametric(
     """
     Run a speed-based parametric study and compute an envelope
     ('Umhüllende') and a weighted mean history.
+
+    Example: TGV / IC / freight line mix
+    ------------------------------------
+    20 % TGV at 320 km/h, 40 % IC at 200 km/h, 40 % freight at 120 km/h,
+    envelope on impact force and PDF report:
+
+        railway-sim parametric \\
+          --base-config configs/ice1_80kmh.yml \\
+          --speeds "320:0.2,200:0.4,120:0.4" \\
+          --quantity Impact_Force_MN \\
+          --output-dir results_parametric/track_mix \\
+          --prefix track_mix \\
+          --ascii-plot --pdf-report
     """
     _ensure_output_dir(output_dir)
 

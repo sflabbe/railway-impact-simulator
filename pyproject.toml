@@ -4,24 +4,33 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "railway-impact-simulator"
-version = "0.1.0"
+version = "0.2.0"
 authors = [
   { name = "Sebastián Labbé", email = "sflabbe@uc.cl" }
 ]
-description = "HHT-α railway impact simulator with Bouc-Wen hysteresis based on DZSF Bericht 53 (2024)."
+description = "HHT-α railway impact simulator with Bouc–Wen hysteresis based on DZSF Bericht 53 (2024)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 
 dependencies = [
-  "numpy",
-  "scipy",
-  "matplotlib",
-  "pandas",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "matplotlib>=3.7",
+  "pandas>=2.0",
+  "typer[all]>=0.12",
+  "PyYAML>=6.0",
+  "streamlit>=1.35",
+  "plotly>=5.0",
 ]
 
 [project.scripts]
 railway-sim = "railway_simulator.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sflabbe/railway-impact-simulator"
+Source = "https://github.com/sflabbe/railway-impact-simulator"
+"Issue Tracker" = "https://github.com/sflabbe/railway-impact-simulator/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

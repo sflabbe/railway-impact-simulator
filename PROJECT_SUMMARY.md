@@ -53,16 +53,13 @@ DZSF Bericht 53. DOI: 10.48755/dzsf.240006.01
 ## Project Information
 
 ### Software Developer
-**Sebastián Labbé, Dipl.-Ing.**  
-Karlsruher Institut für Technologie (KIT)  
-Institut für Massivbau und Baustofftechnologie  
-76131 Karlsruhe, Germany
+Sebastián Labbé
 
 ### Research Authors (Original Methodology)
-1. Univ.-Prof. Dr.-Ing. Lothar Stempniewski (KIT)
-2. Dipl.-Ing. Sebastián Labbé (KIT)
-3. Dr.-Ing. Steffen Siegel (Siegel und Wünschel PartG mbB)
-4. Robin Bosch, M.Sc. (Siegel und Wünschel PartG mbB)
+1. Lothar Stempniewski (KIT)
+2. Sebastián Labbé (KIT)
+3. Steffen Siegel (Siegel und Wünschel PartG mbB)
+4. Robin Bosch (Siegel und Wünschel PartG mbB)
 
 ### Institutional Affiliations
 
@@ -252,12 +249,10 @@ Please maintain:
 
 ### Software Support
 **Sebastián Labbé**  
-Karlsruher Institut für Technologie (KIT)  
-Email: [your email if you wish to include]
 
 ### Research Questions
 **Institut für Massivbau und Baustofftechnologie (KIT)**  
-https://www.ibb.kit.edu
+https://www.imb.kit.edu
 
 ### Regulatory/Standards Questions
 **Eisenbahn-Bundesamt (EBA)**  

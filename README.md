@@ -1,110 +1,104 @@
 # Railway Impact Simulator
 
-Hilber–Hughes–Taylor-α (HHT-α) implicit time integration with Bouc–Wen hysteresis for simulating railway vehicle impacts on rigid barriers and bridge/abutment piers.
+HHT-α railway impact simulator with Bouc–Wen hysteresis, based on the dynamic load models from DZSF Bericht 53 (2024).  
+The code implements a configurable, vectorised mass–spring model for train impacts on rigid obstacles and provides:
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![DOI](https://img.shields.io/badge/DZSF%20Report-10.48755/dzsf.240006.01-blue.svg)](https://doi.org/10.48755/dzsf.240006.01)
+- A command line interface (`railway-sim`) for single runs and parametric studies
+- CSV/NumPy output for post‑processing
+- Optional ASCII plots for headless terminals (SSH, Termux, etc.)
+- (Optional) extra dependencies for UI/visualisation based on Streamlit and Plotly
 
-The code implements the discrete train model, contact laws and parameter sets developed in:
-
-> Stempniewski, L., Labbé, S., Siegel, S., & Bosch, R. (2024).  
-> *Überprüfung und Anpassung der Anpralllasten aus dem Eisenbahnverkehr* (DZSF Bericht 53).  
-> Deutsches Zentrum für Schienenverkehrsforschung beim Eisenbahn-Bundesamt.  
-> https://doi.org/10.48755/dzsf.240006.01
-
-A short project overview is given in [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md).  
-Detailed citation formats are collected in [`CITATION_REFERENCE.md`](CITATION_REFERENCE.md).
+> ⚠️ The repository currently targets **Python ≥ 3.10**.
 
 ---
 
-## 1. Features
+## 1. Installation
 
-- Discrete multi-mass train model (locomotive + wagons, configurable geometry and masses)
-- HHT-α implicit time integration with Bouc–Wen hysteresis for vehicle crushing
-- Linear and Hertz-type contact laws (Anagnostopoulos, Hunt–Crossley, Lankarani–Nikravesh, etc.)
-- Several friction formulations (LuGre, Dahl, Coulomb–Stribeck, Brown–McPhee)
-- Optional SDOF building/pier model with either linear or Takeda-type degrading hysteresis
-- Energy bookkeeping (kinetic, spring, contact, damping and friction losses)
-- Streamlit web interface for interactive studies
-- Command-line interface (CLI) for batch runs based on YAML/JSON configuration files
-- Speed-based parametric studies with envelopes (“Umhüllende”) and weighted mean histories
-- ASCII-style plots and Matplotlib pop-up plots directly from the CLI
-- Performance metrics (wall-clock time, real-time factor, LU solves, estimated FLOPs)
-- Optional PDF reports and log files for documenting simulation runs
-
-Validated against the Pioneer wagon crash test (FRA, 1999); see [`VALIDATION_Pioneer.md`](VALIDATION_Pioneer.md).
-
----
-
-## 2. Installation
-
-Requirements:
-
-- Python 3.10 or newer
-- A recent `pip`
-
-From a clean environment:
+### 1.1. Clone the repository
 
 ```bash
 git clone https://github.com/sflabbe/railway-impact-simulator.git
 cd railway-impact-simulator
-
-# Install as a package (recommended)
-pip install .
-
-# or, for development
-pip install -e .
 ```
 
-This installs the `railway_simulator` package and the `railway-sim` CLI entry point.
+### 1.2. Create a virtual environment (recommended)
 
----
+On Linux / macOS / WSL:
 
-## 3. Command-line usage
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install --upgrade pip
+```
 
-Show top-level help:
+### 1.3. Install the core package
+
+The *core* installation includes only the numerical engine, CLI and plotting:
+
+```bash
+pip install --no-build-isolation .
+```
+
+You can then check that the entry point is available:
 
 ```bash
 railway-sim --help
 ```
 
-### 3.1 Single-run simulation
+You should see the CLI help with the available sub‑commands (e.g. `run`, `parametric`).
 
-Run a simulation from a configuration file:
+---
+
+## 2. Optional UI / heavy dependencies
+
+The project defines an extra dependency group called `ui` that pulls in heavier libraries such as **Streamlit** and **pyarrow** (used for dashboards / richer visualisation).
+
+To install the package **with** these optional UI dependencies:
 
 ```bash
-railway-sim \
+pip install --no-build-isolation ".[ui]"
+```
+
+> 💡 On typical desktop Python distributions (Linux, Windows, macOS) this will use pre‑built wheels for `pyarrow`.  
+> ⚠️ On Android / Termux this is **not recommended**: `pyarrow` tries to compile the Apache Arrow C++ stack and will most likely fail or take a very long time. On Termux, stick to the *core* installation without `[ui]`.
+
+---
+
+## 3. Quickstart (single run)
+
+The repository ships with example configuration files in `configs/`.  
+A good starting point is an **ICE‑1 middle car at 80 km/h** impacting a rigid obstacle.
+
+From the repository root, with the virtual environment activated:
+
+```bash
+railway-sim run \
   --config configs/ice1_80kmh.yml \
   --output-dir results/ice1_80
 ```
 
-- `--config` points to a YAML or JSON file describing:
-  - train geometry and masses
-  - Bouc–Wen material parameters
-  - contact and friction model
-  - integration settings (time step, duration, tolerances)
-- `--output-dir` is the directory where time histories and logs are written.
+This will:
 
-The CLI writes:
+- Load the YAML configuration `configs/ice1_80kmh.yml`
+- Run a single HHT‑α + Bouc–Wen simulation
+- Write a time history to `results/ice1_80/results.csv`
+- Create a detailed log file at `results/ice1_80/run.log`
 
-- `results.csv` – full time history (contact force, penetration, acceleration, energies, etc.)
-- a console summary with performance metrics (wall time, real-time factor, LU solves, FLOPs)
-- a log file with the same information and additional details (file name depends on prefix/output directory)
+The CSV typically contains columns such as
 
-Example with a filename prefix:
+- `Time_s`, `Time_ms`
+- Kinematic quantities for each mass
+- `Impact_Force_MN` (or similar) for the contact force
 
-```bash
-railway-sim \
-  --config configs/ice1_80kmh.yml \
-  --output-dir results/ice1_80 \
-  --prefix ice1_80
-```
+You can post‑process the CSV with your tool of choice (Pandas, Excel, MATLAB, etc.).
 
-### 3.2 Parametric studies & envelopes
+---
 
-The `parametric` subcommand runs a family of simulations at different speeds and builds an envelope and (optionally) a weighted mean history.
+## 4. Parametric study example
 
-Example: a line with 20% high-speed (TGV), 40% IC passenger traffic and 40% cargo:
+The CLI also supports parametric studies where a base configuration is re‑run for multiple speeds and combined into an envelope.
+
+Example: a **track mix** with 320 / 200 / 120 km/h, with usage weights 0.2 / 0.4 / 0.4, for the envelope of `Impact_Force_MN`:
 
 ```bash
 railway-sim parametric \
@@ -115,214 +109,191 @@ railway-sim parametric \
   --prefix track_mix
 ```
 
-- `--base-config` is a YAML/JSON config with the common train/contact/material setup.
-- `--speeds` defines a set of speeds in km/h and optional weights:
+This will:
 
-  - `"320:0.2,200:0.4,120:0.4"` → speeds 320, 200, 120 km/h with weights 0.2, 0.4, 0.4  
-  - `"80,120,160"` → speeds 80, 120, 160 km/h, all with weight 1.0
+- Build three scenarios:
+  - `v320`: 320 km/h, weight 0.2
+  - `v200`: 200 km/h, weight 0.4
+  - `v120`: 120 km/h, weight 0.4
+- Run all three simulations
+- Write the **envelope time history** to  
+  `results_parametric/track_mix/track_mix_Impact_Force_MN_envelope.csv`
+- Write a **scenario summary** (peaks, etc.) to  
+  `results_parametric/track_mix/track_mix_Impact_Force_MN_summary.csv`
+- Log performance statistics (wall‑clock time, time‑step info, FLOP estimates, …)
 
-- `--quantity` selects which result column to envelope (e.g. `Impact_Force_MN`, `Acceleration_g`, …).
+---
 
-The parametric command writes:
+## 5. ASCII plots (headless / Termux / SSH)
 
-- `track_mix_Impact_Force_MN_envelope.csv` – time histories of:
-  - `Impact_Force_MN_envelope` (pointwise max over scenarios)
-  - `Impact_Force_MN_weighted_mean` (weighted average over scenarios)
-- `track_mix_Impact_Force_MN_summary.csv` – per-scenario summary (peak, time of peak, LU solves, etc.)
-- a console summary with parametric performance metrics
+For headless environments you can enable an ASCII plot directly in the terminal.  
+This is useful on:
 
-### 3.3 CLI plotting options
+- SSH sessions without X forwarding
+- Android / Termux
+- Minimal containers
 
-Both `run` and `parametric` support simple plotting directly from the CLI:
-
-- ASCII plot (printed in terminal)
-- Matplotlib window (interactive popup)
-
-Single run example:
+Add the `--ascii-plot` flag:
 
 ```bash
-railway-sim \
+railway-sim run \
   --config configs/ice1_80kmh.yml \
-  --output-dir results/ice1_80 \
-  --ascii-plot \
-  --plot
+  --output-dir results/ice1_80_ascii \
+  --ascii-plot
 ```
 
-Parametric example (envelope of `Impact_Force_MN`):
+and for a parametric envelope:
 
 ```bash
 railway-sim parametric \
   --base-config configs/ice1_80kmh.yml \
   --speeds "320:0.2,200:0.4,120:0.4" \
   --quantity Impact_Force_MN \
-  --output-dir results_parametric/track_mix \
+  --output-dir results_parametric/track_mix_ascii \
   --prefix track_mix \
-  --ascii-plot \
-  --plot
+  --ascii-plot
 ```
 
-The CLI ensures that both axes start at zero (`x >= 0`, `y >= 0`) for these quick-look plots.
-
-### 3.4 Logging & performance metrics
-
-Each CLI run prints performance metrics such as:
-
-- wall-clock time
-- simulated time span
-- number of time steps
-- min/mean/max Δt
-- real-time factor (simulated time / wall time)
-- approximate number of linear solves and DOFs
-- estimated LU FLOPs and FLOP/s
-
-The same information is written into a log file in the chosen `--output-dir`, together with additional metadata about the configuration and (for parametric runs) the scenario list.
-
-### 3.5 PDF report generation
-
-For documentation and reporting, you can generate a compact PDF report that summarises:
-
-- key input parameters
-- envelope or single-run curves
-- performance metrics
-- basic plots of the selected quantity
-
-Enable it with `--pdf-report`:
-
-```bash
-railway-sim parametric \
-  --base-config configs/ice1_80kmh.yml \
-  --speeds "320:0.2,200:0.4,120:0.4" \
-  --quantity Impact_Force_MN \
-  --output-dir results_parametric/track_mix \
-  --prefix track_mix \
-  --pdf-report
-```
-
-The CLI prints the path of the generated PDF report on success.  
-On desktop systems, the default behaviour is to try to open the report with the system PDF viewer.
-
----
-
-## 4. Streamlit application
-
-For interactive studies, launch the Streamlit app from the repository root:
-
-```bash
-streamlit run src/railway_simulator/core/app.py
-```
-
-The app provides:
-
-**Sidebar controls for:**
-
-- train configuration (research locomotive model and generic passenger/freight presets)
-- Bouc–Wen material parameters and presets (e.g. aluminium vs steel)
-- contact and friction models
-- HHT-α time integration settings
-- optional SDOF building/pier model
-- basic parametric settings for quick speed sweeps and envelopes
-
-**Plots for:**
-
-- impact force, penetration and acceleration over time
-- force–penetration hysteresis, including contact backbone
-- energy components and overall energy balance
-- (optionally) envelopes over a set of speeds
-
-**Optional outputs:**
-
-- SDOF building response (displacement, velocity, acceleration)
-- building hysteresis (linear or Takeda-type)
-- force-based response spectra for different damping ratios
-- export of the full time history as CSV, TXT or XLSX
-
----
-
-## 5. Repository layout
-
-Main elements:
-
-- `pyproject.toml`  
-  Project metadata, dependencies and CLI entry point (`railway-sim`).
-
-- `configs/`  
-  Example configuration files (YAML), e.g.:
-  - `ice1_80kmh.yml` – ICE-1 / Pioneer-type impact around 80 km/h.
-
-- `examples/`  
-  Small scripts demonstrating parametric usage, e.g.:
-  - `parametric_line_mix.py` – build a simple line mix (TGV / IC / cargo) and call the CLI.
-
-- `src/railway_simulator/` – Python package:
-  - `__init__.py` – package metadata and public API
-  - `cli.py` – command-line interface (`railway-sim`)
-  - `core/engine.py` – numerical engine (HHT-α + Bouc–Wen + contact + friction + energy bookkeeping)
-  - `core/app.py` – Streamlit application
-  - `core/parametric.py` – helpers for parametric studies and envelopes
-  - `core/report.py` – helper for generating PDF reports
-  - `core/__init__.py` – core exports
-
-- `VALIDATION_Pioneer.md`  
-  Validation against the FRA Pioneer wagon crash test.
-
-- `LICENSE`  
-  MIT license for the software.
-
----
-
-## 6. Validation
-
-The default configuration is based on a single passenger wagon impacting a rigid wall at approximately 80 km/h (Pioneer wagon crash test).
-
-Validation covers:
-
-- peak and plateau impact forces  
-- impact duration  
-- energy dissipation  
-- force–displacement hysteresis  
-
-Details, references and acceptance criteria are given in `VALIDATION_Pioneer.md`.
-
----
-
-## 7. Citing
-
-If you use this code or the underlying methodology, please cite both the software and the research report.
-
-### Software
+At the end of the run, the CLI prints an ASCII envelope such as:
 
 ```text
-Labbé, S. (2025). Railway Impact Simulator: HHT-α implicit integration
-with Bouc–Wen hysteresis [Computer software].
-https://github.com/sflabbe/railway-impact-simulator
+ASCII envelope plot (Impact_Force_MN vs Time_ms):
+# Impact_Force_MN_envelope envelope
+            ***
+           *  *
+          *    *
+        **      *
+      ***        *
+    ***           *
+***                ***************
+# Time [ms] (0 – 400)
 ```
 
-### Research report
-
-```text
-Stempniewski, L., Labbé, S., Siegel, S., & Bosch, R. (2024).
-Überprüfung und Anpassung der Anpralllasten aus dem Eisenbahnverkehr
-(DZSF Bericht No. 53). Deutsches Zentrum für Schienenverkehrsforschung
-beim Eisenbahn-Bundesamt. https://doi.org/10.48755/dzsf.240006.01
-```
+(Shape and scale depend on the configuration, this is just a schematic example.)
 
 ---
 
-## 8. Licenses and disclaimer
+## 6. Configuration files
 
-### Software
+Configuration is provided via **YAML** (or JSON) files passed to `--config` / `--base-config`.
 
-The code in this repository is:
+Internally, the CLI does roughly:
 
-> © 2025 Sebastián Labbé  
-> Licensed under the MIT License. See `LICENSE`.
+1. Load a default parameter dictionary from `get_default_simulation_params()`
+2. Load your config file into a flat dictionary
+3. Override default values with those found in the config
+4. Create a `SimulationParams` object and run the solver
 
-### Research report
+Some important notes:
 
-The underlying DZSF research report is licensed under:
+- Keys in your YAML must match the fields of `SimulationParams`.  
+  If you add unknown keys, you will get errors like  
+  `SimulationParams.__init__() got an unexpected keyword argument 'foo'`.
+- The provided example configs under `configs/` are the best reference for valid keys and units.
+- You normally **do not** wrap parameters in extra levels like `scenario:` or `output:` in your own configs, unless you wired your own loader around the core engine.
 
-> Creative Commons Attribution 4.0 International (CC BY 4.0)  
-> https://creativecommons.org/licenses/by/4.0/
+A minimal example that only overrides a couple of defaults could look like:
 
-This implementation is provided without warranty and does not replace a full structural design according to the applicable standards.  
-For safety-critical applications, use the tool only together with professional engineering judgement and the relevant design codes.
+```yaml
+# quickstart.yml
+# Only keys listed here override the internal defaults.
+
+v0_init: -22.22     # [m/s] initial train velocity (sign convention from the model)
+T_end: 0.40         # total simulated time [s], exact name depends on SimulationParams
+```
+
+> ⚠️ The exact parameter names (`T_end`, `v0_init`, etc.) should follow the ones used in the existing example configs and the `SimulationParams` definition.
+
+---
+
+## 7. Termux / Android notes
+
+It is possible (though a bit masochistic) to run the simulator on Android via **Termux**.  
+The recommended approach is:
+
+1. Install base packages in Termux:
+
+   ```bash
+   pkg update
+   pkg upgrade
+
+   pkg install python python-pip \
+               numpy scipy pandas matplotlib \
+               clang cmake pkg-config
+   ```
+
+2. Clone the repository and create a virtual environment that can see the system‑wide scientific stack:
+
+   ```bash
+   git clone https://github.com/sflabbe/railway-impact-simulator.git
+   cd railway-impact-simulator
+
+   python -m venv .venv --system-site-packages
+   source .venv/bin/activate
+   ```
+
+3. Install the **core** package only (no UI extras):
+
+   ```bash
+   pip install --no-build-isolation .
+   ```
+
+4. Test the CLI:
+
+   ```bash
+   railway-sim run \
+     --config configs/ice1_80kmh.yml \
+     --output-dir results/ice1_80
+   ```
+
+   and optionally:
+
+   ```bash
+   railway-sim parametric \
+     --base-config configs/ice1_80kmh.yml \
+     --speeds "320:0.2,200:0.4,120:0.4" \
+     --quantity Impact_Force_MN \
+     --output-dir results_parametric/track_mix \
+     --prefix track_mix \
+     --ascii-plot
+   ```
+
+> ⚠️ Do **not** try to install the `[ui]` extra on Termux: `pyarrow` will attempt to build the full Apache Arrow C++ stack and will most likely fail or be extremely slow on a phone.
+
+---
+
+## 8. Development
+
+To work on the code base:
+
+```bash
+git clone https://github.com/sflabbe/railway-impact-simulator.git
+cd railway-impact-simulator
+
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+
+# Install in editable mode with core dependencies
+pip install --no-build-isolation -e .
+```
+
+You can then:
+
+- Modify files under `src/railway_simulator/`
+- Run the CLI (`railway-sim`) and your changes will be picked up automatically
+- Add / update example configs under `configs/`
+
+---
+
+## 9. License
+
+This project is released under the **MIT License**.  
+See the [`LICENSE`](LICENSE) file for full text.
+
+---
+
+## 10. Citation
+
+If you use this simulator in academic work, you may cite it along with the DZSF research report on which the model is based.  
+(Insert your preferred citation / DOI here once available.)

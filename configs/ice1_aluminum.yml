@@ -1,0 +1,98 @@
+# ICE-1 middle car – aluminum-like behaviour
+# Standardised lumped mass / distance / stiffness configuration.
+# Speed is NOT fixed here; set it via CLI: --speed-kmh or --v0-init.
+
+# -----------------------------
+# Train geometry (7 lumped masses)
+# -----------------------------
+n_masses: 7
+
+# Masses of the lumped nodes [kg]
+masses:
+  - 4000.0
+  - 10000.0
+  - 4000.0
+  - 4000.0
+  - 4000.0
+  - 10000.0
+  - 4000.0
+
+# Longitudinal positions of the masses [m]
+# (measured from the front node)
+x_init:
+  - 1.50
+  - 4.50
+  - 8.00
+  - 11.50
+  - 15.00
+  - 18.50
+  - 21.50
+
+# Vertical positions [m] (all on track axis)
+y_init:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+
+# -----------------------------
+# Bouc–Wen springs (between masses)
+# -----------------------------
+# Aluminum train: lower Fy and larger uy (softer)
+# 6 springs for 7 masses
+fy:        # [N]
+  - 8.0e6
+  - 8.0e6
+  - 8.0e6
+  - 8.0e6
+  - 8.0e6
+  - 8.0e6
+
+uy:        # [m]
+  - 0.10   # 100 mm
+  - 0.10
+  - 0.10
+  - 0.10
+  - 0.10
+  - 0.10
+
+# Bouc–Wen shape parameters
+bw_a: 0.0
+bw_A: 1.0
+bw_beta: 0.10
+bw_gamma: 0.90
+bw_n: 8
+
+# -----------------------------
+# Contact / wall
+# -----------------------------
+# Stiff RC abutment, order of magnitude from your defaults
+k_wall: 6.0e7      # [N/m]
+cr_wall: 0.80      # coefficient of restitution [-]
+contact_model: "lankarani-nikravesh"
+
+# -----------------------------
+# Friction model (between train and rail)
+# -----------------------------
+friction_model: "lugre"
+mu_s: 0.40
+mu_k: 0.30
+sigma_0: 1.0e5
+sigma_1: 3.16e2
+sigma_2: 0.40
+
+# -----------------------------
+# Time integration (can be overridden via defaults / UI)
+# -----------------------------
+h_init: 1.0e-4     # time step [s]
+T_max: 0.40        # total simulation time [s]
+alpha_hht: -0.10
+newton_tol: 1.0e-4
+max_iter: 50
+
+# Angle and gap (may be overwritten by CLI or UI)
+angle_rad: 0.0
+d0: 0.0

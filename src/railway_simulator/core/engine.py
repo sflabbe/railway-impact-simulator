@@ -1,24 +1,30 @@
 """
-Numerical engine for the Railway Impact Simulator.
+Engine 1 (Picard) for the Railway Impact Simulator.
 
 This module is UI-agnostic: it contains the HHT-α time integration,
 Bouc–Wen hysteresis, friction and contact laws, and the main
 ImpactSimulator class.
 
-Use from your Streamlit app (or tests) as:
+Nonlinear solver
+----------------
+This engine uses a fixed-point iteration in acceleration (Picard-type)
+on top of HHT-α. The tolerance parameter is called `newton_tol` for
+historical reasons, but this is **not** a full Newton–Raphson scheme.
 
-    from core.engine import SimulationParams, run_simulation
+Use from CLI, Streamlit app or tests as:
+
+    from railway_simulator.core.engine import SimulationParams, run_simulation
 
     sim_params = SimulationParams(**params_dict)
     df = run_simulation(sim_params)
 
+For a future true Newton–Raphson variant, see `core.engine_newton`.
 """
 
+
 from __future__ import annotations
-
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Tuple, Dict, Any
-
 import logging
 import numpy as np
 import pandas as pd
@@ -568,14 +574,19 @@ class HHTAlphaIntegrator:
 # ====================================================================
 
 class ImpactSimulator:
-    """Main HHT-α simulation engine with Newton iterations."""
+    """Main HHT-α simulation engine with fixed-point iterations (Picard-type).
+
+    This is the baseline engine used by the CLI and the Streamlit app.
+    A second engine with a true Newton–Raphson scheme can be implemented
+    cleanly in `core.engine_newton` using the same SimulationParams.
+    """
 
     def __init__(self, params: SimulationParams):
         self.params = params
 
         # Performance counters
         self.linear_solves: int = 0
-        self.total_newton_iters: int = 0
+        self.total_iters: int = 0  # renamed (no "newton" in the name)
 
         self.setup()
 
@@ -775,7 +786,7 @@ class ImpactSimulator:
 
                 # --- Corrector: update acceleration ---
                 qpp_old = qpp[:, step_idx + 1].copy()
-        
+    
                 qpp[:, step_idx + 1] = self.integrator.compute_acceleration(
                     self.M,
                     R_internal[:, step_idx + 1], R_internal[:, step_idx],
@@ -785,23 +796,24 @@ class ImpactSimulator:
                     qp[:, step_idx + 1],
                     qp[:, step_idx],
                 )
-        
-                # One dense linear solve per Newton iteration
+    
+                # One dense linear solve per nonlinear iteration
                 self.linear_solves += 1
-                self.total_newton_iters += 1
-        
+                self.total_iters += 1
+    
                 # Convergence check
                 err = self._check_convergence(qpp[:, step_idx + 1], qpp_old)
                 if err < self.params.newton_tol:
                     converged = True
                     break
-
+    
             if not converged:
                 logger.warning(
-                    "Newton did not converge at step %d (rel Δa = %.3e)",
+                    "Nonlinear solver did not converge at step %d (rel Δa = %.3e)",
                     step_idx,
                     err,
                 )
+
 
             # --------------------------------------------------
             # Energy bookkeeping (after convergence)
@@ -1011,10 +1023,12 @@ class ImpactSimulator:
 
     @staticmethod
     def _check_convergence(qpp_new: np.ndarray, qpp_old: np.ndarray) -> float:
-        """Relative change in acceleration."""
+        """Symmetric relative change in acceleration."""
         delta = qpp_new - qpp_old
-        norm_new = np.linalg.norm(qpp_new) + 1e-16
-        return np.linalg.norm(delta) / norm_new
+        norm_new = np.linalg.norm(qpp_new)
+        norm_old = np.linalg.norm(qpp_old)
+        denom = norm_new + norm_old + 1e-16
+        return 2.0 * np.linalg.norm(delta) / denom
 
     def _build_results_dataframe(
         self,
@@ -1090,6 +1104,7 @@ class ImpactSimulator:
             df.attrs["n_dof"] = self.M.shape[0]
             df.attrs["n_masses"] = self.params.n_masses
             df.attrs["n_lu"] = getattr(self.integrator, "n_lu", 0)
+            df.attrs["n_nonlinear_iters"] = self.total_iters
         except Exception:
             # Metadata is best-effort; never break the simulation because of it
             logger.debug(
@@ -1194,17 +1209,156 @@ def get_default_simulation_params() -> dict:
 
 def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
     """
-    High-level convenience wrapper.
+    High-level convenience wrapper (engine v1: HHT-α + fixed-point in acceleration).
 
-    If a dict is passed, it may contain only overrides; missing fields are
-    filled from get_default_simulation_params().
+    - If a dict is passed, it may contain only overrides; missing fields are
+      filled from get_default_simulation_params(), and all types are normalised
+      (floats/ints/arrays).
+    - If a SimulationParams instance is passed, we still run it through the
+      same normalisation pipeline to be robust against objects constructed
+      directly from raw YAML/JSON dicts.
     """
     if isinstance(params, SimulationParams):
-        sim_params = params
+        # Dataclass -> plain dict
+        raw = {f.name: getattr(params, f.name) for f in fields(SimulationParams)}
     else:
+        # Dict of overrides coming from CLI / YAML
         base = get_default_simulation_params()
-        base.update(params)  # config overrides default
-        sim_params = SimulationParams(**base)
+        base.update(params or {})
+        raw = base
+
+    coerced = _coerce_scalar_types_for_simulation(raw)
+    sim_params = SimulationParams(**coerced)
 
     simulator = ImpactSimulator(sim_params)
     return simulator.run()
+
+def _coerce_scalar_types_for_simulation(base: dict) -> dict:
+    """
+    Normalize types coming from YAML/JSON before constructing SimulationParams.
+
+    - Convert scalar fields that should be floats (incl. things that may come
+      as strings like '1.0e5', '6.0e7') to float.
+    - Convert integer fields to int.
+    - Convert list-like fields for masses/positions/stiffnesses to float arrays.
+    - Normalise T_int to a 2-tuple of floats (default: (0.0, T_max)).
+    """
+    data: dict = dict(base)  # shallow copy
+
+    def _to_float(val, name: str):
+        if val is None:
+            return None
+        if isinstance(val, (float, int)):
+            return float(val)
+        if isinstance(val, str):
+            try:
+                return float(val)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Parameter '{name}' expects a float-compatible value, "
+                    f"got {val!r} (type {type(val).__name__})."
+                ) from exc
+        # Para cualquier cosa exótica, fallar fuerte y claro
+        raise TypeError(
+            f"Parameter '{name}' expects a scalar float, got {val!r} "
+            f"(type {type(val).__name__})."
+        )
+
+    def _to_int(val, name: str):
+        if val is None:
+            return None
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Parameter '{name}' expects an int-compatible value, "
+                    f"got {val!r} (type {type(val).__name__})."
+                ) from exc
+        raise TypeError(
+            f"Parameter '{name}' expects an int, got {val!r} "
+            f"(type {type(val).__name__})."
+        )
+
+    # --- Scalars that should be floats ---------------------------------
+    scalar_float_keys = [
+        # geometry / kinematics
+        "v0_init",
+        "angle_rad",
+        "d0",
+        # wall / contact
+        "k_wall",
+        "cr_wall",
+        # building
+        "building_mass",
+        "building_zeta",
+        "building_height",
+        "building_uy",
+        "building_uy_mm",
+        "building_alpha",
+        "building_gamma",
+        # friction
+        "mu_s",
+        "mu_k",
+        "sigma_0",
+        "sigma_1",
+        "sigma_2",
+        # Bouc-Wen
+        "bw_a",
+        "bw_A",
+        "bw_beta",
+        "bw_gamma",
+        # HHT and solver
+        "alpha_hht",
+        "newton_tol",
+        "h_init",
+        "T_max",
+    ]
+
+    for key in scalar_float_keys:
+        if key in data and data[key] is not None:
+            data[key] = _to_float(data[key], key)
+
+    # --- Scalars that should be ints ------------------------------------
+    int_keys = [
+        "n_masses",
+        "max_iter",
+        "step",
+        "bw_n",
+    ]
+
+    for key in int_keys:
+        if key in data and data[key] is not None:
+            data[key] = _to_int(data[key], key)
+
+    # --- Arrays: coerce entries to float (handles '8.0e6' strings) ------
+    array_float_keys = [
+        "masses",
+        "x_init",
+        "y_init",
+        "fy",
+        "uy",
+    ]
+
+    for key in array_float_keys:
+        if key in data and data[key] is not None:
+            data[key] = np.asarray(data[key], dtype=float)
+
+    # --- Time interval T_int --------------------------------------------
+    if "T_int" in data and data["T_int"] is not None:
+        T_int = data["T_int"]
+        if isinstance(T_int, (list, tuple)) and len(T_int) == 2:
+            t0, t1 = T_int
+            data["T_int"] = (float(t0), float(t1))
+        else:
+            raise ValueError(
+                f"Parameter 'T_int' must be a 2-tuple/list, got {T_int!r}"
+            )
+    else:
+        # If not provided, derive from T_max when available
+        if "T_max" in data and data["T_max"] is not None:
+            data["T_int"] = (0.0, float(data["T_max"]))
+
+    return data

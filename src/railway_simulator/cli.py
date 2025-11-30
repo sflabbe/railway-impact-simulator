@@ -330,7 +330,7 @@ def run(
         "-c",
         exists=True,
         readable=True,
-        help="YAML/JSON configuration file.",
+        help="YAML/JSON configuration file (train, contact, material, etc.).",
     ),
     output_dir: Path = typer.Option(
         Path("results"),
@@ -343,6 +343,28 @@ def run(
         "--prefix",
         "-p",
         help="Optional filename prefix for output files.",
+    ),
+    # Override impact speed using km/h
+    speed_kmh: Optional[float] = typer.Option(
+        None,
+        "--speed-kmh",
+        "-v",
+        help=(
+            "Impact speed in km/h. "
+            "If given, overrides v0_init from the config. "
+            "Use positive values; the code applies the negative sign "
+            "for motion towards the barrier."
+        ),
+    ),
+    # Direct override of v0_init in m/s
+    v0_init: Optional[float] = typer.Option(
+        None,
+        "--v0-init",
+        help=(
+            "Impact velocity [m/s]. If given, overrides both --speed-kmh and any "
+            "v0_init found in the config. "
+            "Use a negative value for motion towards the barrier."
+        ),
     ),
     ascii_plot: bool = typer.Option(
         False,
@@ -365,46 +387,98 @@ def run(
 
     Examples
     --------
-    Basic ICE-1 / Pioneer-style impact at 80 km/h:
+    Use a standard train configuration from YAML and set only the speed:
 
         railway-sim run \\
-          --config configs/ice1_80kmh.yml \\
+          --config configs/trains/ice1_aluminum.yml \\
+          --speed-kmh 80 \\
           --output-dir results/ice1_80
 
     Same run with ASCII plot, matplotlib popup and PDF report:
 
         railway-sim run \\
-          --config configs/ice1_80kmh.yml \\
+          --config configs/trains/ice1_aluminum.yml \\
+          --speed-kmh 80 \\
           --output-dir results/ice1_80 \\
           --ascii-plot --plot --pdf-report
     """
+    # ------------------------------------------------------------------
+    # Setup I/O and logging
+    # ------------------------------------------------------------------
     _ensure_output_dir(output_dir)
-    ...
 
-
-    if prefix:
-        base = f"{prefix}_"
-    else:
-        base = ""
-
-    log_stem = f"{base}run"
+    filename_prefix = f"{prefix}_" if prefix else ""
+    log_stem = f"{filename_prefix}run"
     logger = _setup_logger(output_dir, log_stem)
 
+    # ------------------------------------------------------------------
+    # Load configuration
+    # ------------------------------------------------------------------
     _print_and_log(logger, f"Loading config: {config}")
     params = _load_config(config)
 
+    # ------------------------------------------------------------------
+    # Velocity handling (CLI overrides vs config)
+    # ------------------------------------------------------------------
+    velocity_source = "config"
+
+    if v0_init is not None:
+        # Strongest override: explicit v0 in m/s
+        params["v0_init"] = float(v0_init)
+        velocity_source = "CLI v0-init [m/s]"
+        _print_and_log(
+            logger,
+            f"Overriding v0_init from CLI: v0_init = {params['v0_init']:.4f} m/s",
+        )
+    elif speed_kmh is not None:
+        # Second level: speed in km/h
+        params["v0_init"] = -float(speed_kmh) / 3.6
+        velocity_source = "CLI speed-kmh"
+        _print_and_log(
+            logger,
+            f"Overriding speed from CLI: speed = {speed_kmh:.2f} km/h "
+            f"(v0_init = {params['v0_init']:.4f} m/s towards barrier)",
+        )
+    else:
+        # No CLI override -> rely on config, but normalise type and check existence
+        if "v0_init" not in params:
+            raise typer.BadParameter(
+                "No impact speed specified. Provide v0_init in the config, "
+                "--speed-kmh, or --v0-init."
+            )
+        try:
+            params["v0_init"] = float(params["v0_init"])
+        except (TypeError, ValueError):
+            raise typer.BadParameter(
+                f"Config parameter 'v0_init' must be a float-compatible value, "
+                f"got {params['v0_init']!r}"
+            )
+        _print_and_log(
+            logger,
+            f"Using v0_init from config: v0_init = {params['v0_init']:.4f} m/s",
+        )
+
+    # ------------------------------------------------------------------
+    # Run simulation
+    # ------------------------------------------------------------------
     _print_and_log(logger, "Running simulation ...")
     t0 = time.perf_counter()
     results_df = run_simulation(params)
     wall_time = time.perf_counter() - t0
 
     perf = _compute_single_run_performance(results_df, wall_time, params)
+    perf["velocity_source"] = velocity_source
 
-    csv_path = output_dir / f"{base}results.csv"
+    # ------------------------------------------------------------------
+    # Write results
+    # ------------------------------------------------------------------
+    csv_path = output_dir / f"{filename_prefix}results.csv"
     _print_and_log(logger, f"Writing time history to {csv_path}")
     results_df.to_csv(csv_path, index=False)
 
-    # Performance output
+    # ------------------------------------------------------------------
+    # Performance output (console + log)
+    # ------------------------------------------------------------------
     typer.echo("")
     typer.echo("Single-run performance:")
     typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
@@ -422,14 +496,17 @@ def run(
     typer.echo(
         f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s"
     )
+    typer.echo(f"  Velocity source       : {perf['velocity_source']}")
 
     logger.info("Single-run performance: %s", perf)
 
-   # PDF report FIRST – so it's created even if the plot window blocks
+    # ------------------------------------------------------------------
+    # PDF report (before any blocking plot)
+    # ------------------------------------------------------------------
     if pdf_report:
         from .core.report import generate_single_run_report
 
-        pdf_path = output_dir / f"{base}report.pdf"
+        pdf_path = output_dir / f"{filename_prefix}report.pdf"
         logger.info("Generating PDF report: %s", pdf_path)
         try:
             generate_single_run_report(results_df, perf, params, pdf_path)
@@ -441,7 +518,9 @@ def run(
         except Exception:
             logger.exception("Failed to generate single-run PDF report.")
 
+    # ------------------------------------------------------------------
     # ASCII plot
+    # ------------------------------------------------------------------
     if ascii_plot:
         typer.echo("")
         typer.echo("ASCII impact plot (Impact_Force_MN vs Time_ms):")
@@ -454,7 +533,9 @@ def run(
         typer.echo(ascii_str)
         logger.info("ASCII plot:\n%s", ascii_str)
 
+    # ------------------------------------------------------------------
     # Matplotlib plot (blocking)
+    # ------------------------------------------------------------------
     if plot:
         t_ms = results_df["Time_ms"].to_numpy()
         F = results_df["Impact_Force_MN"].to_numpy()
@@ -469,6 +550,9 @@ def run(
         ax.legend()
         plt.show()
 
+    # ------------------------------------------------------------------
+    # Final log
+    # ------------------------------------------------------------------
     log_file = output_dir / f"{log_stem}.log"
     typer.echo(f"\nDetailed log written to {log_file}")
     logger.info("Run completed.")

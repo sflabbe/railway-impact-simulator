@@ -1,0 +1,26 @@
+data/processed/
+data/raw/
+*.xlsx
+*.csv
+
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+
+# Build / packaging artefacts
+*.egg-info/
+dist/
+build/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Local data
+data/processed/
+data/raw/
+
+# Jupyter / pytest / Streamlit
+.ipynb_checkpoints/
+.pytest_cache/
+.streamlit/

@@ -314,14 +314,6 @@ Finite element comparison by:
 
 ---
 
-## Quality Assurance
-
-**Validation Status:** ✅ VALIDATED  
-**Validation Date:** November 2024  
-**Validated By:** Sebastián Labbé  
-**Validation Method:** Comparison with FRA experimental data  
-**Agreement Level:** Good (peak values within 20%, qualitative behavior excellent)
-
 **Recommended Use Cases:**
 - ✅ Preliminary design of impact barriers
 - ✅ Estimation of impact forces for structural design

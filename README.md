@@ -53,7 +53,7 @@ Gotthard-Franz-Straße 3
 76131 Karlsruhe, Germany
 
 **Steffen Siegel**
-**M.Sc.**  
+**Robin Bosch**  
 Siegel und Wünschel beratende Ingenieure  
 Partnerschaftsgesellschaft mbB  
 Zehntwiesenstraße 35a  

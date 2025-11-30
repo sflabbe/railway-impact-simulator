@@ -208,7 +208,7 @@ T_end: 0.40         # total simulated time [s], exact name depends on Simulation
 
 ## 7. Termux / Android notes
 
-It is possible (though a bit masochistic) to run the simulator on Android via **Termux**.  
+It is possible to run the simulator on Android via **Termux**.  
 The recommended approach is:
 
 1. Install base packages in Termux:

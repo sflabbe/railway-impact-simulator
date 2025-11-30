@@ -44,16 +44,16 @@ This simulator implements the methodologies described in the comprehensive resea
 
 ## Research Authors
 
-**Univ.-Prof. Dr.-Ing. Lothar Stempniewski**  
-**Dipl.-Ing. Sebastián Labbé**  
+**Lothar Stempniewski**  
+**Sebastián Labbé**  
 Karlsruher Institut für Technologie (KIT)  
 Institut für Massivbau und Baustofftechnologie  
 Abteilung Massivbau  
 Gotthard-Franz-Straße 3  
 76131 Karlsruhe, Germany
 
-**Dr.-Ing. Steffen Siegel**
-**Robin Bosch, M.Sc.**  
+**Steffen Siegel**
+**M.Sc.**  
 Siegel und Wünschel beratende Ingenieure  
 Partnerschaftsgesellschaft mbB  
 Zehntwiesenstraße 35a  

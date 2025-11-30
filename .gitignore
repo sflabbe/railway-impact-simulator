@@ -24,3 +24,10 @@ data/raw/
 .ipynb_checkpoints/
 .pytest_cache/
 .streamlit/
+
+# Simulation outputs
+results/
+results_parametric/
+*.log
+*.pdf
+

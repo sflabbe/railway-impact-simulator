@@ -19,10 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple, Dict, Any
 
+import logging
 import numpy as np
 import pandas as pd
 from scipy.constants import g as GRAVITY
 
+logger = logging.getLogger(__name__)
 
 # ====================================================================
 # CONFIGURATION & DATA CLASSES
@@ -501,6 +503,10 @@ class HHTAlphaIntegrator:
         self.beta = 0.25 * (1.0 + alpha) ** 2
         self.gamma = 0.5 + alpha
 
+        # Count of linear solves (LU) performed in this run
+        self.n_lu: int = 0
+
+
     def predict(self, q: np.ndarray, qp: np.ndarray, qpp: np.ndarray,
                 qpp_new: np.ndarray, h: float) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -552,6 +558,8 @@ class HHTAlphaIntegrator:
             self.alpha * (C @ qp_old)
         )
 
+        # Count this linear solve (dense LU)
+        self.n_lu += 1
         return np.linalg.solve(M, force)
 
 
@@ -564,6 +572,11 @@ class ImpactSimulator:
 
     def __init__(self, params: SimulationParams):
         self.params = params
+
+        # Performance counters
+        self.linear_solves: int = 0
+        self.total_newton_iters: int = 0
+
         self.setup()
 
     # ----------------------------------------------------------------
@@ -572,6 +585,20 @@ class ImpactSimulator:
     def setup(self):
         """Initialize simulation matrices and state."""
         p = self.params
+
+        # ------------------------------------------------------------------
+        # Normalise core arrays and scalar types
+        # ------------------------------------------------------------------
+        p.masses = np.asarray(p.masses, dtype=float)
+        p.x_init = np.asarray(p.x_init, dtype=float)
+        p.y_init = np.asarray(p.y_init, dtype=float)
+        p.fy = np.asarray(p.fy, dtype=float)
+        p.uy = np.asarray(p.uy, dtype=float)
+
+        p.n_masses = int(p.n_masses)
+        p.step = int(p.step)
+        p.h_init = float(p.h_init)
+        p.T_max = float(p.T_max)
 
         # Time discretization
         self.h = p.h_init
@@ -590,8 +617,8 @@ class ImpactSimulator:
         self.x_init = xy_init[0, :]
         self.y_init = xy_init[1, :]
 
-        xp_init = np.full(p.n_masses, p.v0_init)
-        yp_init = np.zeros(p.n_masses)
+        xp_init = np.full(p.n_masses, p.v0_init, dtype=float)
+        yp_init = np.zeros(p.n_masses, dtype=float)
         xpyp_init = self.rot @ np.vstack([xp_init, yp_init])
         self.xp_init = xpyp_init[0, :]
         self.yp_init = xpyp_init[1, :]
@@ -618,6 +645,7 @@ class ImpactSimulator:
 
         # HHT integrator
         self.integrator = HHTAlphaIntegrator(p.alpha_hht)
+
 
     # ----------------------------------------------------------------
     # RUN
@@ -672,14 +700,14 @@ class ImpactSimulator:
 
         # Time stepping
         for step_idx in range(p.step):
-
+        
             # Initial guess for a_{n+1}
             qpp[:, step_idx + 1] = qpp[:, step_idx]
-
+        
             converged = False
             err = np.inf
-
-            for _ in range(p.max_iter):
+        
+            for it in range(p.max_iter):
                 # Reset forces for this iteration
                 R_internal[:, step_idx + 1] = 0.0
                 R_contact[:, step_idx + 1] = 0.0
@@ -747,7 +775,7 @@ class ImpactSimulator:
 
                 # --- Corrector: update acceleration ---
                 qpp_old = qpp[:, step_idx + 1].copy()
-
+        
                 qpp[:, step_idx + 1] = self.integrator.compute_acceleration(
                     self.M,
                     R_internal[:, step_idx + 1], R_internal[:, step_idx],
@@ -757,7 +785,11 @@ class ImpactSimulator:
                     qp[:, step_idx + 1],
                     qp[:, step_idx],
                 )
-
+        
+                # One dense linear solve per Newton iteration
+                self.linear_solves += 1
+                self.total_newton_iters += 1
+        
                 # Convergence check
                 err = self._check_convergence(qpp[:, step_idx + 1], qpp_old)
                 if err < self.params.newton_tol:
@@ -765,10 +797,10 @@ class ImpactSimulator:
                     break
 
             if not converged:
-                # No Streamlit here; just print to console/log
-                print(
-                    f"[ImpactSimulator] Newton did not converge at step {step_idx} "
-                    f"(rel Δa = {err:.3e})"
+                logger.warning(
+                    "Newton did not converge at step %d (rel Δa = %.3e)",
+                    step_idx,
+                    err,
                 )
 
             # --------------------------------------------------
@@ -842,6 +874,9 @@ class ImpactSimulator:
     ):
         """
         Compute friction forces per mass node and distribute to x/z DOFs.
+
+        If friction is disabled (model 'none' or zero coefficients),
+        we simply copy the internal state and return zeros.
         """
         p = self.params
         n = p.n_masses
@@ -850,6 +885,28 @@ class ImpactSimulator:
         assert FN_node.shape[0] == n
         assert qp.shape[0] == dof
 
+        # --------------------------------------------------------------
+        # Early exit: friction disabled or coefficients zero
+        # --------------------------------------------------------------
+        friction_off = (
+            p.friction_model in ("none", "off", "", None)
+            or (abs(p.mu_s) < 1e-12 and abs(p.mu_k) < 1e-12)
+            or (
+                abs(p.sigma_0) < 1e-12
+                and abs(p.sigma_1) < 1e-12
+                and abs(p.sigma_2) < 1e-12
+            )
+        )
+
+        if friction_off:
+            # No new friction forces, just carry forward the internal state
+            R_friction[:, step_idx + 1] = 0.0
+            z_friction[:, step_idx + 1] = z_friction[:, step_idx]
+            return
+
+        # --------------------------------------------------------------
+        # Full friction computation (LuGre/Dahl/etc.)
+        # --------------------------------------------------------------
         R_friction[:, step_idx + 1] = 0.0
 
         Fc_node = p.mu_k * np.abs(FN_node)
@@ -884,7 +941,7 @@ class ImpactSimulator:
                         v_t, Fc_node[i], Fs_node[i], vs
                     )
                 else:
-                    # Default: LuGre
+                    # Fallback: LuGre
                     F_tmp, z_new = FrictionModels.lugre(
                         z_prev, v_t, Fc_node[i], Fs_node[i], vs,
                         p.sigma_0, p.sigma_1, p.sigma_2, self.h
@@ -1028,31 +1085,126 @@ class ImpactSimulator:
             }
         )
 
-        return df
+        # Attach some solver statistics as DataFrame metadata
+        try:
+            df.attrs["n_dof"] = self.M.shape[0]
+            df.attrs["n_masses"] = self.params.n_masses
+            df.attrs["n_lu"] = getattr(self.integrator, "n_lu", 0)
+        except Exception:
+            # Metadata is best-effort; never break the simulation because of it
+            logger.debug(
+                "Could not attach solver statistics to results DataFrame.",
+                exc_info=True,
+            )
 
+        return df
 
 # ====================================================================
 # PUBLIC ENTRY POINT
 # ====================================================================
 
+def get_default_simulation_params() -> dict:
+    """
+    Baseline parameter set corresponding roughly to a 40 t passenger car
+    (Pioneer / ICE-1 type) impacting a rigid wall at about 80 km/h.
+
+    Returned as a plain dict so it can be updated from YAML/JSON configs
+    and then passed into SimulationParams(**params).
+    """
+    # Time integration baseline
+    T_max = 0.4      # total simulation time [s]
+    h_init = 1e-4    # time step [s]
+    n_steps = int(T_max / h_init)
+
+    return {
+        # ------------------------------------------------------------------
+        # Geometry and kinematics
+        # ------------------------------------------------------------------
+        "n_masses": 7,
+        # masses in kg (approx. 40 t total)
+        "masses": [4_000.0, 10_000.0, 4_000.0, 4_000.0, 4_000.0, 10_000.0, 4_000.0],
+        # mass positions along train [m]
+        "x_init": [1.5, 4.5, 8.0, 11.5, 15.0, 18.5, 21.5],
+        # vertical coordinates (flat track)
+        "y_init": [0.0] * 7,
+
+        # Initial velocity and angle
+        "v0_init": -22.22,   # [m/s] ≈ -80 km/h towards the wall
+        "angle_rad": 0.0,    # [rad]
+        "d0": 0.0,           # initial distance / pre-penetration [m]
+
+        # ------------------------------------------------------------------
+        # Vehicle crushing springs (between masses) – 6 springs for 7 masses
+        # ------------------------------------------------------------------
+        # yield force [N] and yield deformation [m]
+        "fy": [15e6] * 6,    # 15 MN
+        "uy": [0.20] * 6,    # 200 mm
+
+        # ------------------------------------------------------------------
+        # Contact with rigid wall
+        # ------------------------------------------------------------------
+        "k_wall": 60e6,                       # [N/m]
+        "cr_wall": 0.8,                       # restitution / damping parameter
+        "contact_model": "lankarani-nikravesh",
+
+        # ------------------------------------------------------------------
+        # Optional building / pier SDOF (disabled by default)
+        # ------------------------------------------------------------------
+        "building_enable": False,
+        "building_mass": 5.0e6,       # [kg] if enabled
+        "building_zeta": 0.05,        # 5 % critical
+        "building_height": 10.0,      # [m]
+        "building_model": "linear",   # or "takeda"
+        "building_uy": 0.05,          # [m]
+        "building_uy_mm": 50.0,       # [mm], for UI convenience
+        "building_alpha": 0.0,        # Takeda post-yield stiffness ratio
+        "building_gamma": 0.0,        # Takeda pinching parameter
+
+        # ------------------------------------------------------------------
+        # Friction (disabled by default)
+        # ------------------------------------------------------------------
+        "mu_s": 0.0,
+        "mu_k": 0.0,
+        "sigma_0": 0.0,
+        "sigma_1": 0.0,
+        "sigma_2": 0.0,
+        "friction_model": "none",     # "lugre", "dahl", "coulomb", "brown-mcphee", ...
+
+        # ------------------------------------------------------------------
+        # Bouc–Wen hysteresis (dimensionless backbone)
+        # ------------------------------------------------------------------
+        "bw_a": 1.0,
+        "bw_A": 1.0,
+        "bw_beta": 0.5,
+        "bw_gamma": 0.5,
+        "bw_n": 2,
+
+        # ------------------------------------------------------------------
+        # Nonlinear solver / time integration controls
+        # ------------------------------------------------------------------
+        "alpha_hht": -0.15,      # HHT-α parameter
+        "newton_tol": 1e-6,
+        "max_iter": 25,
+        "h_init": h_init,        # [s]
+        "T_max": T_max,          # [s]
+        "step": n_steps,         # number of steps
+        "T_int": (0.0, T_max),   # time interval [s]
+    }
+
+
 def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
     """
     High-level convenience wrapper.
 
-    Parameters
-    ----------
-    params : SimulationParams or dict
-        If a dict is passed, it must contain the same keys as SimulationParams.
-
-    Returns
-    -------
-    DataFrame with time history, contact force, penetration, acceleration
-    and energy bookkeeping.
+    If a dict is passed, it may contain only overrides; missing fields are
+    filled from get_default_simulation_params().
     """
     if isinstance(params, SimulationParams):
         sim_params = params
     else:
-        sim_params = SimulationParams(**params)
+        base = get_default_simulation_params()
+        base.update(params)  # config overrides default
+        sim_params = SimulationParams(**base)
 
     simulator = ImpactSimulator(sim_params)
     return simulator.run()

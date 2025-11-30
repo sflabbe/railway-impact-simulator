@@ -1,256 +1,717 @@
-"""
-Command line interface for the Railway Impact Simulator.
-
-Usage (after `pip install -e .` from the repo root):
-
-    railway-sim --help
-    railway-sim                          # run built-in default scenario
-    railway-sim --config config.yml      # run with external config
-"""
+# src/railway_simulator/cli.py
 
 from __future__ import annotations
 
-import argparse
 import json
+import logging
+import os
 import sys
+import subprocess
+import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Optional, List, Tuple, Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import typer
+import yaml
 
-try:
-    import yaml  # type: ignore[import]
-except ImportError:
-    yaml = None
+from .core.engine import run_simulation
+from .core.parametric import ScenarioDefinition, run_parametric_envelope
 
-from railway_simulator.core.engine import SimulationParams, run_simulation
+app = typer.Typer(add_completion=False, help="Railway impact simulator CLI")
 
 
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
-def _default_config_dict() -> Dict[str, Any]:
+
+def _load_config(path: Path) -> dict:
+    """Load a YAML or JSON configuration file into a dict."""
+    if not path.is_file():
+        raise typer.BadParameter(f"Config file not found: {path}")
+
+    suffix = path.suffix.lower()
+    text = path.read_text(encoding="utf-8")
+
+    if suffix in {".yaml", ".yml"}:
+        return yaml.safe_load(text)
+    elif suffix == ".json":
+        return json.loads(text)
+    else:
+        raise typer.BadParameter(
+            f"Unsupported config extension '{suffix}'. Use .yml, .yaml or .json."
+        )
+
+
+def _parse_speeds_spec(spec: str) -> Tuple[List[float], List[float]]:
     """
-    Built-in demo configuration (research loco, 7 masses, 56 km/h).
+    Parse a string like
 
-    This is intentionally simple but physically reasonable and matches
-    the defaults of the Streamlit UI as closely as possible.
+        "320:0.2,200:0.4,120:0.4"
+
+    into lists speeds_kmh=[320,200,120] and weights=[0.2,0.4,0.4].
+
+    If weights are omitted (e.g. "80,120,160"), all weights = 1.0.
     """
-    # --- geometry: 7-mass research locomotive model ---
-    masses = [4, 10, 4, 4, 4, 10, 4]           # [t]
-    masses = [m * 1000.0 for m in masses]      # -> kg
+    spec = spec.strip()
+    if not spec:
+        raise typer.BadParameter("Empty --speeds specification.")
 
-    x_init = [0.02, 3.02, 6.52, 10.02, 13.52, 17.02, 20.02]  # m
-    y_init = [0.0] * 7
+    speeds: List[float] = []
+    weights: List[float] = []
 
-    n_masses = len(masses)
+    tokens = [t.strip() for t in spec.split(",") if t.strip()]
 
-    # --- material: Bouc–Wen springs ---
-    fy_MN = 15.0
-    uy_mm = 200.0
-    fy = [fy_MN * 1e6] * (n_masses - 1)        # N
-    uy = [uy_mm / 1000.0] * (n_masses - 1)     # m
+    has_colon = any(":" in t for t in tokens)
 
-    # --- time / integration ---
-    h_init = 0.0001          # 0.1 ms
-    T_max = 0.30             # s
-    step = int(T_max / h_init)
+    for tok in tokens:
+        if ":" in tok:
+            v_str, w_str = tok.split(":", 1)
+            v = float(v_str)
+            w = float(w_str)
+        else:
+            v = float(tok)
+            w = 1.0
+        speeds.append(v)
+        weights.append(w)
+
+    # Normalise weights if any colon was used
+    if has_colon:
+        total_w = sum(weights)
+        if total_w <= 0.0:
+            raise typer.BadParameter("Sum of weights must be > 0.")
+        weights = [w / total_w for w in weights]
+
+    return speeds, weights
+
+
+def _ensure_output_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _setup_logger(output_dir: Path, log_stem: str) -> logging.Logger:
+    """
+    Set up a per-run logger writing to <output_dir>/<log_stem>.log.
+    """
+    _ensure_output_dir(output_dir)
+    logger = logging.getLogger(f"railway_simulator.cli.{log_stem}")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    log_file = output_dir / f"{log_stem}.log"
+    handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    return logger
+
+
+def _open_file(path: Path, logger: logging.Logger) -> None:
+    """
+    Try to open a file with the system's default application.
+    """
+    try:
+        if not path.is_file():
+            logger.error("File not found, cannot open: %s", path)
+            return
+
+        logger.debug("Attempting to open file: %s", path)
+
+        if sys.platform.startswith("darwin"):
+            subprocess.Popen(
+                ["open", str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        elif os.name == "nt":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(
+                ["xdg-open", str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        logger.info("Requested OS to open PDF report: %s", path)
+
+    except Exception:
+        logger.exception("Failed to open PDF report.")
+
+
+def _print_and_log(logger: logging.Logger, msg: str) -> None:
+    typer.echo(msg)
+    logger.info(msg)
+
+
+def _ascii_plot(
+    x: np.ndarray,
+    y: np.ndarray,
+    y_label: str,
+    x_label: str,
+    width: int = 70,
+    height: int = 20,
+) -> str:
+    """
+    Very simple ASCII plot: x ∈ [0, max], y ∈ [0, max].
+    """
+    if len(x) == 0 or len(y) == 0:
+        return ""
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    if x_max <= x_min:
+        x_min, x_max = 0.0, 1.0
+
+    y_min = 0.0
+    y_max = float(np.max(y))
+    if y_max <= y_min:
+        y_max = y_min + 1.0
+
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+
+    for xi, yi in zip(x, y):
+        if yi < y_min:
+            continue
+        cx = (xi - x_min) / (x_max - x_min + 1e-12)
+        cy = (yi - y_min) / (y_max - y_min + 1e-12)
+        col = int(cx * (width - 1))
+        row = int(cy * (height - 1))
+        row_idx = height - 1 - row
+        if 0 <= row_idx < height and 0 <= col < width:
+            grid[row_idx][col] = "*"
+
+    lines = [f"# {y_label} envelope"]
+    for r in grid:
+        lines.append("".join(r).rstrip())
+    lines.append(f"# {x_label} ({int(round(x_min))} – {int(round(x_max))})")
+    return "\n".join(lines)
+
+
+def _compute_single_run_performance(
+    results_df: pd.DataFrame,
+    wall_time: float,
+    params: dict,
+) -> dict:
+    time_s = results_df["Time_s"].to_numpy()
+    if len(time_s) < 2:
+        return {
+            "wall_time": wall_time,
+            "T_max": None,
+            "steps": None,
+            "dt_mean": None,
+            "dt_min": None,
+            "dt_max": None,
+            "real_time_factor": None,
+            "linear_solves": None,
+            "n_dof": None,
+            "flops_lu": None,
+            "mflops": None,
+            "mflops_per_s": None,
+        }
+
+    dts = np.diff(time_s)
+    steps = len(dts)
+    T_max = float(time_s[-1] - time_s[0])
+    dt_mean = float(np.mean(dts))
+    dt_min = float(np.min(dts))
+    dt_max = float(np.max(dts))
+    real_time_factor = T_max / wall_time if wall_time > 0 else None
+
+    n_masses = int(params.get("n_masses", len(params.get("masses", []))))
+    n_dof = 2 * n_masses
+
+    # Heuristic estimate: ~3 Newton iterations per time step
+    avg_newton = 3.0
+    linear_solves = int(steps * avg_newton)
+
+    flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
+    flops_lu = flops_per_lu * linear_solves
+    mflops = flops_lu / 1e6
+    mflops_per_s = mflops / wall_time if wall_time > 0 else None
 
     return {
-        # geometry & kinematics
-        "n_masses": n_masses,
-        "masses": masses,
-        "x_init": x_init,
-        "y_init": y_init,
-        "v0_init": -(56.0 / 3.6),   # 56 km/h towards the wall
-        "angle_rad": 0.0,
-        "d0": 0.01,                 # 1 cm initial gap
-
-        # material
-        "fy": fy,
-        "uy": uy,
-
-        # contact
-        "k_wall": 45.0 * 1e6,       # 45 MN/m
-        "cr_wall": 0.8,
-        "contact_model": "lankarani-nikravesh",
-
-        # SDOF building (disabled by default in CLI)
-        "building_enable": False,
-        "building_mass": 0.0,
-        "building_zeta": 0.05,
-        "building_height": 0.0,
-        "building_model": "Linear elastic SDOF",
-        "building_uy": 0.01,
-        "building_uy_mm": 10.0,
-        "building_alpha": 0.05,
-        "building_gamma": 0.4,
-
-        # friction
-        "mu_s": 0.4,
-        "mu_k": 0.3,
-        "sigma_0": 1e5,
-        "sigma_1": 316.0,
-        "sigma_2": 0.4,
-        "friction_model": "lugre",
-
-        # Bouc–Wen parameters
-        "bw_a": 0.0,
-        "bw_A": 1.0,
-        "bw_beta": 0.1,
-        "bw_gamma": 0.9,
-        "bw_n": 8,
-
-        # HHT-α integration
-        "alpha_hht": -0.1,
-        "newton_tol": 1e-4,
-        "max_iter": 50,
-        "h_init": h_init,
+        "wall_time": wall_time,
         "T_max": T_max,
-        "step": step,
-        "T_int": (0.0, T_max),
+        "steps": steps,
+        "dt_mean": dt_mean,
+        "dt_min": dt_min,
+        "dt_max": dt_max,
+        "real_time_factor": real_time_factor,
+        "linear_solves": linear_solves,
+        "n_dof": n_dof,
+        "flops_lu": flops_lu,
+        "mflops": mflops,
+        "mflops_per_s": mflops_per_s,
     }
 
 
-def _load_config_file(path: Path) -> Dict[str, Any]:
-    """Load a JSON or YAML configuration file into a dict."""
-    if not path.exists():
-        raise FileNotFoundError(path)
+def _compute_parametric_performance(
+    envelope_df: pd.DataFrame,
+    wall_time: float,
+    base_params: dict,
+    n_scenarios: int,
+) -> dict:
+    time_s = envelope_df["Time_s"].to_numpy()
+    if len(time_s) < 2:
+        return {
+            "wall_time": wall_time,
+            "T_max": None,
+            "steps": None,
+            "dt_mean": None,
+            "dt_min": None,
+            "dt_max": None,
+            "real_time_factor": None,
+            "linear_solves": None,
+            "n_dof": None,
+            "flops_lu": None,
+            "mflops": None,
+            "mflops_per_s": None,
+        }
 
-    suffix = path.suffix.lower()
+    dts = np.diff(time_s)
+    steps = len(dts)
+    T_max = float(time_s[-1] - time_s[0])
+    dt_mean = float(np.mean(dts))
+    dt_min = float(np.min(dts))
+    dt_max = float(np.max(dts))
+    real_time_factor = T_max / wall_time if wall_time > 0 else None
 
-    if suffix == ".json":
-        return json.loads(path.read_text())
+    n_masses = int(base_params.get("n_masses", len(base_params.get("masses", []))))
+    n_dof = 2 * n_masses
 
-    if suffix in {".yml", ".yaml"}:
-        if yaml is None:
-            raise RuntimeError(
-                "PyYAML is not installed. Install it with "
-                "`pip install pyyaml` to use YAML configs."
-            )
-        return yaml.safe_load(path.read_text())
+    # Heuristic estimate: ~3 Newton iterations per time step per scenario
+    avg_newton = 3.0
+    linear_solves = int(steps * n_scenarios * avg_newton)
 
-    raise ValueError(f"Unsupported config format: {suffix}")
+    flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
+    flops_lu = flops_per_lu * linear_solves
+    mflops = flops_lu / 1e6
+    mflops_per_s = mflops / wall_time if wall_time > 0 else None
 
-
-def _merge_with_defaults(user_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Flat merge: user_cfg overrides defaults.
-    (Both are expected to be flat dicts with SimulationParams keys.)
-    """
-    cfg = _default_config_dict()
-    cfg.update(user_cfg)
-    return cfg
-
-
-def _dict_to_simulation_params(cfg: Dict[str, Any]) -> SimulationParams:
-    """
-    Convert (possibly JSON-loaded) config dict to SimulationParams.
-    Handles list -> np.ndarray conversions and fills a few inferred fields.
-    """
-    # Convert selected keys to numpy arrays
-    array_keys = ("masses", "x_init", "y_init", "fy", "uy")
-    for key in array_keys:
-        if key in cfg:
-            cfg[key] = np.asarray(cfg[key], dtype=float)
-
-    # Time info: if step or T_int missing, infer them
-    if "h_init" not in cfg:
-        raise ValueError("Config must specify 'h_init' (time step in seconds).")
-    if "T_max" not in cfg:
-        raise ValueError("Config must specify 'T_max' (final time in seconds).")
-
-    h = float(cfg["h_init"])
-    T_max = float(cfg["T_max"])
-
-    cfg.setdefault("step", int(T_max / h))
-    cfg.setdefault("T_int", (0.0, T_max))
-
-    # All remaining fields are passed directly to SimulationParams
-    return SimulationParams(**cfg)
+    return {
+        "wall_time": wall_time,
+        "T_max": T_max,
+        "steps": steps,
+        "dt_mean": dt_mean,
+        "dt_min": dt_min,
+        "dt_max": dt_max,
+        "real_time_factor": real_time_factor,
+        "linear_solves": linear_solves,
+        "n_dof": n_dof,
+        "flops_lu": flops_lu,
+        "mflops": mflops,
+        "mflops_per_s": mflops_per_s,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Main CLI entry point
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Commands
+# ----------------------------------------------------------------------
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
-        prog="railway-sim",
-        description="Railway Impact Simulator (HHT-α + Bouc–Wen).",
-    )
-    parser.add_argument(
+
+@app.command()
+def run(
+    config: Path = typer.Option(
+        ...,
         "--config",
-        type=str,
-        help="Path to a simulation config file (JSON or YAML). "
-             "If omitted, a built-in demo setup is used.",
-    )
-    parser.add_argument(
+        "-c",
+        exists=True,
+        readable=True,
+        help="YAML/JSON configuration file.",
+    ),
+    output_dir: Path = typer.Option(
+        Path("results"),
         "--output-dir",
-        type=str,
-        default="data/processed",
-        help="Directory for simulation results (default: data/processed).",
-    )
-    parser.add_argument(
-        "--basename",
-        type=str,
-        default=None,
-        help="Base name for output files (default: config file stem or 'simulation').",
-    )
+        "-o",
+        help="Directory for result files.",
+    ),
+    prefix: str = typer.Option(
+        "",
+        "--prefix",
+        "-p",
+        help="Optional filename prefix for output files.",
+    ),
+    ascii_plot: bool = typer.Option(
+        False,
+        "--ascii-plot",
+        help="Print an ASCII plot of impact force vs time to the console.",
+    ),
+    plot: bool = typer.Option(
+        False,
+        "--plot",
+        help="Show a matplotlib window with impact force vs time.",
+    ),
+    pdf_report: bool = typer.Option(
+        False,
+        "--pdf-report",
+        help="Generate a single-run PDF report and open it.",
+    ),
+) -> None:
+    """
+    Run a single impact simulation.
+    """
+    _ensure_output_dir(output_dir)
 
-    args = parser.parse_args(argv)
-
-    # --- build configuration dict ---
-    if args.config:
-        cfg_path = Path(args.config)
-        try:
-            user_cfg = _load_config_file(cfg_path)
-        except Exception as exc:  # pragma: no cover - simple CLI error path
-            print(f"[railway-sim] Error loading config '{cfg_path}': {exc}", file=sys.stderr)
-            sys.exit(1)
-        cfg = _merge_with_defaults(user_cfg or {})
-        basename = args.basename or cfg_path.stem
+    if prefix:
+        base = f"{prefix}_"
     else:
-        cfg = _default_config_dict()
-        basename = args.basename or "simulation"
+        base = ""
 
-    # --- simulate ---
-    try:
-        params = _dict_to_simulation_params(cfg)
-        df = run_simulation(params)
-    except Exception as exc:  # pragma: no cover
-        print(f"[railway-sim] Simulation failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+    log_stem = f"{base}run"
+    logger = _setup_logger(output_dir, log_stem)
 
-    # --- write outputs ---
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _print_and_log(logger, f"Loading config: {config}")
+    params = _load_config(config)
 
-    csv_path = out_dir / f"{basename}.csv"
-    xlsx_path = out_dir / f"{basename}.xlsx"
+    _print_and_log(logger, "Running simulation ...")
+    t0 = time.perf_counter()
+    results_df = run_simulation(params)
+    wall_time = time.perf_counter() - t0
 
-    df.to_csv(csv_path, index=False)
-    try:
-        df.to_excel(xlsx_path, index=False)
-    except Exception:
-        # Excel export is nice-to-have, not mandatory
-        xlsx_path = None
+    perf = _compute_single_run_performance(results_df, wall_time, params)
 
-    # --- tiny summary on stdout ---
-    max_force = float(df["Impact_Force_MN"].max())
-    max_pen = float(df["Penetration_mm"].max())
-    max_acc = float(df["Acceleration_g"].max())
+    csv_path = output_dir / f"{base}results.csv"
+    _print_and_log(logger, f"Writing time history to {csv_path}")
+    results_df.to_csv(csv_path, index=False)
 
-    print(f"[railway-sim] Simulation completed.")
-    print(f"  Max force        : {max_force:.3f} MN")
-    print(f"  Max penetration  : {max_pen:.2f} mm")
-    print(f"  Max acceleration : {max_acc:.2f} g")
-    print(f"  CSV  written to  : {csv_path}")
-    if xlsx_path is not None:
-        print(f"  XLSX written to  : {xlsx_path}")
+    # Performance output
+    typer.echo("")
+    typer.echo("Single-run performance:")
+    typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
+    typer.echo(f"  Simulated time span   : {perf['T_max']:.6f} s")
+    typer.echo(f"  Time steps            : {perf['steps']}")
+    typer.echo(f"  Mean Δt               : {perf['dt_mean']:.6e} s")
+    typer.echo(
+        f"  Min Δt / max Δt       : {perf['dt_min']:.6e} s / {perf['dt_max']:.6e} s"
+    )
+    typer.echo(f"  Real-time factor      : {perf['real_time_factor']:.2f}x")
+    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof ≈ {perf['n_dof']}")
+    typer.echo(
+        f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP"
+    )
+    typer.echo(
+        f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s"
+    )
+
+    logger.info("Single-run performance: %s", perf)
+
+   # PDF report FIRST – so it's created even if the plot window blocks
+    if pdf_report:
+        from .core.report import generate_single_run_report
+
+        pdf_path = output_dir / f"{base}report.pdf"
+        logger.info("Generating PDF report: %s", pdf_path)
+        try:
+            generate_single_run_report(results_df, perf, params, pdf_path)
+            if pdf_path.is_file():
+                logger.info("PDF report successfully written to %s", pdf_path)
+                _open_file(pdf_path, logger)
+            else:
+                logger.error("PDF report was not created: %s", pdf_path)
+        except Exception:
+            logger.exception("Failed to generate single-run PDF report.")
+
+    # ASCII plot
+    if ascii_plot:
+        typer.echo("")
+        typer.echo("ASCII impact plot (Impact_Force_MN vs Time_ms):")
+        ascii_str = _ascii_plot(
+            results_df["Time_ms"].to_numpy(),
+            results_df["Impact_Force_MN"].to_numpy(),
+            "Impact_Force_MN",
+            "Time [ms]",
+        )
+        typer.echo(ascii_str)
+        logger.info("ASCII plot:\n%s", ascii_str)
+
+    # Matplotlib plot (blocking)
+    if plot:
+        t_ms = results_df["Time_ms"].to_numpy()
+        F = results_df["Impact_Force_MN"].to_numpy()
+        fig, ax = plt.subplots()
+        ax.plot(t_ms, F, label="Impact_Force_MN")
+        ax.set_xlabel("Time [ms]")
+        ax.set_ylabel("Impact force [MN]")
+        ax.set_title("Impact force vs time")
+        ax.grid(True)
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        ax.legend()
+        plt.show()
+
+    log_file = output_dir / f"{log_stem}.log"
+    typer.echo(f"\nDetailed log written to {log_file}")
+    logger.info("Run completed.")
 
 
-if __name__ == "__main__":  # pragma: no cover
+@app.command()
+def parametric(
+    base_config: Path = typer.Option(
+        ...,
+        "--base-config",
+        "-b",
+        exists=True,
+        readable=True,
+        help="Base YAML/JSON configuration file (train, contact, material, etc.).",
+    ),
+    speeds: str = typer.Option(
+        ...,
+        "--speeds",
+        "-s",
+        help=(
+            'Speed/weight specification. Examples:\n'
+            '  "320:0.2,200:0.4,120:0.4"  (TGV/IC/cargo mix)\n'
+            '  "80,120,160"               (equal weights)\n'
+            "Speeds in km/h; weights are optional and normalised."
+        ),
+    ),
+    quantity: str = typer.Option(
+        "Impact_Force_MN",
+        "--quantity",
+        "-q",
+        help="Result column to envelope (e.g. Impact_Force_MN, Acceleration_g, ...).",
+    ),
+    output_dir: Path = typer.Option(
+        Path("results_parametric"),
+        "--output-dir",
+        "-o",
+        help="Directory for envelope result files.",
+    ),
+    prefix: str = typer.Option(
+        "mix",
+        "--prefix",
+        "-p",
+        help="Filename prefix for parametric output.",
+    ),
+    ascii_plot: bool = typer.Option(
+        False,
+        "--ascii-plot",
+        help="Print an ASCII plot of the envelope to the console.",
+    ),
+    plot: bool = typer.Option(
+        False,
+        "--plot",
+        help="Show a matplotlib window with the envelope.",
+    ),
+    pdf_report: bool = typer.Option(
+        False,
+        "--pdf-report",
+        help="Generate a parametric PDF report and open it.",
+    ),
+) -> None:
+    """
+    Run a speed-based parametric study and compute an envelope
+    ('Umhüllende') and a weighted mean history.
+    """
+    _ensure_output_dir(output_dir)
+
+    base_name = f"{prefix}_{quantity}" if prefix else quantity
+    log_stem = f"{base_name}_parametric"
+    logger = _setup_logger(output_dir, log_stem)
+
+    _print_and_log(logger, f"Loading base config: {base_config}")
+    base_params = _load_config(base_config)
+
+    _print_and_log(logger, f"Parsing speeds specification: {speeds}")
+    speeds_kmh, weights = _parse_speeds_spec(speeds)
+
+    _print_and_log(logger, "Building scenarios:")
+    scenarios: List[ScenarioDefinition] = []
+    for v_kmh, w in zip(speeds_kmh, weights):
+        name = f"v{int(round(v_kmh))}"
+        msg = f"  - {name}: {v_kmh:.1f} km/h, weight = {w:.3f}"
+        _print_and_log(logger, msg)
+
+        params_i = dict(base_params)
+        params_i["v0_init"] = -v_kmh / 3.6  # m/s, negative towards barrier
+
+        scen = ScenarioDefinition(
+            name=name,
+            params=params_i,
+            weight=w,
+            meta={"speed_kmh": v_kmh},
+        )
+        scenarios.append(scen)
+
+    _print_and_log(logger, "Running parametric envelope ...")
+    t0 = time.perf_counter()
+    result = run_parametric_envelope(scenarios, quantity=quantity)
+
+    extra: Any = None
+    if isinstance(result, tuple):
+        if len(result) == 3:
+            envelope_df, summary_df, extra = result
+        elif len(result) == 2:
+            envelope_df, summary_df = result
+        else:
+            envelope_df = result[0]
+            summary_df = result[1] if len(result) > 1 else pd.DataFrame()
+    else:
+        envelope_df = result
+        summary_df = pd.DataFrame()
+
+    wall_time = time.perf_counter() - t0
+
+    perf = _compute_parametric_performance(
+        envelope_df, wall_time, base_params, n_scenarios=len(scenarios)
+    )
+    if isinstance(extra, dict):
+        # If engine already returns more accurate metrics, prefer them
+        for key, val in extra.items():
+            if key in perf and val is not None:
+                perf[key] = val
+        # Refine performance metrics using summary_df if available
+    if not summary_df.empty:
+        if "n_dof" in summary_df.columns:
+            perf["n_dof"] = int(summary_df["n_dof"].max())
+
+        if "n_lu" in summary_df.columns:
+            total_lu = int(summary_df["n_lu"].sum())
+            perf["linear_solves"] = total_lu
+
+            n_dof = perf.get("n_dof", 0) or 0
+            if n_dof > 0 and total_lu > 0:
+                flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
+                flops_lu = flops_per_lu * total_lu
+                mflops = flops_lu / 1e6
+                perf["flops_lu"] = flops_lu
+                perf["mflops"] = mflops
+                perf["mflops_per_s"] = (
+                    mflops / perf["wall_time"] if perf["wall_time"] > 0 else None
+                )
+
+
+    base = base_name
+    env_csv = output_dir / f"{base}_envelope.csv"
+    sum_csv = output_dir / f"{base}_summary.csv"
+
+    _print_and_log(logger, f"Writing envelope time history to {env_csv}")
+    envelope_df.to_csv(env_csv, index=False)
+
+    _print_and_log(logger, f"Writing scenario summary to {sum_csv}")
+    summary_df.to_csv(sum_csv, index=False)
+
+    # Performance output
+    typer.echo("")
+    typer.echo("Parametric study performance:")
+    typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
+    typer.echo(f"  Simulated time span   : {perf['T_max']:.6f} s")
+    typer.echo(f"  Time steps            : {perf['steps']}")
+    typer.echo(f"  Mean Δt               : {perf['dt_mean']:.6e} s")
+    typer.echo(
+        f"  Min Δt / max Δt       : {perf['dt_min']:.6e} s / {perf['dt_max']:.6e} s"
+    )
+    typer.echo(f"  Real-time factor      : {perf['real_time_factor']:.2f}x")
+    typer.echo(
+        f"  Linear solves (LU)    : {perf['linear_solves']}, "
+        f"n_dof ≈ {perf['n_dof']}"
+    )
+    typer.echo(
+        f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP"
+    )
+    typer.echo(
+        f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s"
+    )
+
+    logger.info("Parametric performance: %s", perf)
+    
+    # PDF report FIRST – so it exists even if the plot blocks
+    if pdf_report:
+        from .core.report import generate_parametric_report
+
+        pdf_path = output_dir / f"{base}_report.pdf"
+        logger.info("Generating parametric PDF report: %s", pdf_path)
+        try:
+            generate_parametric_report(
+                envelope_df, summary_df, perf, quantity, pdf_path
+            )
+            if pdf_path.is_file():
+                logger.info(
+                    "Parametric PDF report successfully written to %s", pdf_path
+                )
+                _open_file(pdf_path, logger)
+            else:
+                logger.error("Parametric PDF report was not created: %s", pdf_path)
+        except Exception:
+            logger.exception("Failed to generate parametric PDF report.")
+
+    # ASCII envelope plot
+    if ascii_plot:
+        typer.echo("")
+        typer.echo(f"ASCII envelope plot ({quantity} vs Time_ms):")
+
+        # Resolve correct column name, e.g. "Impact_Force_MN_envelope"
+        if quantity in envelope_df.columns:
+            y_col = quantity
+        else:
+            env_col = f"{quantity}_envelope"
+            if env_col in envelope_df.columns:
+                y_col = env_col
+            else:
+                # Fallback: first non-time column
+                non_time_cols = [
+                    c for c in envelope_df.columns
+                    if c not in ("Time_s", "Time_ms")
+                ]
+                if not non_time_cols:
+                    raise RuntimeError(
+                        f"Could not find column for quantity '{quantity}' in envelope_df."
+                    )
+                y_col = non_time_cols[0]
+
+        ascii_str = _ascii_plot(
+            envelope_df["Time_ms"].to_numpy(),
+            envelope_df[y_col].to_numpy(),
+            y_col,
+            "Time [ms]",
+        )
+        typer.echo(ascii_str)
+        logger.info("ASCII envelope plot (column=%s):\n%s", y_col, ascii_str)
+
+    # Matplotlib envelope plot
+    if plot:
+        # same column resolution logic as above
+        if quantity in envelope_df.columns:
+            y_col = quantity
+        else:
+            env_col = f"{quantity}_envelope"
+            if env_col in envelope_df.columns:
+                y_col = env_col
+            else:
+                non_time_cols = [
+                    c for c in envelope_df.columns
+                    if c not in ("Time_s", "Time_ms")
+                ]
+                if not non_time_cols:
+                    raise RuntimeError(
+                        f"Could not find column for quantity '{quantity}' in envelope_df."
+                    )
+                y_col = non_time_cols[0]
+
+        t_ms = envelope_df["Time_ms"].to_numpy()
+        y = envelope_df[y_col].to_numpy()
+        fig, ax = plt.subplots()
+        ax.plot(t_ms, y, label=f"Envelope {y_col}")
+        ax.set_xlabel("Time [ms]")
+        ax.set_ylabel(y_col)
+        ax.set_title(f"{y_col} envelope vs time")
+        ax.grid(True)
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        ax.legend()
+        plt.show()
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
     main()

@@ -18,6 +18,12 @@ from scipy.constants import g as GRAVITY
 # ✅ Adjust this import to match your package layout
 from railway_simulator.core.engine import TrainConfig, TrainBuilder, run_simulation
 
+from .parametric import (
+    build_speed_scenarios,
+    run_parametric_envelope,
+    make_envelope_figure,
+)
+
 
 # ====================================================================
 # HEADER / ABOUT
@@ -1999,6 +2005,81 @@ def main():
         display_header()
         display_citation()
 
+    # ------------------------------------------------------------------
+    # Parametric study: speed-dependent envelope (experimental)
+    # ------------------------------------------------------------------
+    st.markdown("### Parametric study: envelope over multiple speeds")
+
+    with st.expander(
+        "Run envelope for a set of speeds (using current train configuration)",
+        expanded=False,
+    ):
+        st.write(
+            "This parametric study reuses the current train/material/contact "
+            "settings and only varies the impact speed. Define a set of "
+            "speeds and statistical weights; the tool computes the force "
+            "envelope ('Umhüllende') and a weighted mean history."
+        )
+
+        # Default example: roughly your line mix idea
+        default_data = {
+            "speed_kmh": [320.0, 200.0, 120.0],
+            "weight": [0.20, 0.40, 0.40],  # 20 % / 40 % / 40 %
+        }
+
+        df_scenarios = st.data_editor(
+            pd.DataFrame(default_data),
+            num_rows="dynamic",
+            key="parametric_table",
+        )
+
+        quantity_options = {
+            "Impact force at barrier [MN]": "Impact_Force_MN",
+            "Vehicle acceleration [g]": "Vehicle_a_g",
+            # add more if you have them in the results DataFrame
+        }
+
+        quantity_label = st.selectbox(
+            "Quantity for envelope",
+            list(quantity_options.keys()),
+            index=0,
+            key="env_quantity",
+        )
+        quantity = quantity_options[quantity_label]
+
+        if st.button("Run parametric envelope", type="primary", key="run_env"):
+            try:
+                speeds = df_scenarios["speed_kmh"].astype(float).tolist()
+                weights = df_scenarios["weight"].astype(float).tolist()
+
+                if not speeds:
+                    st.warning("Please define at least one scenario.")
+                else:
+                    # params: dict used in the single run above
+                    base_params = dict(params)  # shallow copy is enough
+
+                    scenarios = build_speed_scenarios(
+                        base_params,
+                        speeds_kmh=speeds,
+                        weights=weights,
+                        prefix="v",
+                    )
+
+                    envelope_df, summary_df, _ = run_parametric_envelope(
+                        scenarios, quantity=quantity
+                    )
+
+                    fig_env = make_envelope_figure(
+                        envelope_df,
+                        quantity=quantity,
+                        title=f"{quantity_label} – envelope over defined speeds",
+                    )
+                    st.plotly_chart(fig_env, use_container_width=True)
+
+                    st.markdown("#### Scenario summary")
+                    st.dataframe(summary_df)
+            except Exception as exc:
+                st.error(f"Parametric study failed: {exc}")
 
 if __name__ == "__main__":
     main()

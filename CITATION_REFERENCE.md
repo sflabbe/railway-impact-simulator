@@ -8,8 +8,7 @@
 ## 💻 Software Information
 
 **Developer/Maintainer:**  
-Sebastián Labbé, Dipl.-Ing.  
-Karlsruher Institut für Technologie (KIT)
+Sebastián Labbé
 
 **License:** MIT License  
 **Repository:** [Add your repository URL]
@@ -31,10 +30,10 @@ with Bouc-Wen Hysteresis [Computer software].
 Review and Adjustment of Impact Loads from Railway Traffic
 
 **Authors:**
-1. Univ.-Prof. Dr.-Ing. Lothar Stempniewski (KIT)
-2. Dipl.-Ing. Sebastián Labbé (KIT)
-3. Dr.-Ing. Steffen Siegel (Siegel und Wünschel PartG mbB)
-4. Robin Bosch, M.Sc. (Siegel und Wünschel PartG mbB)
+1. Lothar Stempniewski (KIT)
+2. Sebastián Labbé (KIT)
+3. Steffen Siegel (Siegel und Wünschel PartG mbB)
+4. Robin Bosch (Siegel und Wünschel PartG mbB)
 
 **Publication:**
 - Series: Berichte des Deutschen Zentrums für Schienenverkehrsforschung
@@ -118,7 +117,7 @@ https://www.dzsf.bund.de
 ## 💻 Code Implementation
 
 **Code Maintainer:**  
-[Your Name/Institution]
+Sebastián Labbé
 
 **Based on:**  
 DZSF Bericht 53 (2024) - See citation above

@@ -23,7 +23,7 @@ CC BY 4.0 - The underlying research is openly licensed
 ## Code Information
 
 **Code Implementation & Maintainer:**  
-Sebastián Labbé, Dipl.-Ing.
+Sebastián Labbé
 
 **Based on Research Report:**  
 DZSF Bericht 53 (2024)

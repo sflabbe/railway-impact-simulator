@@ -6,6 +6,12 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+try:
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+
 from .engine import run_simulation
 
 
@@ -155,4 +161,133 @@ def run_parametric_envelope(
     meta: Dict[str, Any] = {}
 
     return envelope_df, summary_df, meta
+
+
+def build_speed_scenarios(
+    base_params: Dict[str, Any],
+    speeds_kmh: List[float],
+    weights: List[float] | None = None,
+    prefix: str = "v",
+) -> List[ScenarioDefinition]:
+    """
+    Build scenario definitions from speeds and optional weights.
+
+    Parameters
+    ----------
+    base_params : dict
+        Base simulation parameters (will be copied for each scenario).
+    speeds_kmh : list of float
+        Impact speeds in km/h.
+    weights : list of float, optional
+        Statistical weights for each speed. If None, equal weights are used.
+    prefix : str, default "v"
+        Prefix for scenario names (e.g., "v320", "v200").
+
+    Returns
+    -------
+    List[ScenarioDefinition]
+        List of scenario definitions ready for parametric envelope computation.
+    """
+    if weights is None:
+        weights = [1.0 / len(speeds_kmh)] * len(speeds_kmh)
+    elif len(weights) != len(speeds_kmh):
+        raise ValueError("Length of weights must match length of speeds_kmh.")
+
+    # Normalize weights
+    total_w = sum(weights)
+    if total_w <= 0.0:
+        raise ValueError("Sum of weights must be positive.")
+    weights = [w / total_w for w in weights]
+
+    scenarios = []
+    for v_kmh, w in zip(speeds_kmh, weights):
+        name = f"{prefix}{int(round(v_kmh))}"
+        params_i = dict(base_params)
+        params_i["v0_init"] = -v_kmh / 3.6  # Convert to m/s, negative for barrier approach
+
+        scenarios.append(
+            ScenarioDefinition(
+                name=name,
+                params=params_i,
+                weight=w,
+                meta={"speed_kmh": v_kmh},
+            )
+        )
+
+    return scenarios
+
+
+def make_envelope_figure(
+    envelope_df: pd.DataFrame,
+    quantity: str,
+    title: str = "Envelope",
+):
+    """
+    Create a Plotly figure for the parametric envelope.
+
+    Parameters
+    ----------
+    envelope_df : pd.DataFrame
+        Envelope DataFrame with Time_ms and quantity columns.
+    quantity : str
+        Name of the quantity to plot (e.g., "Impact_Force_MN").
+    title : str, default "Envelope"
+        Figure title.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+        Plotly figure object.
+
+    Raises
+    ------
+    ImportError
+        If plotly is not available.
+    RuntimeError
+        If the quantity column is not found in envelope_df.
+    """
+    if not PLOTLY_AVAILABLE:
+        raise ImportError(
+            "Plotly is required for make_envelope_figure. "
+            "Install with: pip install plotly"
+        )
+
+    # Resolve column name
+    if quantity in envelope_df.columns:
+        y_col = quantity
+    else:
+        env_col = f"{quantity}_envelope"
+        if env_col in envelope_df.columns:
+            y_col = env_col
+        else:
+            non_time_cols = [
+                c for c in envelope_df.columns if c not in ("Time_s", "Time_ms")
+            ]
+            if not non_time_cols:
+                raise RuntimeError(
+                    f"Could not find column for quantity '{quantity}' in envelope_df."
+                )
+            y_col = non_time_cols[0]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=envelope_df["Time_ms"],
+            y=envelope_df[y_col],
+            mode="lines",
+            line=dict(width=2),
+            name=f"Envelope {y_col}",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Time [ms]",
+        yaxis_title=quantity,
+        height=500,
+        xaxis=dict(rangemode="tozero"),
+        yaxis=dict(rangemode="tozero"),
+    )
+
+    return fig
 

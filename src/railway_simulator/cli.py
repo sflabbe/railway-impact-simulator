@@ -234,9 +234,14 @@ def _compute_single_run_performance(
     n_masses = int(params.get("n_masses", len(params.get("masses", []))))
     n_dof = 2 * n_masses
 
-    # Heuristic estimate: ~3 Newton iterations per time step
-    avg_newton = 3.0
-    linear_solves = int(steps * avg_newton)
+    # Try to get actual metrics from DataFrame attributes
+    n_lu_actual = results_df.attrs.get("n_lu", None)
+    if n_lu_actual is not None and n_lu_actual > 0:
+        linear_solves = int(n_lu_actual)
+    else:
+        # Fallback to heuristic estimate: ~3 Newton iterations per time step
+        avg_newton = 3.0
+        linear_solves = int(steps * avg_newton)
 
     flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
     flops_lu = flops_per_lu * linear_solves

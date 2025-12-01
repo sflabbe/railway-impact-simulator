@@ -439,7 +439,7 @@ class StructuralDynamics:
             dy = y[j] - y[i]
             L0 = np.hypot(dx, dy)
 
-            if L0 == 0:
+            if L0 < 1e-12:
                 continue
 
             cx = dx / L0
@@ -657,6 +657,17 @@ class ImpactSimulator:
         # HHT integrator
         self.integrator = HHTAlphaIntegrator(p.alpha_hht)
 
+        # Pre-compute friction enablement (optimization)
+        self.friction_enabled = not (
+            p.friction_model in ("none", "off", "", None)
+            or (abs(p.mu_s) < 1e-12 and abs(p.mu_k) < 1e-12)
+            or (
+                abs(p.sigma_0) < 1e-12
+                and abs(p.sigma_1) < 1e-12
+                and abs(p.sigma_2) < 1e-12
+            )
+        )
+
 
     # ----------------------------------------------------------------
     # RUN
@@ -796,9 +807,8 @@ class ImpactSimulator:
                     qp[:, step_idx + 1],
                     qp[:, step_idx],
                 )
-    
-                # One dense linear solve per nonlinear iteration
-                self.linear_solves += 1
+
+                # Track nonlinear iterations (linear solves tracked in integrator)
                 self.total_iters += 1
     
                 # Convergence check
@@ -859,6 +869,9 @@ class ImpactSimulator:
             dE_fric = max(p_fric, 0.0) * self.h
             E_fric[step_idx + 1] = E_fric[step_idx] + dE_fric
 
+        # Sync linear solves count from integrator
+        self.linear_solves = self.integrator.n_lu
+
         energies = {
             "E_kin": E_kin,
             "E_spring": E_spring,
@@ -898,19 +911,9 @@ class ImpactSimulator:
         assert qp.shape[0] == dof
 
         # --------------------------------------------------------------
-        # Early exit: friction disabled or coefficients zero
+        # Early exit: friction disabled or coefficients zero (pre-computed)
         # --------------------------------------------------------------
-        friction_off = (
-            p.friction_model in ("none", "off", "", None)
-            or (abs(p.mu_s) < 1e-12 and abs(p.mu_k) < 1e-12)
-            or (
-                abs(p.sigma_0) < 1e-12
-                and abs(p.sigma_1) < 1e-12
-                and abs(p.sigma_2) < 1e-12
-            )
-        )
-
-        if friction_off:
+        if not self.friction_enabled:
             # No new friction forces, just carry forward the internal state
             R_friction[:, step_idx + 1] = 0.0
             z_friction[:, step_idx + 1] = z_friction[:, step_idx]
@@ -1000,8 +1003,10 @@ class ImpactSimulator:
             # First contact
             if (not contact_active) and np.any(du_contact[:n] < 0.0):
                 contact_active = True
-                v0_contact = np.where(du_contact < 0.0, du_contact, 1.0)
-                v0_contact[v0_contact == 0.0] = 1.0
+                # Only set v0 for x-DOFs that are actually in contact
+                mask_contact_x = du_contact[:n] < 0.0
+                v0_contact[:n] = np.where(mask_contact_x, du_contact[:n], 1.0)
+                v0_contact[:n][v0_contact[:n] == 0.0] = 1.0
 
             R = ContactModels.compute_force(
                 u_contact[:, step_idx + 1],

@@ -5,25 +5,24 @@ This file provides the full interactive user interface and plotting,
 and delegates all heavy numerical work to core.engine.run_simulation().
 """
 
+from __future__ import annotations
+
 import io
-from typing import Dict, Any
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 import plotly.graph_objects as go
+import streamlit as st
 from plotly.subplots import make_subplots
 from scipy.constants import g as GRAVITY
 
-# ✅ Adjust this import to match your package layout
-from railway_simulator.core.engine import TrainConfig, TrainBuilder, run_simulation
-
-from .parametric import (
+from railway_simulator.core.engine import TrainBuilder, TrainConfig, run_simulation
+from railway_simulator.core.parametric import (
     build_speed_scenarios,
-    run_parametric_envelope,
     make_envelope_figure,
+    run_parametric_envelope,
 )
-
 
 # ====================================================================
 # HEADER / ABOUT
@@ -60,15 +59,14 @@ def display_header():
     *Review and Adjustment of Impact Loads from Railway Traffic*
 
     **Authors:**
-    - Univ.-Prof. Dr.-Ing. Lothar Stempniewski (KIT)
-    - Dipl.-Ing. Sebastián Labbé (KIT)
-    - Dr.-Ing. Steffen Siegel (Siegel und Wünschel PartG mbB)
-    - Robin Bosch, M.Sc. (Siegel und Wünschel PartG mbB)
+    - Lothar Stempniewski (KIT)
+    - Sebastián Labbé (KIT)
+    - Steffen Siegel (Siegel und Wünschel PartG mbB)
+    - Robin Bosch (Siegel und Wünschel PartG mbB)
 
     **Research Institutions:**
     - Karlsruher Institut für Technologie (KIT)  
       Institut für Massivbau und Baustofftechnologie
-    - Siegel und Wünschel beratende Ingenieure PartG mbB, Ettlingen
 
     **Publication:**  
     DZSF Bericht 53 (2024)  
@@ -93,13 +91,12 @@ def display_header():
 
     st.markdown("---")
 
-
 def display_citation():
     """Show how to cite the underlying research report."""
     st.markdown("---")
     st.markdown(
         """
-    ### 📚 Citation
+    ### Citation
 
     If you use this simulator in your research, please cite the original research report:
 
@@ -147,7 +144,6 @@ def display_citation():
     **License:** This work is licensed under CC BY 4.0
     """
     )
-
 
 # ====================================================================
 # UTILITIES (EXPORT + PLOTS)
@@ -324,9 +320,19 @@ def create_results_plots(df: pd.DataFrame) -> go.Figure:
         fig.update_yaxes(title_text="Energy (MJ)", row=5, col=1)
         fig.update_xaxes(title_text="Time (ms)", row=5, col=1)
 
-    fig.update_layout(height=1700, showlegend=True)
+    fig.update_layout(
+        height=1700,
+        showlegend=True,
+        legend=dict(
+            orientation="h",   # leyenda horizontal
+            x=0.5,             # centrada horizontalmente
+            xanchor="center",
+            y=-0.05,           # un poco debajo del último subplot
+            yanchor="top",
+        ),
+        margin=dict(t=60, b=100, l=60, r=80),
+    )
     return fig
-
 
 # ====================================================================
 # BUILDING SDOF + RESPONSE SPECTRA
@@ -749,19 +755,82 @@ def create_building_hysteresis_plot(df: pd.DataFrame) -> go.Figure:
     )
     return fig
 
+def _cantilever_shape_with_point_load(y: np.ndarray, L: float, a: float) -> np.ndarray:
+    """
+    Normalized deflection shape φ(y) for a cantilever of length L
+    with a point load at height a (measured from the fixed base).
+
+    φ(L) = 1, φ(0) = 0.
+
+    For 0 <= y <= a:
+        φ(y) = y^2 (3a - y) / (a^2 (3L - a))
+
+    For a <= y <= L:
+        φ(y) = (-a + 3y) / (3L - a)
+    """
+    y = np.asarray(y, dtype=float)
+
+    # Evitar a = 0 o a = L exacto
+    eps = 1e-6
+    a = float(np.clip(a, eps, L - eps))
+
+    phi = np.zeros_like(y, dtype=float)
+
+    mask_lower = y <= a
+    yl = y[mask_lower]
+    phi[mask_lower] = yl**2 * (3.0 * a - yl) / (a**2 * (3.0 * L - a))
+
+    mask_upper = y > a
+    yu = y[mask_upper]
+    phi[mask_upper] = (-a + 3.0 * yu) / (3.0 * L - a)
+
+    return phi
+
 
 def create_building_animation(
     df: pd.DataFrame,
     height_m: float,
     scale_factor: float = 1.0,
+    impact_height_m: float | None = None,
+    speed_factor: float = 1.0,
+    n_shape_points: int = 50,
+    use_beam_element: bool = False,
 ):
-    """Simple Plotly animation of a cantilever tip motion."""
-    if "Building_u_mm" not in df.columns or height_m <= 0.0:
+    """
+    Plotly animation of a cantilever-like building deformation over time.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Must contain columns 'Building_u_mm' and 'Time_ms'.
+        'Building_u_mm' is the top displacement in mm.
+    height_m : float
+        Total height of the building/cantilever [m].
+    scale_factor : float, optional
+        Visual scale for horizontal displacement.
+    impact_height_m : float, optional
+        Height of impact / point load [m] from the base.
+        If None, a standard train impact height is used (~1/3–1/2 of h_train=3 m).
+    speed_factor : float, optional
+        Playback speed factor; >1.0 = faster, <1.0 = slower.
+    n_shape_points : int, optional
+        Number of points along the height for plotting the deformed shape.
+    use_beam_element : bool, optional
+        Reserved for a future “true” beam element time integration.
+        If False (default), a static cantilever shape is used (fast).
+    """
+    if (
+        "Building_u_mm" not in df.columns
+        or "Time_ms" not in df.columns
+        or height_m <= 0.0
+    ):
         return None
 
-    u = df["Building_u_mm"].to_numpy() / 1000.0  # m
+    # Top displacement in meters
+    u = df["Building_u_mm"].to_numpy() / 1000.0
     u_scaled = scale_factor * u
     t_ms = df["Time_ms"].to_numpy()
+
     n = len(u_scaled)
     if n == 0:
         return None
@@ -769,34 +838,69 @@ def create_building_animation(
     max_frames = 200
     stride = max(1, n // max_frames)
 
-    frames = []
+    # --- Impact height default (1/3–1/2 of train height, h_train≈3 m) ---
+    if impact_height_m is None:
+        h_train = 3.0  # m
+        h_imp_std = h_train * 5.0 / 12.0  # promedio 1/3–1/2 ≈ 1.25 m
+        impact_height_m = min(h_imp_std, height_m - 0.1)
+
+    # Clamp por seguridad
+    impact_height_m = float(np.clip(impact_height_m, 0.1, height_m - 1e-3))
+
+    # Vertical coordinates
+    y_coords = np.linspace(0.0, height_m, n_shape_points)
+
+    # ---- MODO RÁPIDO: forma estática de voladizo escalada con u_top(t) ----
+    # (Aquí es donde luego puedes enganchar el “beam element” dinámico si quieres.)
+    phi = _cantilever_shape_with_point_load(
+        y_coords, L=height_m, a=impact_height_m
+    )
+
+    # Para la escala del eje x
     max_disp = float(np.max(np.abs(u_scaled))) if np.any(u_scaled) else 0.05
     x_lim = max(0.05, 1.2 * max_disp)
 
+    frames = []
     for idx in range(0, n, stride):
+        if not use_beam_element:
+            # Rápido: forma estática φ(y) * u_top(t)
+            x_frame = phi * u_scaled[idx]
+        else:
+            # FUTURO: aquí podrías meter la solución de un beam element dinámico
+            # w(y, t_idx) calculado con M, C, K y F(t). Por ahora, usamos lo mismo.
+            x_frame = phi * u_scaled[idx]
+
         frames.append(
             go.Frame(
                 data=[
                     go.Scatter(
-                        x=[0.0, u_scaled[idx]],
-                        y=[0.0, height_m],
+                        x=x_frame,
+                        y=y_coords,
                         mode="lines+markers",
                         line=dict(width=3),
-                        marker=dict(size=[0, 10]),
+                        marker=dict(size=6),
                     )
                 ],
-                name=str(idx),
+                name=f"{t_ms[idx]:.1f} ms",
             )
         )
+
+    # Initial frame
+    x0 = phi * u_scaled[0]
+
+    # Playback speed
+    base_duration_ms = 40
+    sf = max(speed_factor, 0.1)
+    frame_duration = int(base_duration_ms / sf)
 
     fig = go.Figure(
         data=[
             go.Scatter(
-                x=[0.0, u_scaled[0]],
-                y=[0.0, height_m],
+                x=x0,
+                y=y_coords,
                 mode="lines+markers",
                 line=dict(width=3),
-                marker=dict(size=[0, 10]),
+                marker=dict(size=6),
             )
         ],
         layout=go.Layout(
@@ -822,7 +926,10 @@ def create_building_animation(
                             "args": [
                                 None,
                                 {
-                                    "frame": {"duration": 40, "redraw": True},
+                                    "frame": {
+                                        "duration": frame_duration,
+                                        "redraw": True,
+                                    },
                                     "fromcurrent": True,
                                 },
                             ],
@@ -846,7 +953,6 @@ def create_building_animation(
         frames=frames,
     )
     return fig
-
 
 def compute_force_response_spectrum(
     df: pd.DataFrame,
@@ -1728,19 +1834,43 @@ def build_contact_friction_ui() -> Dict[str, Any]:
 # EXECUTE SIMULATION + TABS
 # ====================================================================
 
-def execute_simulation(params: Dict[str, Any]):
-    """Execute simulation via core.engine and display results."""
-    with st.spinner("Running HHT-α simulation..."):
-        try:
-            # 👉 delegate to the numerical core
-            df = run_simulation(params)
-            st.success("✅ Complete!")
-        except Exception as e:
-            st.error(f"Simulation error: {e}")
-            return
+def execute_simulation(params: Dict[str, Any], run_new: bool = False):
+    """
+    Ejecuta (o reutiliza) la simulación vía core.engine y muestra los resultados.
 
-    # Optional building SDOF post-processing
+    - Si run_new=True o no hay resultados cacheados, se llama a run_simulation(params)
+      y se guarda el DataFrame base (impacto tren-muro) en st.session_state["sim_results"].
+    - En todos los casos se recalcula el SDOF del edificio con los parámetros
+      actuales (barato) y se dibujan las tabs.
+    """
+    # ------------------------------------------------------
+    # 1) Simulación base de impacto (cara → solo con botón)
+    # ------------------------------------------------------
+    df_core = st.session_state.get("sim_results", None)
+
+    if run_new or df_core is None:
+        with st.spinner("Running HHT-α simulation..."):
+            try:
+                df_core = run_simulation(params)
+            except Exception as e:
+                st.error(f"Simulation error: {e}")
+                return
+
+        st.session_state["sim_results"] = df_core
+        st.session_state["sim_params_core"] = params
+        st.success("✅ Complete!")
+    else:
+        st.info(
+            "Using cached impact history from last run. "
+            "Press **Run Simulation** again after changing time/train/contact parameters."
+        )
+
+    # ------------------------------------------------------
+    # 2) SDOF del edificio (barato → recalcular siempre)
+    # ------------------------------------------------------
     building_df = None
+    df = df_core.copy()
+
     if (
         params.get("building_enable", False)
         and params.get("k_wall", 0.0) > 0.0
@@ -1748,7 +1878,7 @@ def execute_simulation(params: Dict[str, Any]):
     ):
         try:
             building_df = compute_building_sdof_response(
-                df,
+                df_core,
                 k_wall=params["k_wall"],
                 m_build=params["building_mass"],
                 zeta=params["building_zeta"],
@@ -1758,16 +1888,19 @@ def execute_simulation(params: Dict[str, Any]):
                 gamma=params.get("building_gamma", 0.4),
             )
             if building_df is not None and not building_df.empty:
-                df = pd.concat([df, building_df], axis=1)
+                df = pd.concat([df_core, building_df], axis=1)
         except Exception as e:
             st.warning(f"Building SDOF response could not be computed: {e}")
             building_df = None
 
+    # ------------------------------------------------------
+    # 3) Tabs de resultados (igual que antes, usando df + building_df)
+    # ------------------------------------------------------
     tab_global, tab_building, tab_train = st.tabs(
         ["📈 Global Results", "🏢 Building Response (SDOF)", "🚃 Train Configuration"]
     )
 
-    # Global results
+    # ----- Global results -----
     with tab_global:
         c1, c2, c3 = st.columns(3)
         c1.metric("Max Force", f"{df['Impact_Force_MN'].max():.2f} MN")
@@ -1786,7 +1919,7 @@ def execute_simulation(params: Dict[str, Any]):
             )
 
         fig = create_results_plots(df)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         st.subheader("📥 Export")
         e1, e2, e3 = st.columns(3)
@@ -1796,7 +1929,7 @@ def execute_simulation(params: Dict[str, Any]):
             df.to_csv(index=False).encode(),
             "results.csv",
             "text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
         e2.download_button(
@@ -1804,7 +1937,7 @@ def execute_simulation(params: Dict[str, Any]):
             df.to_string(index=False).encode(),
             "results.txt",
             "text/plain",
-            use_container_width=True,
+            width="stretch",
         )
 
         e3.download_button(
@@ -1812,10 +1945,10 @@ def execute_simulation(params: Dict[str, Any]):
             to_excel(df),
             "results.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
-    # Building SDOF response
+    # ----- Building SDOF response -----
     with tab_building:
         if (
             params.get("building_enable", False)
@@ -1830,17 +1963,20 @@ def execute_simulation(params: Dict[str, Any]):
             )
 
             fig_b = create_building_response_plots(df)
-            st.plotly_chart(fig_b, use_container_width=True)
+            st.plotly_chart(fig_b, width="stretch")
 
             st.markdown("#### Building hysteresis (restoring force vs displacement)")
             try:
                 fig_h = create_building_hysteresis_plot(df)
-                st.plotly_chart(fig_h, use_container_width=True)
+                st.plotly_chart(fig_h, width="stretch")
             except Exception as e:
                 st.warning(f"Building hysteresis could not be plotted: {e}")
 
-            if params.get("building_height", 0.0) > 0.0:
+            building_height_m = params.get("building_height", 0.0)
+            if building_height_m > 0.0:
                 st.markdown("#### Cantilever animation (top displacement over time)")
+
+                # Visual scale factor
                 scale_factor = st.slider(
                     "Visual scale factor for horizontal displacement",
                     min_value=1.0,
@@ -1849,13 +1985,58 @@ def execute_simulation(params: Dict[str, Any]):
                     step=1.0,
                     help="Purely visual scaling. Does not affect the analysis results.",
                 )
-                anim_fig = create_building_animation(
-                    df,
-                    params["building_height"],
-                    scale_factor=scale_factor,
+
+                # Impact height slider
+                h_train = 3.0  # m
+                h_imp_max = float(min(h_train, building_height_m))
+                h_imp_default = float(min(h_train * 5.0 / 12.0, h_imp_max))
+
+                impact_height_m = st.slider(
+                    "Impact height above track (m)",
+                    min_value=0.1,
+                    max_value=h_imp_max,
+                    value=h_imp_default,
+                    step=0.05,
+                    help=(
+                        "Standard impact height is roughly between 1/3 and 1/2 of the "
+                        "train height (h_train ≈ 3 m)."
+                    ),
                 )
-                if anim_fig is not None:
-                    st.plotly_chart(anim_fig, use_container_width=True)
+
+                # Playback speed slider
+                speed_factor = st.slider(
+                    "Playback speed factor",
+                    min_value=0.25,
+                    max_value=4.0,
+                    value=1.0,
+                    step=0.25,
+                    help="0.5 = slower, 2.0 = faster, etc.",
+                )
+
+                # Optional beam-element mode
+                use_beam_element = st.checkbox(
+                    "Use beam-element mode (slower, experimental)",
+                    value=False,
+                    help=(
+                        "If enabled, this is the hook for a full beam-element time "
+                        "integration with fixed base (u=0, θ=0) after impact. "
+                        "May take longer to compute."
+                    ),
+                )
+
+                try:
+                    anim_fig = create_building_animation(
+                        df=df,
+                        height_m=building_height_m,
+                        scale_factor=scale_factor,
+                        impact_height_m=impact_height_m,
+                        speed_factor=speed_factor,
+                        use_beam_element=use_beam_element,
+                    )
+                    if anim_fig is not None:
+                        st.plotly_chart(anim_fig, width="stretch")
+                except Exception as e:
+                    st.warning(f"Cantilever animation could not be created: {e}")
 
             st.markdown("#### Force-based response spectrum (pseudo-acceleration)")
             try:
@@ -1889,7 +2070,7 @@ def execute_simulation(params: Dict[str, Any]):
                         spec_df,
                         m_build=m_build,
                     )
-                    st.plotly_chart(fig_spec, use_container_width=True)
+                    st.plotly_chart(fig_spec, width="stretch")
 
                     if f_build is not None:
                         freq_array = spec_df["freq_Hz"].to_numpy()
@@ -1924,7 +2105,7 @@ def execute_simulation(params: Dict[str, Any]):
                             spec_multi_df,
                             zeta_ref=zeta_build,
                         )
-                        st.plotly_chart(fig_multi, use_container_width=True)
+                        st.plotly_chart(fig_multi, width="stretch")
 
             except Exception as e:
                 st.warning(f"Response spectrum could not be computed: {e}")
@@ -1934,11 +2115,11 @@ def execute_simulation(params: Dict[str, Any]):
                 "and visualise building accelerations and hysteresis."
             )
 
-    # Train geometry / Riera mass distribution
+    # ----- Train geometry / Riera mass distribution -----
     with tab_train:
         st.markdown("### Train configuration and Riera-type mass distribution")
         fig_train = create_train_geometry_plot(params)
-        st.plotly_chart(fig_train, use_container_width=True)
+        st.plotly_chart(fig_train, width="stretch")
 
         masses = np.asarray(params["masses"], dtype=float)
         x = np.asarray(params["x_init"], dtype=float)
@@ -1953,6 +2134,7 @@ def execute_simulation(params: Dict[str, Any]):
             )
         else:
             st.caption("No mass data available for the current configuration.")
+
 
 
 # ====================================================================
@@ -1988,12 +2170,19 @@ def main():
             run_btn = st.button(
                 "▶️ **Run Simulation**",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
 
         with col2:
+            has_results = st.session_state.get("sim_results", None) is not None
+        
             if run_btn:
-                execute_simulation(params)
+                # Correr simulación nueva y mostrar resultados
+                execute_simulation(params, run_new=True)
+            elif has_results:
+                # Reusar resultados previos, pero permitir que cambien
+                # los parámetros del edificio / animación
+                execute_simulation(params, run_new=False)
             else:
                 st.info(
                     "👈 Configure parameters in the sidebar and press "
@@ -2074,7 +2263,7 @@ def main():
                         quantity=quantity,
                         title=f"{quantity_label} – envelope over defined speeds",
                     )
-                    st.plotly_chart(fig_env, use_container_width=True)
+                    st.plotly_chart(fig_env, width="stretch")
 
                     st.markdown("#### Scenario summary")
                     st.dataframe(summary_df)

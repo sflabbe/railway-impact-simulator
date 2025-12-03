@@ -56,6 +56,8 @@ The project defines an extra dependency group called `ui` that pulls in heavier 
 To install the package **with** these optional UI dependencies:
 
 ```bash
+python -m pip install --upgrade pip
+python -m pip install --upgrade setuptools wheel
 pip install --no-build-isolation ".[ui]"
 ```
 

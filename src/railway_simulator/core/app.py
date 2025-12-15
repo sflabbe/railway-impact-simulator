@@ -8,10 +8,12 @@ and delegates all heavy numerical work to core.engine.run_simulation().
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
+import yaml
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
@@ -23,6 +25,10 @@ from railway_simulator.core.parametric import (
     make_envelope_figure,
     run_parametric_envelope,
 )
+
+from railway_simulator.studies import parse_floats_csv
+from railway_simulator.studies.numerics_sensitivity import run_numerics_sensitivity
+from railway_simulator.studies.strain_rate_sensitivity import run_fixed_dif_sensitivity
 
 # ====================================================================
 # HEADER / ABOUT
@@ -1314,17 +1320,108 @@ def build_parameter_ui() -> Dict[str, Any]:
         contact_params = build_contact_friction_ui()
         params.update(contact_params)
 
+        # Apply YAML example config overrides (if selected in Train Geometry)
+        yaml_cfg = st.session_state.get("yaml_example_cfg")
+        if isinstance(yaml_cfg, dict) and yaml_cfg:
+            apply_full = bool(st.session_state.get("yaml_apply_full", False))
+            use_time = bool(st.session_state.get("yaml_use_time", True))
+            use_material = bool(st.session_state.get("yaml_use_material", True))
+            use_contact = bool(st.session_state.get("yaml_use_contact", True))
+
+            time_keys = {
+                "v0_init",
+                "T_max",
+                "h_init",
+                "alpha_hht",
+                "newton_tol",
+                "max_iter",
+                "d0",
+                "angle_rad",
+                "step",
+                "T_int",
+            }
+            material_keys = {"fy", "uy", "bw_a", "bw_A", "bw_beta", "bw_gamma", "bw_n"}
+            contact_keys = {
+                "contact_model",
+                "k_wall",
+                "cr_wall",
+                "mu_s",
+                "mu_k",
+                "sigma_0",
+                "sigma_1",
+                "sigma_2",
+                # building keys (optional)
+                "enable_building_sdof",
+                "building_mass",
+                "building_zeta",
+                "building_height",
+                "building_k",
+                "building_c",
+                "building_uy",
+                "building_uy_mm",
+                "building_alpha",
+                "building_gamma",
+            }
+
+            if apply_full:
+                params.update(yaml_cfg)
+            else:
+                if use_time:
+                    for k in time_keys:
+                        if k in yaml_cfg and yaml_cfg.get(k) is not None:
+                            params[k] = yaml_cfg[k]
+                if use_material:
+                    for k in material_keys:
+                        if k in yaml_cfg and yaml_cfg.get(k) is not None:
+                            params[k] = np.asarray(yaml_cfg[k], dtype=float) if k in {"fy", "uy"} else yaml_cfg[k]
+                if use_contact:
+                    for k in contact_keys:
+                        if k in yaml_cfg and yaml_cfg.get(k) is not None:
+                            params[k] = yaml_cfg[k]
+
+            # Ensure step/T_int are consistent if YAML changed T_max/h_init but did not set step
+            if ("T_max" in yaml_cfg or "h_init" in yaml_cfg or "T_int" in yaml_cfg) and (
+                "step" not in yaml_cfg or yaml_cfg.get("step") is None
+            ):
+                try:
+                    T_max = float(params.get("T_max", 0.4))
+                    h = float(params.get("h_init", 1e-4))
+                    if h > 0:
+                        params["step"] = int(np.ceil(T_max / h))
+                        params["T_int"] = (0.0, T_max)
+                except Exception:
+                    pass
+
     return params
 
 
+
 def build_train_geometry_ui() -> Dict[str, Any]:
-    """Build train geometry UI."""
+    """Build train geometry UI.
+
+    Supports:
+      - Research locomotive model (default)
+      - Built-in parametric presets
+      - YAML example configs from ./configs/*.yml
+    """
     with st.expander("🚃 Train Geometry", expanded=True):
         config_mode = st.radio(
             "Configuration mode",
-            ("Research locomotive model", "Example trains"),
+            ("Research locomotive model", "Example trains", "YAML example configs"),
             index=0,
         )
+
+        # Clear YAML selection when leaving YAML mode (avoid stale overrides).
+        if config_mode != "YAML example configs":
+            for k in (
+                "yaml_example_cfg",
+                "yaml_apply_full",
+                "yaml_use_time",
+                "yaml_use_material",
+                "yaml_use_contact",
+                "yaml_config_path",
+            ):
+                st.session_state.pop(k, None)
 
         if config_mode == "Research locomotive model":
             n_masses = st.slider("Number of Masses", 2, 20, 7)
@@ -1349,12 +1446,141 @@ def build_train_geometry_ui() -> Dict[str, Any]:
                 x_init = np.linspace(0.02, 0.02 + L_total, n_masses)
                 y_init = np.zeros(n_masses)
 
-        else:
+            return {
+                "n_masses": int(n_masses),
+                "masses": masses,
+                "x_init": x_init,
+                "y_init": y_init,
+            }
+
+        if config_mode == "Example trains":
             train_config = build_example_train_ui()
             n_masses, masses, x_init, y_init = TrainBuilder.build_train(train_config)
 
+            return {
+                "n_masses": int(n_masses),
+                "masses": masses,
+                "x_init": x_init,
+                "y_init": y_init,
+            }
+
+        # ------------------------------
+        # YAML example configs
+        # ------------------------------
+        cfg_dir = Path.cwd() / "configs"
+        if not cfg_dir.is_dir():
+            # Fallback: repo layout when running from source tree
+            try:
+                cfg_dir = Path(__file__).resolve().parents[3] / "configs"
+            except Exception:
+                cfg_dir = Path.cwd() / "configs"
+
+        yaml_files = sorted(list(cfg_dir.glob("*.yml")) + list(cfg_dir.glob("*.yaml")))
+        if not yaml_files:
+            st.warning(
+                "No YAML configs found. Expected ./configs/*.yml in the repository. "
+                "Falling back to 'Example trains'."
+            )
+            train_config = build_example_train_ui()
+            n_masses, masses, x_init, y_init = TrainBuilder.build_train(train_config)
+            return {
+                "n_masses": int(n_masses),
+                "masses": masses,
+                "x_init": x_init,
+                "y_init": y_init,
+            }
+
+        labels: list[str] = []
+        parsed: list[dict] = []
+        for p in yaml_files:
+            try:
+                d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                if not isinstance(d, dict):
+                    d = {}
+            except Exception:
+                d = {}
+            case = d.get("case_name", p.stem)
+            labels.append(f"{p.name} — {case}")
+            parsed.append(d)
+
+        idx = st.selectbox(
+            "YAML config",
+            options=list(range(len(yaml_files))),
+            format_func=lambda i: labels[i],
+            index=0,
+        )
+
+        yaml_path = yaml_files[idx]
+        yaml_cfg = parsed[idx] if isinstance(parsed[idx], dict) else {}
+
+        st.session_state["yaml_example_cfg"] = yaml_cfg
+        st.session_state["yaml_config_path"] = str(yaml_path)
+
+        case_name = yaml_cfg.get("case_name", yaml_path.stem)
+
+        st.caption(f"Selected YAML: **{yaml_path.name}**  ·  case_name: **{case_name}**")
+
+        apply_full = st.checkbox(
+            "Apply full YAML config (overrides all sidebar params)",
+            value=False,
+            help="If enabled, the simulation will run exactly with the YAML values (time/material/contact/etc).",
+        )
+
+        use_time = st.checkbox(
+            "Use time/integration values from YAML (v0_init, T_max, h_init, α, tol, ...)",
+            value=True,
+            disabled=apply_full,
+        )
+        use_material = st.checkbox(
+            "Use train material values from YAML (fy/uy/Bouc–Wen)",
+            value=True,
+            disabled=apply_full,
+        )
+        use_contact = st.checkbox(
+            "Use contact/friction values from YAML (k_wall/contact model/μ)",
+            value=True,
+            disabled=apply_full,
+        )
+
+        st.session_state["yaml_apply_full"] = bool(apply_full)
+        st.session_state["yaml_use_time"] = bool(use_time)
+        st.session_state["yaml_use_material"] = bool(use_material)
+        st.session_state["yaml_use_contact"] = bool(use_contact)
+
+        # Geometry: required keys
+        n_masses = int(yaml_cfg.get("n_masses", 0) or 0)
+        masses_raw = yaml_cfg.get("masses", None)
+        x_raw = yaml_cfg.get("x_init", None)
+        y_raw = yaml_cfg.get("y_init", None)
+
+        if n_masses <= 0 and isinstance(masses_raw, (list, tuple)):
+            n_masses = len(masses_raw)
+
+        if n_masses <= 0:
+            st.error("YAML config does not define 'n_masses' or 'masses'.")
+            n_masses = 2
+            masses = np.ones(n_masses) * 20000.0
+            x_init = np.linspace(0.0, 10.0, n_masses)
+            y_init = np.zeros(n_masses)
+        else:
+            masses = np.asarray(masses_raw if masses_raw is not None else [0.0] * n_masses, dtype=float)
+            x_init = np.asarray(x_raw if x_raw is not None else np.linspace(0.0, 10.0, n_masses), dtype=float)
+            y_init = np.asarray(y_raw if y_raw is not None else np.zeros(n_masses), dtype=float)
+
+            # Basic consistency warnings
+            if masses.size != n_masses:
+                st.warning(f"'masses' length ({masses.size}) != n_masses ({n_masses}). Engine will attempt to coerce.")
+            if x_init.size != n_masses:
+                st.warning(f"'x_init' length ({x_init.size}) != n_masses ({n_masses}). Engine will attempt to coerce.")
+            if y_init.size != n_masses:
+                st.warning(f"'y_init' length ({y_init.size}) != n_masses ({n_masses}). Engine will attempt to coerce.")
+
+        with st.expander("Preview YAML (top-level keys)", expanded=False):
+            st.json({k: yaml_cfg.get(k) for k in sorted(yaml_cfg.keys())})
+
         return {
-            "n_masses": n_masses,
+            "case_name": case_name,
+            "n_masses": int(n_masses),
             "masses": masses,
             "x_init": x_init,
             "y_init": y_init,
@@ -2141,6 +2367,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
 # MAIN STREAMLIT ENTRYPOINT
 # ====================================================================
 
+
 def main():
     """Main Streamlit application."""
     st.set_page_config(
@@ -2149,23 +2376,33 @@ def main():
         page_icon="🚂",
     )
 
-    tab_sim, tab_about = st.tabs(["🚂 Simulator", "📖 About / Documentation"])
+    # Sidebar parameter UI is shared across all tabs
+    params = build_parameter_ui()
 
+    tab_sim, tab_param, tab_about = st.tabs(
+        ["🚂 Simulator", "🧪 Parametric Studies", "📖 About / Documentation"]
+    )
+
+    # --------------------------------------------------------------
     # SIMULATOR TAB
+    # --------------------------------------------------------------
     with tab_sim:
         st.title("Railway Impact Simulator")
         st.markdown("**HHT-α implicit integration with Bouc–Wen hysteresis**")
-
-        params = build_parameter_ui()
 
         col1, col2 = st.columns([1, 2])
 
         with col1:
             st.subheader("📊 Configuration")
-            st.metric("Velocity", f"{-params['v0_init'] * 3.6:.1f} km/h")
-            st.metric("Masses", params["n_masses"])
-            st.metric("Time Step", f"{params['h_init']*1000:.2f} ms")
-            st.metric("Initial Gap", f"{params['d0']*100:.1f} cm")
+            try:
+                st.metric("Velocity", f"{-float(params['v0_init']) * 3.6:.1f} km/h")
+            except Exception:
+                st.metric("Velocity", "—")
+            st.metric("Masses", int(params.get("n_masses", 0)))
+            st.metric("Time Step", f"{float(params.get('h_init', 0.0))*1000:.2f} ms")
+            st.metric("Initial Gap", f"{float(params.get('d0', 0.0))*100:.1f} cm")
+            if params.get("case_name"):
+                st.caption(f"case_name: **{params['case_name']}**")
             st.markdown("---")
             run_btn = st.button(
                 "▶️ **Run Simulation**",
@@ -2175,100 +2412,332 @@ def main():
 
         with col2:
             has_results = st.session_state.get("sim_results", None) is not None
-        
+
             if run_btn:
-                # Correr simulación nueva y mostrar resultados
                 execute_simulation(params, run_new=True)
             elif has_results:
-                # Reusar resultados previos, pero permitir que cambien
-                # los parámetros del edificio / animación
                 execute_simulation(params, run_new=False)
             else:
                 st.info(
-                    "👈 Configure parameters in the sidebar and press "
-                    "**Run Simulation**"
+                    "👈 Configure parameters in the sidebar and press **Run Simulation**"
                 )
 
+    # --------------------------------------------------------------
+    # PARAMETRIC STUDIES TAB
+    # --------------------------------------------------------------
+    with tab_param:
+        st.title("Parametric Studies")
+        st.markdown(
+            "Run reproducible sweeps using the same configuration as the Simulator tab."
+        )
+
+        sub_env, sub_sens, sub_dif = st.tabs(
+            ["🚄 Speed envelope", "🧮 Numerics sensitivity", "⚡ Strain-rate (DIF)"]
+        )
+
+        # --------------------------
+        # Speed envelope (existing)
+        # --------------------------
+        with sub_env:
+            st.markdown("### Envelope over multiple speeds")
+
+            st.write(
+                "This parametric study reuses the current train/material/contact "
+                "settings and only varies the impact speed. Define a set of "
+                "speeds and statistical weights; the tool computes the quantity "
+                "envelope ('Umhüllende') and a weighted mean history."
+            )
+
+            default_data = {
+                "speed_kmh": [80.0, 56.0, 40.0],
+                "weight": [0.25, 0.50, 0.25],
+            }
+
+            df_scenarios = st.data_editor(
+                pd.DataFrame(default_data),
+                num_rows="dynamic",
+                key="parametric_table",
+            )
+
+            quantity_options = {
+                "Impact force at barrier [MN]": "Impact_Force_MN",
+                "Vehicle acceleration [g]": "Acceleration_g",
+                "Penetration [mm]": "Penetration_mm",
+            }
+
+            quantity_label = st.selectbox(
+                "Quantity for envelope",
+                list(quantity_options.keys()),
+                index=0,
+                key="env_quantity",
+            )
+            quantity = quantity_options[quantity_label]
+
+            if st.button("Run parametric envelope", type="primary", key="run_env"):
+                try:
+                    speeds = df_scenarios["speed_kmh"].astype(float).tolist()
+                    weights = df_scenarios["weight"].astype(float).tolist()
+
+                    if not speeds:
+                        st.warning("Please define at least one scenario.")
+                    else:
+                        base_params = dict(params)
+
+                        scenarios = build_speed_scenarios(
+                            base_params,
+                            speeds_kmh=speeds,
+                            weights=weights,
+                            prefix="v",
+                        )
+
+                        envelope_df, summary_df, _ = run_parametric_envelope(
+                            scenarios, quantity=quantity
+                        )
+
+                        fig_env = make_envelope_figure(
+                            envelope_df,
+                            quantity=quantity,
+                            title=f"{quantity_label} – envelope over defined speeds",
+                        )
+                        st.plotly_chart(fig_env, width="stretch")
+
+                        st.markdown("#### Scenario summary")
+                        st.dataframe(summary_df)
+                except Exception as exc:
+                    st.error(f"Parametric study failed: {exc}")
+
+        # --------------------------
+        # Numerics sensitivity
+        # --------------------------
+        with sub_sens:
+            st.markdown("### Sensitivity to numerical parameters (Δt, HHT-α, tolerance)")
+
+            left, right = st.columns([1, 2])
+
+            with left:
+                st.caption("Comma-separated lists are supported (e.g. `1e-4,2e-4,5e-5`).")
+
+                q_label = st.selectbox(
+                    "Quantity",
+                    ["Impact_Force_MN", "Acceleration_g", "Penetration_mm"],
+                    index=0,
+                    key="sens_quantity",
+                )
+
+                dt_str = st.text_input("Δt values (s)", value="1e-4,2e-4", key="sens_dt")
+                alpha_str = st.text_input("HHT-α values", value="-0.15", key="sens_alpha")
+                tol_str = st.text_input("Tolerance values", value="1e-4", key="sens_tol")
+
+                max_runs = st.number_input("Max runs to plot (overlay)", 1, 20, 10, 1)
+
+                run_sens = st.button("Run numerics sensitivity", type="primary", key="run_sens")
+
+            with right:
+                if run_sens:
+                    try:
+                        dt_vals = parse_floats_csv(dt_str) if dt_str.strip() else None
+                        alpha_vals = parse_floats_csv(alpha_str) if alpha_str.strip() else None
+                        tol_vals = parse_floats_csv(tol_str) if tol_str.strip() else None
+
+                        captured: list[tuple[dict, pd.DataFrame]] = []
+
+                        def _cap_sim(cfg: Dict[str, Any]) -> pd.DataFrame:
+                            df = run_simulation(cfg)
+                            captured.append((cfg, df))
+                            return df
+
+                        summary_df = run_numerics_sensitivity(
+                            dict(params),
+                            dt_values=dt_vals,
+                            alpha_values=alpha_vals,
+                            tol_values=tol_vals,
+                            quantity=q_label,
+                            simulate_func=_cap_sim,
+                        )
+
+                        st.session_state["sens_summary_df"] = summary_df
+                        st.session_state["sens_captured"] = captured
+
+                    except Exception as exc:
+                        st.error(f"Sensitivity study failed: {exc}")
+
+                summary_df = st.session_state.get("sens_summary_df", None)
+                captured = st.session_state.get("sens_captured", None)
+
+                if summary_df is None:
+                    st.info("Run the study to see results.")
+                else:
+                    st.markdown("#### Summary")
+                    st.dataframe(summary_df)
+
+                    # Simple peak plot
+                    try:
+                        fig_peak = go.Figure()
+                        fig_peak.add_trace(
+                            go.Scatter(
+                                x=summary_df["dt_s"],
+                                y=summary_df["peak_force_MN"],
+                                mode="markers+lines",
+                                name="Peak force",
+                            )
+                        )
+                        fig_peak.update_layout(
+                            title="Peak force vs Δt (aggregated over α/tol)",
+                            xaxis_title="Δt (s)",
+                            yaxis_title="Peak force (MN)",
+                            height=350,
+                        )
+                        st.plotly_chart(fig_peak, width="stretch")
+                    except Exception:
+                        pass
+
+                    # Overlay time histories for the selected quantity
+                    if captured:
+                        st.markdown("#### Time histories (overlay)")
+                        fig = go.Figure()
+                        shown = 0
+                        for cfg, df in captured:
+                            if shown >= int(max_runs):
+                                break
+                            if q_label not in df.columns:
+                                continue
+                            if "Time_ms" in df.columns:
+                                t = df["Time_ms"]
+                                xlab = "Time (ms)"
+                            else:
+                                t = df["Time_s"] * 1000.0
+                                xlab = "Time (ms)"
+                            dt = float(cfg.get("h_init", np.nan))
+                            a = float(cfg.get("alpha_hht", np.nan))
+                            tol = float(cfg.get("newton_tol", np.nan))
+                            label = f"dt={dt:.1e}s, α={a:+.2f}, tol={tol:.1e}"
+                            fig.add_trace(go.Scatter(x=t, y=df[q_label], mode="lines", name=label))
+                            shown += 1
+                        fig.update_layout(
+                            xaxis_title=xlab,
+                            yaxis_title=q_label,
+                            height=450,
+                        )
+                        st.plotly_chart(fig, width="stretch")
+
+        # --------------------------
+        # Strain-rate proxy (Fixed DIF)
+        # --------------------------
+        with sub_dif:
+            st.markdown("### Strain-rate influence (proxy): fixed DIF multiplier")
+
+            left, right = st.columns([1, 2])
+
+            with left:
+                st.caption(
+                    "Applies k_scaled = k0 * DIF to a scalar parameter path (default: k_wall). "
+                    "Advanced: you can set paths like `fy[0]`."
+                )
+
+                dif_str = st.text_input("DIF values", value="0.8,1.0,1.2", key="dif_vals")
+                k_path = st.text_input("Parameter path to scale", value="k_wall", key="dif_kpath")
+                q_label = st.selectbox(
+                    "Quantity",
+                    ["Impact_Force_MN", "Acceleration_g", "Penetration_mm"],
+                    index=0,
+                    key="dif_quantity",
+                )
+                max_runs = st.number_input("Max runs to plot (overlay)", 1, 20, 10, 1, key="dif_max_runs")
+
+                run_dif = st.button("Run DIF study", type="primary", key="run_dif")
+
+            with right:
+                if run_dif:
+                    try:
+                        dif_vals = parse_floats_csv(dif_str) if dif_str.strip() else [1.0]
+
+                        captured: list[tuple[dict, pd.DataFrame]] = []
+
+                        def _cap_sim(cfg: Dict[str, Any]) -> pd.DataFrame:
+                            df = run_simulation(cfg)
+                            captured.append((cfg, df))
+                            return df
+
+                        summary_df = run_fixed_dif_sensitivity(
+                            dict(params),
+                            dif_vals,
+                            k_path=k_path.strip(),
+                            quantity=q_label,
+                            simulate_func=_cap_sim,
+                        )
+
+                        st.session_state["dif_summary_df"] = summary_df
+                        st.session_state["dif_captured"] = captured
+
+                    except Exception as exc:
+                        st.error(f"DIF study failed: {exc}")
+
+                summary_df = st.session_state.get("dif_summary_df", None)
+                captured = st.session_state.get("dif_captured", None)
+
+                if summary_df is None:
+                    st.info("Run the study to see results.")
+                else:
+                    st.markdown("#### Summary")
+                    st.dataframe(summary_df)
+
+                    # Peak vs DIF
+                    try:
+                        fig_peak = go.Figure()
+                        fig_peak.add_trace(
+                            go.Scatter(
+                                x=summary_df["dif"],
+                                y=summary_df["peak_force_MN"],
+                                mode="markers+lines",
+                                name="Peak force",
+                            )
+                        )
+                        fig_peak.update_layout(
+                            title=f"Peak force vs DIF (scaling {k_path})",
+                            xaxis_title="DIF",
+                            yaxis_title="Peak force (MN)",
+                            height=350,
+                        )
+                        st.plotly_chart(fig_peak, width="stretch")
+                    except Exception:
+                        pass
+
+                    # Overlay time histories
+                    if captured:
+                        st.markdown("#### Time histories (overlay)")
+                        fig = go.Figure()
+                        shown = 0
+                        for cfg, df in captured:
+                            if shown >= int(max_runs):
+                                break
+                            if q_label not in df.columns:
+                                continue
+                            if "Time_ms" in df.columns:
+                                t = df["Time_ms"]
+                                xlab = "Time (ms)"
+                            else:
+                                t = df["Time_s"] * 1000.0
+                                xlab = "Time (ms)"
+                            dif = float(cfg.get("dif", np.nan)) if "dif" in cfg else np.nan
+                            # If dif isn't present in cfg (it won't be), infer from scaled parameter
+                            dif_val = float(summary_df["dif"].iloc[shown]) if (shown < len(summary_df)) else float("nan")
+                            label = f"DIF={dif_val:.3f}"
+                            fig.add_trace(go.Scatter(x=t, y=df[q_label], mode="lines", name=label))
+                            shown += 1
+                        fig.update_layout(
+                            xaxis_title=xlab,
+                            yaxis_title=q_label,
+                            height=450,
+                        )
+                        st.plotly_chart(fig, width="stretch")
+
+    # --------------------------------------------------------------
     # ABOUT / DOCUMENTATION TAB
+    # --------------------------------------------------------------
     with tab_about:
         display_header()
         display_citation()
 
-    # ------------------------------------------------------------------
-    # Parametric study: speed-dependent envelope (experimental)
-    # ------------------------------------------------------------------
-    st.markdown("### Parametric study: envelope over multiple speeds")
-
-    with st.expander(
-        "Run envelope for a set of speeds (using current train configuration)",
-        expanded=False,
-    ):
-        st.write(
-            "This parametric study reuses the current train/material/contact "
-            "settings and only varies the impact speed. Define a set of "
-            "speeds and statistical weights; the tool computes the force "
-            "envelope ('Umhüllende') and a weighted mean history."
-        )
-
-        # Default example: roughly your line mix idea
-        default_data = {
-            "speed_kmh": [320.0, 200.0, 120.0],
-            "weight": [0.20, 0.40, 0.40],  # 20 % / 40 % / 40 %
-        }
-
-        df_scenarios = st.data_editor(
-            pd.DataFrame(default_data),
-            num_rows="dynamic",
-            key="parametric_table",
-        )
-
-        quantity_options = {
-            "Impact force at barrier [MN]": "Impact_Force_MN",
-            "Vehicle acceleration [g]": "Vehicle_a_g",
-            # add more if you have them in the results DataFrame
-        }
-
-        quantity_label = st.selectbox(
-            "Quantity for envelope",
-            list(quantity_options.keys()),
-            index=0,
-            key="env_quantity",
-        )
-        quantity = quantity_options[quantity_label]
-
-        if st.button("Run parametric envelope", type="primary", key="run_env"):
-            try:
-                speeds = df_scenarios["speed_kmh"].astype(float).tolist()
-                weights = df_scenarios["weight"].astype(float).tolist()
-
-                if not speeds:
-                    st.warning("Please define at least one scenario.")
-                else:
-                    # params: dict used in the single run above
-                    base_params = dict(params)  # shallow copy is enough
-
-                    scenarios = build_speed_scenarios(
-                        base_params,
-                        speeds_kmh=speeds,
-                        weights=weights,
-                        prefix="v",
-                    )
-
-                    envelope_df, summary_df, _ = run_parametric_envelope(
-                        scenarios, quantity=quantity
-                    )
-
-                    fig_env = make_envelope_figure(
-                        envelope_df,
-                        quantity=quantity,
-                        title=f"{quantity_label} – envelope over defined speeds",
-                    )
-                    st.plotly_chart(fig_env, width="stretch")
-
-                    st.markdown("#### Scenario summary")
-                    st.dataframe(summary_df)
-            except Exception as exc:
-                st.error(f"Parametric study failed: {exc}")
 
 if __name__ == "__main__":
     main()

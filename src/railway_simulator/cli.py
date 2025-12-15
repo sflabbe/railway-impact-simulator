@@ -34,6 +34,41 @@ app = typer.Typer(
 from .studies.cli import register_study_commands
 register_study_commands(app)
 
+
+@app.command()
+def ui(
+    host: str = typer.Option("127.0.0.1", help="Server address (use 0.0.0.0 to expose)."),
+    port: int = typer.Option(8501, help="Server port."),
+    headless: bool = typer.Option(False, help="Run Streamlit in headless mode."),
+) -> None:
+    """Launch the Streamlit UI (requires the optional 'ui' dependencies)."""
+    app_py = Path(__file__).resolve().parent / "core" / "app.py"
+
+    # Provide a friendly error if streamlit isn't installed
+    try:
+        import streamlit  # noqa: F401
+    except Exception:
+        raise typer.BadParameter(
+            "Streamlit is not installed. Install UI extras with:\n\n"
+            "  pip install 'railway-impact-simulator[ui]'\n"
+        )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_py),
+        "--server.address",
+        host,
+        "--server.port",
+        str(port),
+    ]
+    if headless:
+        cmd += ["--server.headless", "true"]
+
+    raise typer.Exit(subprocess.call(cmd))
+
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------

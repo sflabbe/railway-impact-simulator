@@ -1226,13 +1226,31 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
       same normalisation pipeline to be robust against objects constructed
       directly from raw YAML/JSON dicts.
     """
+    # Track which time/grid keys were explicitly set by the user when passing a dict.
+    user_overrides: Dict[str, Any] = {}
+    user_provided_step = False
+    user_provided_T_int = False
+    user_provided_T_max = False
+    user_provided_h_init = False
+
     if isinstance(params, SimulationParams):
         # Dataclass -> plain dict
         raw = {f.name: getattr(params, f.name) for f in fields(SimulationParams)}
+        # For dataclass input, assume the time grid was explicitly specified.
+        user_provided_step = True
+        user_provided_T_int = True
+        user_provided_T_max = True
+        user_provided_h_init = True
     else:
         # Dict of overrides coming from CLI / YAML
+        user_overrides = params or {}
+        user_provided_step = ("step" in user_overrides) and (user_overrides.get("step") is not None)
+        user_provided_T_int = ("T_int" in user_overrides) and (user_overrides.get("T_int") is not None)
+        user_provided_T_max = ("T_max" in user_overrides) and (user_overrides.get("T_max") is not None)
+        user_provided_h_init = ("h_init" in user_overrides) and (user_overrides.get("h_init") is not None)
+
         base = get_default_simulation_params()
-        base.update(params or {})
+        base.update(user_overrides)
         raw = base
 
     # Be forgiving with YAML/CLI configs: allow extra *metadata* keys
@@ -1258,6 +1276,30 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
         raw = {k: raw[k] for k in allowed if k in raw}
 
     coerced = _coerce_scalar_types_for_simulation(raw)
+
+    # Keep the time grid consistent with YAML overrides:
+    # If the user set T_max and/or h_init (or T_int) but did not explicitly set `step`,
+    # derive `step = ceil(T_max / h_init)` and normalise T_int accordingly.
+    if (not user_provided_step) and (user_provided_T_max or user_provided_h_init or user_provided_T_int):
+        try:
+            if coerced.get("T_int") is not None:
+                # Convention: T_int = (0.0, T_max)
+                t0, t1 = coerced["T_int"]
+                T_max_eff = float(t1) - float(t0)
+                if T_max_eff <= 0.0:
+                    T_max_eff = float(coerced.get("T_max", 0.4))
+            else:
+                T_max_eff = float(coerced.get("T_max", 0.4))
+                coerced["T_int"] = (0.0, T_max_eff)
+
+            h = float(coerced.get("h_init", 1e-4))
+            if h > 0.0 and T_max_eff > 0.0:
+                coerced["T_max"] = float(T_max_eff)
+                coerced["T_int"] = (0.0, float(T_max_eff))
+                coerced["step"] = int(np.ceil(T_max_eff / h))
+        except Exception:
+            # Never fail a run because of an auxiliary consistency correction
+            pass
 
     # Optional consistency check: if k_train is provided in YAML,
     # verify it matches the implied elastic stiffness fy/uy.

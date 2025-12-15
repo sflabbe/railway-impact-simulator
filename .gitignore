@@ -33,3 +33,5 @@ results_parametric/
 
 # Studies outputs
 studies/
+!src/railway_simulator/studies/
+!src/railway_simulator/studies/**

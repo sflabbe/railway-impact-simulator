@@ -1,0 +1,50 @@
+case_name: ICE1_coach_discrete6
+notes: ICE 1 coach discretized into 6 equal masses (~57.3 t total). Simplified uniform
+  stiffness/yield for all inter-mass springs.
+v0_init: -22.22
+T_max: 0.6
+h_init: 0.0001
+alpha_hht: -0.15
+contact_model: lankarani-nikravesh
+k_wall: 45_000_000.0   # 45 MN/m
+cr_wall: 0.8
+n_masses: 6
+masses:
+- 9550.0
+- 9550.0
+- 9550.0
+- 9550.0
+- 9550.0
+- 9550.0
+x_init:
+- 2.2
+- 6.6000000000000005
+- 11.0
+- 15.400000000000002
+- 19.8
+- 24.2
+y_init:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+k_train:
+- 140625000.0
+- 140625000.0
+- 140625000.0
+- 140625000.0
+- 140625000.0
+fy:
+- 9000000.0
+- 9000000.0
+- 9000000.0
+- 9000000.0
+- 9000000.0
+uy:
+- 0.064
+- 0.064
+- 0.064
+- 0.064
+- 0.064

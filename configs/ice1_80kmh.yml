@@ -6,5 +6,5 @@ alpha_hht: -0.15
 contact_model: "lankarani-nikravesh"
 
 # You can override stiffness as well:
-k_wall: 60_000_000.0   # 60 MN/m
+k_wall: 45_000_000.0   # 45 MN/m
 cr_wall: 0.8

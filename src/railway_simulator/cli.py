@@ -30,6 +30,10 @@ app = typer.Typer(
     ),
 )
 
+# Studies commands (convergence / sensitivity / fixed DIF, etc.)
+from .studies.cli import register_study_commands
+register_study_commands(app)
+
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------

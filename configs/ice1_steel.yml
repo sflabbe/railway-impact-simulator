@@ -53,7 +53,7 @@ bw_beta: 0.10
 bw_gamma: 0.90
 bw_n: 8
 
-k_wall: 6.0e7
+k_wall: 45_000_000.0   # 45 MN/m
 cr_wall: 0.86         # steel–concrete contact, ligeramente mayor
 contact_model: "lankarani-nikravesh"
 

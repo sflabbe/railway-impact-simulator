@@ -70,7 +70,7 @@ bw_n: 8
 # Contact / wall
 # -----------------------------
 # Stiff RC abutment, order of magnitude from your defaults
-k_wall: 6.0e7      # [N/m]
+k_wall: 45_000_000.0   # 45 MN/m
 cr_wall: 0.80      # coefficient of restitution [-]
 contact_model: "lankarani-nikravesh"
 

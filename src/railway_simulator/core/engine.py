@@ -94,6 +94,9 @@ class SimulationParams:
     step: int      # Number of steps (T_max / h_init)
     T_int: Tuple[float, float]  # Time interval (0, T_max)
 
+    # Optional metadata / consistency check: linear stiffness between masses
+    k_train: np.ndarray | None = None
+
 
 @dataclass
 class TrainConfig:
@@ -1163,7 +1166,7 @@ def get_default_simulation_params() -> dict:
         # ------------------------------------------------------------------
         # Contact with rigid wall
         # ------------------------------------------------------------------
-        "k_wall": 60e6,                       # [N/m]
+        "k_wall": 45e6,                       # [N/m]
         "cr_wall": 0.8,                       # restitution / damping parameter
         "contact_model": "lankarani-nikravesh",
 
@@ -1232,7 +1235,53 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
         base.update(params or {})
         raw = base
 
+    # Be forgiving with YAML/CLI configs: allow extra *metadata* keys
+    # (e.g., case_name, notes) without breaking the simulation.
+    allowed = {f.name for f in fields(SimulationParams)}
+    extra_ok = {
+        # purely descriptive / output-naming fields commonly present in YAML
+        "case_name",
+        "notes",
+        "description",
+        "title",
+        "tags",
+    }
+    unknown = sorted(set(raw.keys()) - allowed)
+    unknown_nonmeta = [k for k in unknown if k not in extra_ok]
+    if unknown_nonmeta:
+        logger.warning(
+            "Ignoring %d unknown SimulationParams key(s): %s",
+            len(unknown_nonmeta),
+            ", ".join(unknown_nonmeta),
+        )
+    if unknown:
+        raw = {k: raw[k] for k in allowed if k in raw}
+
     coerced = _coerce_scalar_types_for_simulation(raw)
+
+    # Optional consistency check: if k_train is provided in YAML,
+    # verify it matches the implied elastic stiffness fy/uy.
+    if coerced.get("k_train") is not None:
+        try:
+            k_train = np.asarray(coerced["k_train"], dtype=float)
+            fy = np.asarray(coerced.get("fy"), dtype=float)
+            uy = np.asarray(coerced.get("uy"), dtype=float)
+            if fy.size and uy.size and np.all(uy != 0.0):
+                k_eff = fy / uy
+                # broadcast scalar k_train to vector if needed
+                if k_train.size == 1 and k_eff.size > 1:
+                    k_train = np.full_like(k_eff, float(k_train.ravel()[0]))
+                if k_train.shape == k_eff.shape:
+                    rel = np.max(np.abs(k_train - k_eff) / (np.abs(k_eff) + 1e-12))
+                    if rel > 0.02:  # >2% mismatch
+                        logger.warning(
+                            "k_train provided (YAML) differs from implied fy/uy by up to %.1f%%. "
+                            "Simulation uses fy & uy; consider removing k_train or adjusting values.",
+                            100.0 * rel,
+                        )
+        except Exception:
+            # Never fail a run because of an auxiliary check
+            pass
     sim_params = SimulationParams(**coerced)
 
     simulator = ImpactSimulator(sim_params)
@@ -1345,6 +1394,7 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
         "y_init",
         "fy",
         "uy",
+        "k_train",
     ]
 
     for key in array_float_keys:

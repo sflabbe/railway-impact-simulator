@@ -9,7 +9,7 @@ import sys
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,6 +33,13 @@ app = typer.Typer(
 # Studies commands (convergence / sensitivity / fixed DIF, etc.)
 from .studies.cli import register_study_commands
 register_study_commands(app)
+
+# ----------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------
+
+# Conversion factor from km/h to m/s
+KMH_TO_MS = 3.6
 
 
 @app.command()
@@ -72,6 +79,19 @@ def ui(
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _speed_kmh_to_v0_init(speed_kmh: float) -> float:
+    """
+    Convert speed in km/h to initial velocity in m/s towards barrier.
+
+    Args:
+        speed_kmh: Speed magnitude in km/h (positive value)
+
+    Returns:
+        Velocity in m/s (negative, towards barrier)
+    """
+    return -float(speed_kmh) / KMH_TO_MS
 
 
 def _load_config(path: Path) -> dict:
@@ -193,6 +213,40 @@ def _print_and_log(logger: logging.Logger, msg: str) -> None:
     logger.info(msg)
 
 
+def _resolve_envelope_column(
+    envelope_df: pd.DataFrame,
+    quantity: str,
+) -> str:
+    """
+    Resolve the correct column name for the given quantity in an envelope DataFrame.
+
+    Tries in order:
+    1. Exact match: quantity
+    2. With suffix: f"{quantity}_envelope"
+    3. Fallback: first non-time column
+
+    Returns the resolved column name.
+    Raises RuntimeError if no suitable column is found.
+    """
+    if quantity in envelope_df.columns:
+        return quantity
+
+    env_col = f"{quantity}_envelope"
+    if env_col in envelope_df.columns:
+        return env_col
+
+    # Fallback: first non-time column
+    non_time_cols = [
+        c for c in envelope_df.columns
+        if c not in ("Time_s", "Time_ms")
+    ]
+    if not non_time_cols:
+        raise RuntimeError(
+            f"Could not find column for quantity '{quantity}' in envelope_df."
+        )
+    return non_time_cols[0]
+
+
 def _ascii_plot(
     x: np.ndarray,
     y: np.ndarray,
@@ -240,126 +294,494 @@ def _ascii_plot(
     return "\n".join(lines)
 
 
+def _compute_performance_metrics(
+    time_series_df: pd.DataFrame,
+    wall_time: float,
+    params: dict,
+    n_scenarios: int = 1,
+) -> dict:
+    """
+    Compute performance metrics from simulation results.
+
+    Args:
+        time_series_df: DataFrame with Time_s column (results or envelope)
+        wall_time: Wall clock time in seconds
+        params: Simulation parameters dict
+        n_scenarios: Number of scenarios run (1 for single run, >1 for parametric)
+
+    Returns:
+        Dictionary of performance metrics
+    """
+    empty_metrics = {
+        "wall_time": wall_time,
+        "T_max": None,
+        "steps": None,
+        "dt_mean": None,
+        "dt_min": None,
+        "dt_max": None,
+        "real_time_factor": None,
+        "linear_solves": None,
+        "n_dof": None,
+        "flops_lu": None,
+        "mflops": None,
+        "mflops_per_s": None,
+    }
+
+    time_s = time_series_df["Time_s"].to_numpy()
+    if len(time_s) < 2:
+        return empty_metrics
+
+    # Time-stepping metrics
+    dts = np.diff(time_s)
+    steps = len(dts)
+    T_max = float(time_s[-1] - time_s[0])
+    dt_mean = float(np.mean(dts))
+    dt_min = float(np.min(dts))
+    dt_max = float(np.max(dts))
+    real_time_factor = T_max / wall_time if wall_time > 0 else None
+
+    # DOF calculation
+    n_masses = int(params.get("n_masses", len(params.get("masses", []))))
+    n_dof = 2 * n_masses
+
+    # Linear solves estimation
+    # For single runs, try to get actual count from DataFrame attributes
+    n_lu_actual = time_series_df.attrs.get("n_lu", None)
+    if n_scenarios == 1 and n_lu_actual is not None and n_lu_actual > 0:
+        linear_solves = int(n_lu_actual)
+    else:
+        # Fallback heuristic: ~3 Newton iterations per time step per scenario
+        avg_newton = 3.0
+        linear_solves = int(steps * n_scenarios * avg_newton)
+
+    # FLOPS estimation
+    flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
+    flops_lu = flops_per_lu * linear_solves
+    mflops = flops_lu / 1e6
+    mflops_per_s = mflops / wall_time if wall_time > 0 else None
+
+    return {
+        "wall_time": wall_time,
+        "T_max": T_max,
+        "steps": steps,
+        "dt_mean": dt_mean,
+        "dt_min": dt_min,
+        "dt_max": dt_max,
+        "real_time_factor": real_time_factor,
+        "linear_solves": linear_solves,
+        "n_dof": n_dof,
+        "flops_lu": flops_lu,
+        "mflops": mflops,
+        "mflops_per_s": mflops_per_s,
+    }
+
+
 def _compute_single_run_performance(
     results_df: pd.DataFrame,
     wall_time: float,
     params: dict,
 ) -> dict:
-    time_s = results_df["Time_s"].to_numpy()
-    if len(time_s) < 2:
-        return {
-            "wall_time": wall_time,
-            "T_max": None,
-            "steps": None,
-            "dt_mean": None,
-            "dt_min": None,
-            "dt_max": None,
-            "real_time_factor": None,
-            "linear_solves": None,
-            "n_dof": None,
-            "flops_lu": None,
-            "mflops": None,
-            "mflops_per_s": None,
-        }
-
-    dts = np.diff(time_s)
-    steps = len(dts)
-    T_max = float(time_s[-1] - time_s[0])
-    dt_mean = float(np.mean(dts))
-    dt_min = float(np.min(dts))
-    dt_max = float(np.max(dts))
-    real_time_factor = T_max / wall_time if wall_time > 0 else None
-
-    n_masses = int(params.get("n_masses", len(params.get("masses", []))))
-    n_dof = 2 * n_masses
-
-    # Try to get actual metrics from DataFrame attributes
-    n_lu_actual = results_df.attrs.get("n_lu", None)
-    if n_lu_actual is not None and n_lu_actual > 0:
-        linear_solves = int(n_lu_actual)
-    else:
-        # Fallback to heuristic estimate: ~3 Newton iterations per time step
-        avg_newton = 3.0
-        linear_solves = int(steps * avg_newton)
-
-    flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
-    flops_lu = flops_per_lu * linear_solves
-    mflops = flops_lu / 1e6
-    mflops_per_s = mflops / wall_time if wall_time > 0 else None
-
-    return {
-        "wall_time": wall_time,
-        "T_max": T_max,
-        "steps": steps,
-        "dt_mean": dt_mean,
-        "dt_min": dt_min,
-        "dt_max": dt_max,
-        "real_time_factor": real_time_factor,
-        "linear_solves": linear_solves,
-        "n_dof": n_dof,
-        "flops_lu": flops_lu,
-        "mflops": mflops,
-        "mflops_per_s": mflops_per_s,
-    }
+    """Backward-compatible wrapper for single run performance computation."""
+    return _compute_performance_metrics(results_df, wall_time, params, n_scenarios=1)
 
 
 def _compute_parametric_performance(
     envelope_df: pd.DataFrame,
     wall_time: float,
-    base_params: dict,
+    base_params: Dict[str, Any],
     n_scenarios: int,
-) -> dict:
-    time_s = envelope_df["Time_s"].to_numpy()
-    if len(time_s) < 2:
-        return {
-            "wall_time": wall_time,
-            "T_max": None,
-            "steps": None,
-            "dt_mean": None,
-            "dt_min": None,
-            "dt_max": None,
-            "real_time_factor": None,
-            "linear_solves": None,
-            "n_dof": None,
-            "flops_lu": None,
-            "mflops": None,
-            "mflops_per_s": None,
-        }
+) -> Dict[str, Any]:
+    """Backward-compatible wrapper for parametric performance computation."""
+    return _compute_performance_metrics(envelope_df, wall_time, base_params, n_scenarios=n_scenarios)
 
-    dts = np.diff(time_s)
-    steps = len(dts)
-    T_max = float(time_s[-1] - time_s[0])
-    dt_mean = float(np.mean(dts))
-    dt_min = float(np.min(dts))
-    dt_max = float(np.max(dts))
-    real_time_factor = T_max / wall_time if wall_time > 0 else None
 
-    n_masses = int(base_params.get("n_masses", len(base_params.get("masses", []))))
-    n_dof = 2 * n_masses
+# ----------------------------------------------------------------------
+# Run Command Helpers
+# ----------------------------------------------------------------------
 
-    # Heuristic estimate: ~3 Newton iterations per time step per scenario
-    avg_newton = 3.0
-    linear_solves = int(steps * n_scenarios * avg_newton)
 
-    flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
-    flops_lu = flops_per_lu * linear_solves
-    mflops = flops_lu / 1e6
-    mflops_per_s = mflops / wall_time if wall_time > 0 else None
+def _handle_velocity_override(
+    params: Dict[str, Any],
+    v0_init: Optional[float],
+    speed_kmh: Optional[float],
+    logger: logging.Logger,
+) -> str:
+    """
+    Handle velocity CLI overrides and validate configuration.
 
-    return {
-        "wall_time": wall_time,
-        "T_max": T_max,
-        "steps": steps,
-        "dt_mean": dt_mean,
-        "dt_min": dt_min,
-        "dt_max": dt_max,
-        "real_time_factor": real_time_factor,
-        "linear_solves": linear_solves,
-        "n_dof": n_dof,
-        "flops_lu": flops_lu,
-        "mflops": mflops,
-        "mflops_per_s": mflops_per_s,
-    }
+    Args:
+        params: Configuration parameters (modified in-place)
+        v0_init: Optional velocity override in m/s
+        speed_kmh: Optional speed override in km/h
+        logger: Logger instance
+
+    Returns:
+        String describing the velocity source
+
+    Raises:
+        typer.BadParameter: If velocity is not specified or invalid
+    """
+    if v0_init is not None:
+        # Strongest override: explicit v0 in m/s
+        params["v0_init"] = float(v0_init)
+        _print_and_log(
+            logger,
+            f"Overriding v0_init from CLI: v0_init = {params['v0_init']:.4f} m/s",
+        )
+        return "CLI v0-init [m/s]"
+
+    if speed_kmh is not None:
+        # Second level: speed in km/h
+        params["v0_init"] = _speed_kmh_to_v0_init(speed_kmh)
+        _print_and_log(
+            logger,
+            f"Overriding speed from CLI: speed = {speed_kmh:.2f} km/h "
+            f"(v0_init = {params['v0_init']:.4f} m/s towards barrier)",
+        )
+        return "CLI speed-kmh"
+
+    # No CLI override -> rely on config, but normalize type and check existence
+    if "v0_init" not in params:
+        raise typer.BadParameter(
+            "No impact speed specified. Provide v0_init in the config, "
+            "--speed-kmh, or --v0-init."
+        )
+    try:
+        params["v0_init"] = float(params["v0_init"])
+    except (TypeError, ValueError) as e:
+        raise typer.BadParameter(
+            f"Config parameter 'v0_init' must be a float-compatible value, "
+            f"got {params['v0_init']!r}"
+        ) from e
+
+    _print_and_log(
+        logger,
+        f"Using v0_init from config: v0_init = {params['v0_init']:.4f} m/s",
+    )
+    return "config"
+
+
+def _print_performance_metrics(
+    perf: Dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """
+    Print performance metrics to console and log.
+
+    Args:
+        perf: Performance metrics dictionary
+        logger: Logger instance
+    """
+    typer.echo("")
+    typer.echo("Single-run performance:")
+    typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
+    typer.echo(f"  Simulated time span   : {perf['T_max']:.6f} s")
+    typer.echo(f"  Time steps            : {perf['steps']}")
+    typer.echo(f"  Mean Δt               : {perf['dt_mean']:.6e} s")
+    typer.echo(
+        f"  Min Δt / max Δt       : {perf['dt_min']:.6e} s / {perf['dt_max']:.6e} s"
+    )
+    typer.echo(f"  Real-time factor      : {perf['real_time_factor']:.2f}x")
+    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof ≈ {perf['n_dof']}")
+    typer.echo(
+        f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP"
+    )
+    typer.echo(
+        f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s"
+    )
+    typer.echo(f"  Velocity source       : {perf['velocity_source']}")
+
+    logger.info("Single-run performance: %s", perf)
+
+
+def _generate_pdf_report(
+    results_df: pd.DataFrame,
+    perf: Dict[str, Any],
+    params: Dict[str, Any],
+    output_dir: Path,
+    filename_prefix: str,
+    logger: logging.Logger,
+) -> None:
+    """
+    Generate and open PDF report for single run.
+
+    Args:
+        results_df: Simulation results DataFrame
+        perf: Performance metrics
+        params: Simulation parameters
+        output_dir: Output directory
+        filename_prefix: File name prefix
+        logger: Logger instance
+    """
+    from .core.report import generate_single_run_report
+
+    pdf_path = output_dir / f"{filename_prefix}report.pdf"
+    logger.info("Generating PDF report: %s", pdf_path)
+    try:
+        generate_single_run_report(results_df, perf, params, pdf_path)
+        if pdf_path.is_file():
+            logger.info("PDF report successfully written to %s", pdf_path)
+            _open_file(pdf_path, logger)
+        else:
+            logger.error("PDF report was not created: %s", pdf_path)
+    except Exception:
+        logger.exception("Failed to generate single-run PDF report.")
+
+
+def _show_ascii_plot(
+    results_df: pd.DataFrame,
+    logger: logging.Logger,
+) -> None:
+    """
+    Display ASCII plot of impact force vs time.
+
+    Args:
+        results_df: Simulation results DataFrame
+        logger: Logger instance
+    """
+    typer.echo("")
+    typer.echo("ASCII impact plot (Impact_Force_MN vs Time_ms):")
+    ascii_str = _ascii_plot(
+        results_df["Time_ms"].to_numpy(),
+        results_df["Impact_Force_MN"].to_numpy(),
+        "Impact_Force_MN",
+        "Time [ms]",
+    )
+    typer.echo(ascii_str)
+    logger.info("ASCII plot:\n%s", ascii_str)
+
+
+def _show_matplotlib_plot(results_df: pd.DataFrame) -> None:
+    """
+    Display matplotlib plot of impact force vs time.
+
+    Args:
+        results_df: Simulation results DataFrame
+    """
+    t_ms = results_df["Time_ms"].to_numpy()
+    F = results_df["Impact_Force_MN"].to_numpy()
+    fig, ax = plt.subplots()
+    ax.plot(t_ms, F, label="Impact_Force_MN")
+    ax.set_xlabel("Time [ms]")
+    ax.set_ylabel("Impact force [MN]")
+    ax.set_title("Impact force vs time")
+    ax.grid(True)
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.legend()
+    plt.show()
+
+
+# ----------------------------------------------------------------------
+# Parametric Command Helpers
+# ----------------------------------------------------------------------
+
+
+def _build_speed_scenarios(
+    base_params: Dict[str, Any],
+    speeds_kmh: List[float],
+    weights: List[float],
+    logger: logging.Logger,
+) -> List[ScenarioDefinition]:
+    """
+    Build scenario definitions for parametric speed study.
+
+    Args:
+        base_params: Base configuration parameters
+        speeds_kmh: List of speeds in km/h
+        weights: List of weights (probabilities)
+        logger: Logger instance
+
+    Returns:
+        List of ScenarioDefinition objects
+    """
+    _print_and_log(logger, "Building scenarios:")
+    scenarios: List[ScenarioDefinition] = []
+    for v_kmh, w in zip(speeds_kmh, weights):
+        name = f"v{int(round(v_kmh))}"
+        msg = f"  - {name}: {v_kmh:.1f} km/h, weight = {w:.3f}"
+        _print_and_log(logger, msg)
+
+        params_i = dict(base_params)
+        params_i["v0_init"] = _speed_kmh_to_v0_init(v_kmh)
+
+        scen = ScenarioDefinition(
+            name=name,
+            params=params_i,
+            weight=w,
+            meta={"speed_kmh": v_kmh},
+        )
+        scenarios.append(scen)
+    return scenarios
+
+
+def _unpack_parametric_result(
+    result: Union[pd.DataFrame, Tuple[pd.DataFrame, ...]]
+) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[Dict[str, Any]]]:
+    """
+    Unpack result from run_parametric_envelope which can return varying formats.
+
+    Args:
+        result: Result from run_parametric_envelope
+
+    Returns:
+        Tuple of (envelope_df, summary_df, extra_dict)
+    """
+    extra: Optional[Dict[str, Any]] = None
+
+    if isinstance(result, tuple):
+        if len(result) == 3:
+            envelope_df, summary_df, extra = result
+        elif len(result) == 2:
+            envelope_df, summary_df = result
+        else:
+            envelope_df = result[0]
+            summary_df = result[1] if len(result) > 1 else pd.DataFrame()
+    else:
+        envelope_df = result
+        summary_df = pd.DataFrame()
+
+    return envelope_df, summary_df, extra
+
+
+def _refine_parametric_performance(
+    perf: Dict[str, Any],
+    extra: Optional[Dict[str, Any]],
+    summary_df: pd.DataFrame,
+) -> Dict[str, Any]:
+    """
+    Refine parametric performance metrics with extra info and summary data.
+
+    Args:
+        perf: Initial performance metrics
+        extra: Extra metrics dictionary from engine
+        summary_df: Summary DataFrame from parametric run
+
+    Returns:
+        Refined performance metrics dictionary
+    """
+    if isinstance(extra, dict):
+        # If engine already returns more accurate metrics, prefer them
+        for key, val in extra.items():
+            if key in perf and val is not None:
+                perf[key] = val
+
+    # Refine performance metrics using summary_df if available
+    if not summary_df.empty:
+        if "n_dof" in summary_df.columns:
+            perf["n_dof"] = int(summary_df["n_dof"].max())
+
+        if "n_lu" in summary_df.columns:
+            total_lu = int(summary_df["n_lu"].sum())
+            perf["linear_solves"] = total_lu
+
+            n_dof = perf.get("n_dof", 0) or 0
+            if n_dof > 0 and total_lu > 0:
+                flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
+                flops_lu = flops_per_lu * total_lu
+                mflops = flops_lu / 1e6
+                perf["flops_lu"] = flops_lu
+                perf["mflops"] = mflops
+                perf["mflops_per_s"] = (
+                    mflops / perf["wall_time"] if perf["wall_time"] > 0 else None
+                )
+
+    return perf
+
+
+def _write_parametric_outputs(
+    envelope_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    output_dir: Path,
+    base_name: str,
+    logger: logging.Logger,
+) -> None:
+    """
+    Write parametric study outputs to CSV files.
+
+    Args:
+        envelope_df: Envelope DataFrame
+        summary_df: Summary DataFrame
+        output_dir: Output directory
+        base_name: Base name for output files
+        logger: Logger instance
+    """
+    env_path = output_dir / f"{base_name}_envelope.csv"
+    _print_and_log(logger, f"Writing envelope to {env_path}")
+    envelope_df.to_csv(env_path, index=False)
+
+    if not summary_df.empty:
+        summ_path = output_dir / f"{base_name}_summary.csv"
+        _print_and_log(logger, f"Writing summary to {summ_path}")
+        summary_df.to_csv(summ_path, index=False)
+
+
+def _print_parametric_performance(
+    perf: Dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """
+    Print parametric performance metrics to console and log.
+
+    Args:
+        perf: Performance metrics dictionary
+        logger: Logger instance
+    """
+    typer.echo("")
+    typer.echo("Parametric performance:")
+    typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
+    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof ≈ {perf['n_dof']}")
+    typer.echo(f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP")
+    typer.echo(f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s")
+
+    logger.info("Parametric performance: %s", perf)
+
+
+def _generate_parametric_pdf_report(
+    envelope_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    perf: Dict[str, Any],
+    base_params: Dict[str, Any],
+    output_dir: Path,
+    base_name: str,
+    quantity: str,
+    logger: logging.Logger,
+) -> None:
+    """
+    Generate and open PDF report for parametric study.
+
+    Args:
+        envelope_df: Envelope DataFrame
+        summary_df: Summary DataFrame
+        perf: Performance metrics
+        base_params: Base configuration parameters
+        output_dir: Output directory
+        base_name: Base name for output files
+        quantity: Quantity name
+        logger: Logger instance
+    """
+    from .core.report import generate_parametric_report
+
+    pdf_path = output_dir / f"{base_name}_report.pdf"
+    logger.info("Generating parametric PDF report: %s", pdf_path)
+    try:
+        generate_parametric_report(
+            envelope_df,
+            summary_df,
+            perf,
+            base_params,
+            quantity,
+            pdf_path,
+        )
+        if pdf_path.is_file():
+            logger.info(
+                "Parametric PDF report successfully written to %s", pdf_path
+            )
+            _open_file(pdf_path, logger)
+        else:
+            logger.error("Parametric PDF report was not created: %s", pdf_path)
+    except Exception:
+        logger.exception("Failed to generate parametric PDF report.")
 
 
 # ----------------------------------------------------------------------
@@ -464,43 +886,7 @@ def run(
     # ------------------------------------------------------------------
     # Velocity handling (CLI overrides vs config)
     # ------------------------------------------------------------------
-    velocity_source = "config"
-
-    if v0_init is not None:
-        # Strongest override: explicit v0 in m/s
-        params["v0_init"] = float(v0_init)
-        velocity_source = "CLI v0-init [m/s]"
-        _print_and_log(
-            logger,
-            f"Overriding v0_init from CLI: v0_init = {params['v0_init']:.4f} m/s",
-        )
-    elif speed_kmh is not None:
-        # Second level: speed in km/h
-        params["v0_init"] = -float(speed_kmh) / 3.6
-        velocity_source = "CLI speed-kmh"
-        _print_and_log(
-            logger,
-            f"Overriding speed from CLI: speed = {speed_kmh:.2f} km/h "
-            f"(v0_init = {params['v0_init']:.4f} m/s towards barrier)",
-        )
-    else:
-        # No CLI override -> rely on config, but normalise type and check existence
-        if "v0_init" not in params:
-            raise typer.BadParameter(
-                "No impact speed specified. Provide v0_init in the config, "
-                "--speed-kmh, or --v0-init."
-            )
-        try:
-            params["v0_init"] = float(params["v0_init"])
-        except (TypeError, ValueError):
-            raise typer.BadParameter(
-                f"Config parameter 'v0_init' must be a float-compatible value, "
-                f"got {params['v0_init']!r}"
-            )
-        _print_and_log(
-            logger,
-            f"Using v0_init from config: v0_init = {params['v0_init']:.4f} m/s",
-        )
+    velocity_source = _handle_velocity_override(params, v0_init, speed_kmh, logger)
 
     # ------------------------------------------------------------------
     # Run simulation
@@ -523,76 +909,25 @@ def run(
     # ------------------------------------------------------------------
     # Performance output (console + log)
     # ------------------------------------------------------------------
-    typer.echo("")
-    typer.echo("Single-run performance:")
-    typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
-    typer.echo(f"  Simulated time span   : {perf['T_max']:.6f} s")
-    typer.echo(f"  Time steps            : {perf['steps']}")
-    typer.echo(f"  Mean Δt               : {perf['dt_mean']:.6e} s")
-    typer.echo(
-        f"  Min Δt / max Δt       : {perf['dt_min']:.6e} s / {perf['dt_max']:.6e} s"
-    )
-    typer.echo(f"  Real-time factor      : {perf['real_time_factor']:.2f}x")
-    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof ≈ {perf['n_dof']}")
-    typer.echo(
-        f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP"
-    )
-    typer.echo(
-        f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s"
-    )
-    typer.echo(f"  Velocity source       : {perf['velocity_source']}")
-
-    logger.info("Single-run performance: %s", perf)
+    _print_performance_metrics(perf, logger)
 
     # ------------------------------------------------------------------
     # PDF report (before any blocking plot)
     # ------------------------------------------------------------------
     if pdf_report:
-        from .core.report import generate_single_run_report
-
-        pdf_path = output_dir / f"{filename_prefix}report.pdf"
-        logger.info("Generating PDF report: %s", pdf_path)
-        try:
-            generate_single_run_report(results_df, perf, params, pdf_path)
-            if pdf_path.is_file():
-                logger.info("PDF report successfully written to %s", pdf_path)
-                _open_file(pdf_path, logger)
-            else:
-                logger.error("PDF report was not created: %s", pdf_path)
-        except Exception:
-            logger.exception("Failed to generate single-run PDF report.")
+        _generate_pdf_report(results_df, perf, params, output_dir, filename_prefix, logger)
 
     # ------------------------------------------------------------------
     # ASCII plot
     # ------------------------------------------------------------------
     if ascii_plot:
-        typer.echo("")
-        typer.echo("ASCII impact plot (Impact_Force_MN vs Time_ms):")
-        ascii_str = _ascii_plot(
-            results_df["Time_ms"].to_numpy(),
-            results_df["Impact_Force_MN"].to_numpy(),
-            "Impact_Force_MN",
-            "Time [ms]",
-        )
-        typer.echo(ascii_str)
-        logger.info("ASCII plot:\n%s", ascii_str)
+        _show_ascii_plot(results_df, logger)
 
     # ------------------------------------------------------------------
     # Matplotlib plot (blocking)
     # ------------------------------------------------------------------
     if plot:
-        t_ms = results_df["Time_ms"].to_numpy()
-        F = results_df["Impact_Force_MN"].to_numpy()
-        fig, ax = plt.subplots()
-        ax.plot(t_ms, F, label="Impact_Force_MN")
-        ax.set_xlabel("Time [ms]")
-        ax.set_ylabel("Impact force [MN]")
-        ax.set_title("Impact force vs time")
-        ax.grid(True)
-        ax.set_xlim(left=0)
-        ax.set_ylim(bottom=0)
-        ax.legend()
-        plt.show()
+        _show_matplotlib_plot(results_df)
 
     # ------------------------------------------------------------------
     # Final log
@@ -686,149 +1021,37 @@ def parametric(
     _print_and_log(logger, f"Parsing speeds specification: {speeds}")
     speeds_kmh, weights = _parse_speeds_spec(speeds)
 
-    _print_and_log(logger, "Building scenarios:")
-    scenarios: List[ScenarioDefinition] = []
-    for v_kmh, w in zip(speeds_kmh, weights):
-        name = f"v{int(round(v_kmh))}"
-        msg = f"  - {name}: {v_kmh:.1f} km/h, weight = {w:.3f}"
-        _print_and_log(logger, msg)
-
-        params_i = dict(base_params)
-        params_i["v0_init"] = -v_kmh / 3.6  # m/s, negative towards barrier
-
-        scen = ScenarioDefinition(
-            name=name,
-            params=params_i,
-            weight=w,
-            meta={"speed_kmh": v_kmh},
-        )
-        scenarios.append(scen)
+    scenarios = _build_speed_scenarios(base_params, speeds_kmh, weights, logger)
 
     _print_and_log(logger, "Running parametric envelope ...")
     t0 = time.perf_counter()
     result = run_parametric_envelope(scenarios, quantity=quantity)
-
-    extra: Any = None
-    if isinstance(result, tuple):
-        if len(result) == 3:
-            envelope_df, summary_df, extra = result
-        elif len(result) == 2:
-            envelope_df, summary_df = result
-        else:
-            envelope_df = result[0]
-            summary_df = result[1] if len(result) > 1 else pd.DataFrame()
-    else:
-        envelope_df = result
-        summary_df = pd.DataFrame()
-
     wall_time = time.perf_counter() - t0
+
+    envelope_df, summary_df, extra = _unpack_parametric_result(result)
 
     perf = _compute_parametric_performance(
         envelope_df, wall_time, base_params, n_scenarios=len(scenarios)
     )
-    if isinstance(extra, dict):
-        # If engine already returns more accurate metrics, prefer them
-        for key, val in extra.items():
-            if key in perf and val is not None:
-                perf[key] = val
-        # Refine performance metrics using summary_df if available
-    if not summary_df.empty:
-        if "n_dof" in summary_df.columns:
-            perf["n_dof"] = int(summary_df["n_dof"].max())
+    perf = _refine_parametric_performance(perf, extra, summary_df)
 
-        if "n_lu" in summary_df.columns:
-            total_lu = int(summary_df["n_lu"].sum())
-            perf["linear_solves"] = total_lu
-
-            n_dof = perf.get("n_dof", 0) or 0
-            if n_dof > 0 and total_lu > 0:
-                flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
-                flops_lu = flops_per_lu * total_lu
-                mflops = flops_lu / 1e6
-                perf["flops_lu"] = flops_lu
-                perf["mflops"] = mflops
-                perf["mflops_per_s"] = (
-                    mflops / perf["wall_time"] if perf["wall_time"] > 0 else None
-                )
-
-
-    base = base_name
-    env_csv = output_dir / f"{base}_envelope.csv"
-    sum_csv = output_dir / f"{base}_summary.csv"
-
-    _print_and_log(logger, f"Writing envelope time history to {env_csv}")
-    envelope_df.to_csv(env_csv, index=False)
-
-    _print_and_log(logger, f"Writing scenario summary to {sum_csv}")
-    summary_df.to_csv(sum_csv, index=False)
+    _write_parametric_outputs(envelope_df, summary_df, output_dir, base_name, logger)
 
     # Performance output
-    typer.echo("")
-    typer.echo("Parametric study performance:")
-    typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
-    typer.echo(f"  Simulated time span   : {perf['T_max']:.6f} s")
-    typer.echo(f"  Time steps            : {perf['steps']}")
-    typer.echo(f"  Mean Δt               : {perf['dt_mean']:.6e} s")
-    typer.echo(
-        f"  Min Δt / max Δt       : {perf['dt_min']:.6e} s / {perf['dt_max']:.6e} s"
-    )
-    typer.echo(f"  Real-time factor      : {perf['real_time_factor']:.2f}x")
-    typer.echo(
-        f"  Linear solves (LU)    : {perf['linear_solves']}, "
-        f"n_dof ≈ {perf['n_dof']}"
-    )
-    typer.echo(
-        f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP"
-    )
-    typer.echo(
-        f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s"
-    )
+    _print_parametric_performance(perf, logger)
 
-    logger.info("Parametric performance: %s", perf)
-    
     # PDF report FIRST – so it exists even if the plot blocks
     if pdf_report:
-        from .core.report import generate_parametric_report
-
-        pdf_path = output_dir / f"{base}_report.pdf"
-        logger.info("Generating parametric PDF report: %s", pdf_path)
-        try:
-            generate_parametric_report(
-                envelope_df, summary_df, perf, quantity, pdf_path
-            )
-            if pdf_path.is_file():
-                logger.info(
-                    "Parametric PDF report successfully written to %s", pdf_path
-                )
-                _open_file(pdf_path, logger)
-            else:
-                logger.error("Parametric PDF report was not created: %s", pdf_path)
-        except Exception:
-            logger.exception("Failed to generate parametric PDF report.")
+        _generate_parametric_pdf_report(
+            envelope_df, summary_df, perf, base_params, output_dir, base_name, quantity, logger
+        )
 
     # ASCII envelope plot
     if ascii_plot:
         typer.echo("")
         typer.echo(f"ASCII envelope plot ({quantity} vs Time_ms):")
 
-        # Resolve correct column name, e.g. "Impact_Force_MN_envelope"
-        if quantity in envelope_df.columns:
-            y_col = quantity
-        else:
-            env_col = f"{quantity}_envelope"
-            if env_col in envelope_df.columns:
-                y_col = env_col
-            else:
-                # Fallback: first non-time column
-                non_time_cols = [
-                    c for c in envelope_df.columns
-                    if c not in ("Time_s", "Time_ms")
-                ]
-                if not non_time_cols:
-                    raise RuntimeError(
-                        f"Could not find column for quantity '{quantity}' in envelope_df."
-                    )
-                y_col = non_time_cols[0]
+        y_col = _resolve_envelope_column(envelope_df, quantity)
 
         ascii_str = _ascii_plot(
             envelope_df["Time_ms"].to_numpy(),
@@ -841,23 +1064,7 @@ def parametric(
 
     # Matplotlib envelope plot
     if plot:
-        # same column resolution logic as above
-        if quantity in envelope_df.columns:
-            y_col = quantity
-        else:
-            env_col = f"{quantity}_envelope"
-            if env_col in envelope_df.columns:
-                y_col = env_col
-            else:
-                non_time_cols = [
-                    c for c in envelope_df.columns
-                    if c not in ("Time_s", "Time_ms")
-                ]
-                if not non_time_cols:
-                    raise RuntimeError(
-                        f"Could not find column for quantity '{quantity}' in envelope_df."
-                    )
-                y_col = non_time_cols[0]
+        y_col = _resolve_envelope_column(envelope_df, quantity)
 
         t_ms = envelope_df["Time_ms"].to_numpy()
         y = envelope_df[y_col].to_numpy()

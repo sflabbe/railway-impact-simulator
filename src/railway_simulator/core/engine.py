@@ -33,6 +33,103 @@ from scipy.constants import g as GRAVITY
 logger = logging.getLogger(__name__)
 
 # ====================================================================
+# STRAIN-RATE METRICS
+# ====================================================================
+
+def strain_rate_metrics(
+    df: pd.DataFrame,
+    t_col: str = "Time_s",
+    penetration_col: str = "Penetration_mm",
+    penetration_units: str = "mm",
+    L_ref_m: float = 1.0,
+    contact_force_col: str | None = "Impact_Force_MN",
+    force_threshold: float = 0.001,  # MN
+    pen_threshold: float = 1e-9,  # m
+    smooth_window: int = 5,
+) -> Dict[str, float]:
+    """
+    Compute strain-rate proxy metrics from penetration time history.
+
+    Strain rate proxy: ε̇(t) ≈ δ̇(t) / L_ref
+    where δ(t) is penetration and L_ref is a characteristic length.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Results dataframe with time and penetration columns.
+    t_col : str
+        Column name for time (default: "Time_s").
+    penetration_col : str
+        Column name for penetration (default: "Penetration_mm").
+    penetration_units : str
+        Units of penetration: "m" or "mm" (default: "mm").
+    L_ref_m : float
+        Characteristic length in meters (default: 1.0 m).
+        Physical choices: wall thickness, crush zone length, buffer stroke.
+    contact_force_col : str | None
+        Optional force column to define contact window (default: "Impact_Force_MN").
+    force_threshold : float
+        Force threshold for contact detection in MN (default: 0.001 MN = 1 kN).
+    pen_threshold : float
+        Penetration threshold for contact detection in meters (default: 1e-9 m).
+    smooth_window : int
+        Smoothing window size for penetration (odd int, default: 5).
+        Set to 1 to disable smoothing.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+        - "strain_rate_peak_1_s": Peak strain rate (1/s)
+        - "strain_rate_rms_1_s": RMS strain rate (1/s)
+        - "strain_rate_p95_1_s": 95th percentile strain rate (1/s)
+    """
+    t = df[t_col].to_numpy(dtype=float)
+    pen = df[penetration_col].to_numpy(dtype=float)
+
+    # Convert to meters
+    if penetration_units == "mm":
+        pen = pen * 1e-3
+
+    # Clamp to avoid tiny negative noise
+    pen = np.maximum(pen, 0.0)
+
+    # Light smoothing (helps derivative noise)
+    if smooth_window and smooth_window > 1:
+        w = int(smooth_window)
+        if w % 2 == 0:
+            w += 1
+        k = np.ones(w) / w
+        pen_s = np.convolve(pen, k, mode="same")
+    else:
+        pen_s = pen
+
+    # Derivative (central diff via gradient)
+    pen_dot = np.gradient(pen_s, t)  # m/s
+    eps_dot = pen_dot / float(L_ref_m)  # 1/s
+
+    # Contact window: penetration > threshold OR force > threshold
+    mask = pen_s > float(pen_threshold)
+    if contact_force_col is not None and contact_force_col in df.columns:
+        f = df[contact_force_col].to_numpy(dtype=float)
+        mask = mask | (np.abs(f) > float(force_threshold))
+
+    if not np.any(mask):
+        return {
+            "strain_rate_peak_1_s": 0.0,
+            "strain_rate_rms_1_s": 0.0,
+            "strain_rate_p95_1_s": 0.0,
+        }
+
+    x = np.abs(eps_dot[mask])
+    return {
+        "strain_rate_peak_1_s": float(np.max(x)),
+        "strain_rate_rms_1_s": float(np.sqrt(np.mean(x**2))),
+        "strain_rate_p95_1_s": float(np.percentile(x, 95)),
+    }
+
+
+# ====================================================================
 # CONFIGURATION & DATA CLASSES
 # ====================================================================
 
@@ -590,6 +687,8 @@ class ImpactSimulator:
         # Performance counters
         self.linear_solves: int = 0
         self.total_iters: int = 0  # renamed (no "newton" in the name)
+        self.max_iters_per_step: int = 0  # max iterations needed for any timestep
+        self.max_residual: float = 0.0  # max residual seen across all iterations
 
         self.setup()
 
@@ -731,7 +830,8 @@ class ImpactSimulator:
         
             converged = False
             err = np.inf
-        
+            iters_this_step = 0
+
             for it in range(p.max_iter):
                 # Reset forces for this iteration
                 R_internal[:, step_idx + 1] = 0.0
@@ -813,13 +913,23 @@ class ImpactSimulator:
 
                 # Track nonlinear iterations (linear solves tracked in integrator)
                 self.total_iters += 1
-    
+                iters_this_step += 1
+
                 # Convergence check
                 err = self._check_convergence(qpp[:, step_idx + 1], qpp_old)
+
+                # Track max residual across all iterations
+                if err > self.max_residual:
+                    self.max_residual = err
+
                 if err < self.params.newton_tol:
                     converged = True
                     break
-    
+
+            # Track max iterations needed per step
+            if iters_this_step > self.max_iters_per_step:
+                self.max_iters_per_step = iters_this_step
+
             if not converged:
                 logger.warning(
                     "Nonlinear solver did not converge at step %d (rel Δa = %.3e)",
@@ -1113,6 +1223,19 @@ class ImpactSimulator:
             df.attrs["n_masses"] = self.params.n_masses
             df.attrs["n_lu"] = getattr(self.integrator, "n_lu", 0)
             df.attrs["n_nonlinear_iters"] = self.total_iters
+            df.attrs["max_iters_per_step"] = self.max_iters_per_step
+            df.attrs["max_residual"] = self.max_residual
+            # Store actual timestep used (not requested h_init, but effective dt)
+            df.attrs["dt_eff"] = self.h
+            df.attrs["h_requested"] = self.params.h_init
+            df.attrs["newton_tol"] = self.params.newton_tol
+            df.attrs["alpha_hht"] = self.params.alpha_hht
+
+            # Compute strain-rate metrics
+            # Use L_ref from params if available, otherwise default to 1.0 m
+            L_ref = getattr(self.params, "L_ref_m", 1.0)
+            strain_metrics = strain_rate_metrics(df, L_ref_m=L_ref)
+            df.attrs.update(strain_metrics)
         except Exception:
             # Metadata is best-effort; never break the simulation because of it
             logger.debug(
@@ -1233,14 +1356,17 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
     user_provided_T_max = False
     user_provided_h_init = False
 
+    # Get defaults to compare against
+    defaults = get_default_simulation_params()
+
     if isinstance(params, SimulationParams):
         # Dataclass -> plain dict
         raw = {f.name: getattr(params, f.name) for f in fields(SimulationParams)}
-        # For dataclass input, assume the time grid was explicitly specified.
-        user_provided_step = True
-        user_provided_T_int = True
-        user_provided_T_max = True
-        user_provided_h_init = True
+        # Don't assume dataclass means explicit time grid - compare to defaults instead
+        user_provided_step = raw.get("step") != defaults.get("step")
+        user_provided_T_int = raw.get("T_int") != defaults.get("T_int")
+        user_provided_T_max = raw.get("T_max") != defaults.get("T_max")
+        user_provided_h_init = raw.get("h_init") != defaults.get("h_init")
     else:
         # Dict of overrides coming from CLI / YAML
         user_overrides = params or {}
@@ -1249,7 +1375,7 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
         user_provided_T_max = ("T_max" in user_overrides) and (user_overrides.get("T_max") is not None)
         user_provided_h_init = ("h_init" in user_overrides) and (user_overrides.get("h_init") is not None)
 
-        base = get_default_simulation_params()
+        base = defaults
         base.update(user_overrides)
         raw = base
 

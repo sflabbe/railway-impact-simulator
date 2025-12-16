@@ -11,22 +11,15 @@ from typing import Any, Dict, List, Optional
 import typer
 import yaml
 
-import re
+from . import parse_floats_csv as _parse_floats_csv_base
 
 
-def _parse_floats_csv(s: str) -> List[float]:
-    """Parse comma/space-separated floats, e.g. "1e-4,5e-5"."""
-    s = (s or '').strip()
-    if not s:
-        return []
-    parts = [p for p in re.split(r'[\s,]+', s) if p]
+def parse_floats_csv(s: str) -> List[float]:
+    """Parse comma/space-separated floats, wrapping ValueError as typer.BadParameter."""
     try:
-        return [float(p) for p in parts]
+        return _parse_floats_csv_base(s)
     except ValueError as e:
-        raise typer.BadParameter(f'Could not parse floats from: {s!r}') from e
-
-# Backwards-compatible alias used throughout this module
-parse_floats_csv = _parse_floats_csv
+        raise typer.BadParameter(str(e)) from e
 
 
 def _load_config(path: Path) -> Dict[str, Any]:

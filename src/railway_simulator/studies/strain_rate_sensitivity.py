@@ -73,6 +73,11 @@ def run_fixed_dif_sensitivity(
         max_acc = float(np.nanmax(df.get("Acceleration_g", pd.Series([np.nan])).to_numpy()))
         e_final = float(df.get("E_balance_error_J", pd.Series([np.nan])).iloc[-1]) if len(df) else float("nan")
 
+        # Extract strain-rate metrics from attrs
+        strain_rate_peak = float(df.attrs.get("strain_rate_peak_1_s", 0.0))
+        strain_rate_rms = float(df.attrs.get("strain_rate_rms_1_s", 0.0))
+        strain_rate_p95 = float(df.attrs.get("strain_rate_p95_1_s", 0.0))
+
         rows.append(
             {
                 "dif": dif,
@@ -84,6 +89,9 @@ def run_fixed_dif_sensitivity(
                 "max_penetration_mm": max_pen,
                 "max_acceleration_g": max_acc,
                 "energy_balance_error_J_final": e_final,
+                "strain_rate_peak_1_s": strain_rate_peak,
+                "strain_rate_rms_1_s": strain_rate_rms,
+                "strain_rate_p95_1_s": strain_rate_p95,
             }
         )
 

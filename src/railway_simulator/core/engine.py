@@ -1045,16 +1045,18 @@ class ImpactSimulator:
                                 dv_i = du_contact[i]
 
                                 # Damping coefficient depends on model
+                                # CRITICAL FIX: Use correct exponent for penetration depth δ
+                                # For F = -k·δ^n·(1 + c_term·v), damping coeff is c(δ) = k·δ^n·c_term
                                 if model == "hunt-crossley":
-                                    c_eff = p.k_wall * delta[i] ** 0.5 * 3.0 * (1.0 - p.cr_wall) / 2.0 / v0_i
+                                    c_eff = p.k_wall * delta[i] ** 1.5 * 3.0 * (1.0 - p.cr_wall) / 2.0 / v0_i
                                 elif model == "lankarani-nikravesh":
-                                    c_eff = p.k_wall * delta[i] ** 0.5 * 3.0 * (1.0 - p.cr_wall ** 2) / 4.0 / v0_i
+                                    c_eff = p.k_wall * delta[i] ** 1.5 * 3.0 * (1.0 - p.cr_wall ** 2) / 4.0 / v0_i
                                 elif model == "flores":
-                                    c_eff = p.k_wall * delta[i] ** 0.5 * 8.0 * (1.0 - p.cr_wall) / (5.0 * p.cr_wall) / v0_i
+                                    c_eff = p.k_wall * delta[i] ** 1.5 * 8.0 * (1.0 - p.cr_wall) / (5.0 * p.cr_wall) / v0_i
                                 elif model == "gonthier":
-                                    c_eff = p.k_wall * delta[i] ** 0.5 * (1.0 - p.cr_wall ** 2) / p.cr_wall / v0_i
+                                    c_eff = p.k_wall * delta[i] ** 1.5 * (1.0 - p.cr_wall ** 2) / p.cr_wall / v0_i
                                 elif model in ["ye", "pant-wijeyewickrema", "anagnostopoulos"]:
-                                    c_eff = p.k_wall * delta[i] * 3.0 * (1.0 - p.cr_wall) / (2.0 * p.cr_wall) / v0_i
+                                    c_eff = p.k_wall * delta[i] ** 2.0 * 3.0 * (1.0 - p.cr_wall) / (2.0 * p.cr_wall) / v0_i
                                 elif model == "hertz":
                                     c_eff = 0.0  # Hertz has no damping
                                 else:

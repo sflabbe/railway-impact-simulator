@@ -172,7 +172,7 @@ def create_results_plots(df: pd.DataFrame) -> go.Figure:
                 x=df["Time_ms"],
                 y=df["E_diss_tracked_J"] / 1e6,
                 line=dict(width=1.5),
-                name="Dissipated (Rayleigh+fric)",
+                name="Dissipated (all mechanisms)",
                 showlegend=True,
             ),
             row=5,

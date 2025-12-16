@@ -241,36 +241,87 @@ def main():
                     )
                     st.dataframe(summary_df)
 
-                    # Simple peak plot
+                    # Simple peak plot with convergence analysis
                     try:
                         # Use dt_requested if available (new), fallback to dt_s (old)
                         dt_col = "dt_requested" if "dt_requested" in summary_df.columns else "dt_s"
+
+                        # Flag potentially invalid runs (non-converged or large energy errors)
+                        invalid_mask = pd.Series(False, index=summary_df.index)
+                        if "energy_balance_error_J_final" in summary_df.columns:
+                            invalid_mask |= summary_df["energy_balance_error_J_final"].abs() > 1000.0
+
                         fig_peak = go.Figure()
-                        fig_peak.add_trace(
-                            go.Scatter(
-                                x=summary_df[dt_col],
-                                y=summary_df["peak_force_MN"],
-                                mode="markers+lines",
-                                name="Peak force (sampled)",
-                                line=dict(dash="dot"),
-                            )
-                        )
-                        # Add interpolated peak if available
-                        if "peak_force_interp_MN" in summary_df.columns:
+
+                        # Plot sampled peaks
+                        valid_df = summary_df[~invalid_mask]
+                        if len(valid_df) > 0:
                             fig_peak.add_trace(
                                 go.Scatter(
-                                    x=summary_df[dt_col],
-                                    y=summary_df["peak_force_interp_MN"],
+                                    x=valid_df[dt_col],
+                                    y=valid_df["peak_force_MN"],
                                     mode="markers+lines",
-                                    name="Peak force (interpolated)",
+                                    name="Peak force (sampled)",
+                                    line=dict(dash="dot"),
+                                    marker=dict(size=8),
                                 )
                             )
+
+                        # Add interpolated peak if available
+                        if "peak_force_interp_MN" in summary_df.columns and len(valid_df) > 0:
+                            fig_peak.add_trace(
+                                go.Scatter(
+                                    x=valid_df[dt_col],
+                                    y=valid_df["peak_force_interp_MN"],
+                                    mode="markers+lines",
+                                    name="Peak force (interpolated)",
+                                    marker=dict(size=8),
+                                )
+                            )
+
+                        # Mark invalid runs if any
+                        invalid_df = summary_df[invalid_mask]
+                        if len(invalid_df) > 0:
+                            fig_peak.add_trace(
+                                go.Scatter(
+                                    x=invalid_df[dt_col],
+                                    y=invalid_df["peak_force_MN"],
+                                    mode="markers",
+                                    name="Invalid (energy error)",
+                                    marker=dict(size=10, symbol="x", color="red"),
+                                )
+                            )
+
+                        # Compute recommended Δt (if enough data)
+                        if "peak_force_interp_rel_to_baseline_pct" in summary_df.columns and len(valid_df) > 2:
+                            # Find cases with <1% peak error and <1% impulse error
+                            peak_err = valid_df["peak_force_interp_rel_to_baseline_pct"].abs()
+                            impulse_err = pd.Series(0.0, index=valid_df.index)
+                            if "impulse_MN_s" in valid_df.columns:
+                                baseline_impulse = valid_df["impulse_MN_s"].iloc[valid_df[dt_col].argmin()]
+                                if baseline_impulse != 0:
+                                    impulse_err = 100.0 * (valid_df["impulse_MN_s"] - baseline_impulse).abs() / baseline_impulse
+
+                            converged = (peak_err < 1.0) & (impulse_err < 1.0)
+                            if converged.any():
+                                # Recommend largest dt that meets criteria (most efficient)
+                                recommended_dt = valid_df.loc[converged, dt_col].max()
+                                fig_peak.add_vline(
+                                    x=recommended_dt,
+                                    line_dash="dash",
+                                    line_color="green",
+                                    annotation_text=f"Recommended Δt = {recommended_dt:.1e}",
+                                    annotation_position="top",
+                                )
+
                         fig_peak.update_layout(
-                            title="Peak force vs Δt (aggregated over α/tol)",
+                            title="Peak force vs Δt (log scale)",
                             xaxis_title="Δt (s)",
                             yaxis_title="Peak force (MN)",
-                            height=350,
+                            height=400,
                         )
+                        # LOG SCALE for x-axis
+                        fig_peak.update_xaxes(type="log")
                         st.plotly_chart(fig_peak, use_container_width=True)
                     except Exception as e:
                         st.warning(f"Could not generate peak plot: {e}")

@@ -2,7 +2,7 @@ param(
   [switch]$IncludeUI,
   [string]$PythonVersion = "3.12.8",
   [ValidateSet("amd64","win32","arm64")] [string]$Arch = "amd64",
-  [string]$OutputDir = "dist_portable",
+  [string]$OutputDir = "dist",
   [string]$UiHost = "127.0.0.1",
   [int]$UiPort = 8501
 )
@@ -23,7 +23,7 @@ if (!(Test-Path (Join-Path $RepoRoot "pyproject.toml"))) {
 }
 
 $OutRoot   = Join-Path $RepoRoot $OutputDir
-$BundleDir = Join-Path $OutRoot "RailwayImpactSimulator_Portable"
+$BundleDir = Join-Path $OutRoot "RIS_Portable"
 $PyDir     = Join-Path $BundleDir "python"
 
 Write-Section "Clean output"
@@ -89,8 +89,11 @@ Write-Section "Upgrade packaging tools"
 & $PyExe -m pip install --upgrade --no-cache-dir pip --no-warn-script-location
 if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip" }
 
-# Install setuptools and wheel separately with --no-cache-dir
-& $PyExe -m pip install --upgrade --no-cache-dir setuptools wheel --no-warn-script-location
+# Install setuptools and wheel with flags to avoid Windows path length issues
+# --no-deps: Don't install dependencies to avoid setuptools test files with long paths
+# PIP_NO_BUILD_ISOLATION: Use system packages instead of isolated build environment
+$env:PIP_NO_BUILD_ISOLATION = "1"
+& $PyExe -m pip install --upgrade --no-cache-dir --no-deps setuptools wheel --no-warn-script-location
 if ($LASTEXITCODE -ne 0) {
   Write-Host "Warning: setuptools/wheel installation had errors. Continuing anyway..." -ForegroundColor Yellow
 }
@@ -98,12 +101,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Section "Install project into embedded Python"
 Push-Location $RepoRoot
 try {
-  # Use --no-cache-dir and --prefer-binary to avoid path length issues
+  # Use --no-cache-dir, --prefer-binary, and --no-build-isolation to avoid path length issues
+  # --no-build-isolation: Reuse the setuptools we installed above
   # These flags help avoid Windows MAX_PATH limitations
   if ($IncludeUI) {
-    & $PyExe -m pip install --no-cache-dir --prefer-binary ".[ui]" --no-warn-script-location
+    & $PyExe -m pip install --no-cache-dir --prefer-binary --no-build-isolation ".[ui]" --no-warn-script-location
   } else {
-    & $PyExe -m pip install --no-cache-dir --prefer-binary . --no-warn-script-location
+    & $PyExe -m pip install --no-cache-dir --prefer-binary --no-build-isolation . --no-warn-script-location
   }
   if ($LASTEXITCODE -ne 0) { throw "Failed to install project" }
 } finally {

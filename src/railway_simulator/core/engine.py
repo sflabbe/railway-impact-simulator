@@ -979,12 +979,17 @@ class ImpactSimulator:
             # --------------------------------------------------
             # Energy bookkeeping (Euler-Lagrange formulation)
             # --------------------------------------------------
-            # Use midpoint values consistent with HHT-α
+            # FIX 3: HHT-α consistent midpoint for velocity
+            # For HHT-α, use α_m = (1-α)/(2(1+α)) for velocity weighting
             q_new = q[:, step_idx + 1]
             q_old = q[:, step_idx]
             v_new = qp[:, step_idx + 1]
             v_old = qp[:, step_idx]
-            v_mid = 0.5 * (v_old + v_new)
+
+            # HHT-α consistent velocity (matches force evaluation point)
+            alpha_hht = p.hht_alpha
+            alpha_m = (1.0 - alpha_hht) / (2.0 * (1.0 + alpha_hht))
+            v_mid = (1.0 - alpha_m) * v_old + alpha_m * v_new
 
             # =========================================================
             # KINETIC ENERGY: T = 0.5 * v^T M v
@@ -1042,40 +1047,44 @@ class ImpactSimulator:
                 for i in range(n - 1):
                     # Non-conservative part: (1-a)*fy*z
                     f_nc = (1.0 - p.bw_a) * p.fy[i] * X_bw[i, step_idx + 1]
-                    # Distribute to nodes (nodal forces from spring element)
-                    Q_nc_bw[i] -= f_nc
-                    Q_nc_bw[i + 1] += f_nc
+
+                    # FIX 4: 2D force distribution along spring direction
+                    r1 = q[[i, n + i], step_idx + 1]
+                    r2 = q[[i + 1, n + i + 1], step_idx + 1]
+                    dr = r2 - r1
+                    L = np.linalg.norm(dr)
+                    if L > 1e-12:
+                        n_vec = dr / L  # Unit vector along spring
+                    else:
+                        n_vec = np.array([1.0, 0.0])  # Fallback
+
+                    # Distribute to nodes in 2D
+                    Q_nc_bw[i] -= f_nc * n_vec[0]  # x-component, mass i
+                    Q_nc_bw[n + i] -= f_nc * n_vec[1]  # y-component, mass i
+                    Q_nc_bw[i + 1] += f_nc * n_vec[0]  # x-component, mass i+1
+                    Q_nc_bw[n + i + 1] += f_nc * n_vec[1]  # y-component, mass i+1
 
                 # Contact damping (non-conservative) forces
+                # FIX 1: Extract damping from actual R_contact instead of reconstructing
                 Q_nc_contact_damp = np.zeros(dof)
+
+                # Compute elastic-only contact force for comparison
+                R_contact_elastic = np.zeros(dof)
                 if np.any(delta > 0.0):
-                    # Get contact velocities
-                    du_contact = (u_contact[:, step_idx + 1] - u_contact[:, step_idx]) / self.h
+                    for i in range(n):
+                        if delta[i] > 0.0:
+                            # Elastic force only (no damping term)
+                            if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
+                                f_elastic = -p.k_wall * delta[i]
+                            else:  # Hertzian models
+                                f_elastic = -p.k_wall * delta[i] ** 1.5
 
-                    if model not in ["hooke", "hertz"]:  # Models with damping
-                        for i in range(n):
-                            if delta[i] > 0.0 and du_contact[i] < 0.0:  # Approaching wall
-                                v0_i = abs(v0_contact[i]) if abs(v0_contact[i]) > 1e-8 else 1.0
+                            R_contact_elastic[i] = f_elastic
 
-                                # Damping coefficient c(δ)
-                                if model == "hunt-crossley":
-                                    c_eff = p.k_wall * delta[i] ** 1.5 * 3.0 * (1.0 - p.cr_wall) / 2.0 / v0_i
-                                elif model == "lankarani-nikravesh":
-                                    c_eff = p.k_wall * delta[i] ** 1.5 * 3.0 * (1.0 - p.cr_wall ** 2) / 4.0 / v0_i
-                                elif model == "flores":
-                                    c_eff = p.k_wall * delta[i] ** 1.5 * 8.0 * (1.0 - p.cr_wall) / (5.0 * p.cr_wall) / v0_i
-                                elif model == "gonthier":
-                                    c_eff = p.k_wall * delta[i] ** 1.5 * (1.0 - p.cr_wall ** 2) / p.cr_wall / v0_i
-                                elif model == "pant-wijeyewickrema":
-                                    c_eff = p.k_wall * delta[i] ** 1.0 * 3.0 * (1.0 - p.cr_wall ** 2) / (2.0 * p.cr_wall ** 2) / v0_i
-                                elif model in ["ye", "anagnostopoulos"]:
-                                    c_eff = p.k_wall * delta[i] ** 1.0 * 3.0 * (1.0 - p.cr_wall) / (2.0 * p.cr_wall) / v0_i
-                                else:
-                                    c_eff = 0.0
-
-                                # Damping force (negative, opposes motion)
-                                f_damp = -c_eff * du_contact[i]
-                                Q_nc_contact_damp[i] = f_damp
+                # Damping component = Total - Elastic
+                # This ensures consistency: no reconstruction, no double counting
+                R_contact_total = R_contact[:, step_idx + 1]
+                Q_nc_contact_damp = R_contact_total - R_contact_elastic
 
                 # Integrate dissipation: dE_diss = -qdot^T Q_nc dt (NO abs, NO max)
                 dE_rayleigh = -float(v_mid.T @ Q_nc_rayleigh) * self.h
@@ -1090,6 +1099,7 @@ class ImpactSimulator:
                 E_diss_friction[step_idx + 1] = E_diss_friction[step_idx] + dE_friction
                 E_diss_mass_contact[step_idx + 1] = E_diss_mass_contact[step_idx] + dE_mass_contact
             else:
+                R_contact_elastic = np.zeros(dof)
                 E_diss_rayleigh[step_idx + 1] = 0.0
                 E_diss_bw[step_idx + 1] = 0.0
                 E_diss_contact_damp[step_idx + 1] = 0.0
@@ -1107,10 +1117,10 @@ class ImpactSimulator:
             # =========================================================
             # EXTERNAL WORK: W_ext = ∫ qdot^T Q_ext dt
             # =========================================================
-            # For rigid wall contact, wall reaction is external
-            # (If building has DOFs, contact is internal and W_ext = 0)
+            # FIX 1: Use ONLY elastic part of contact force for external work
+            # (damping part already counted in E_diss_contact_damp)
             if step_idx > 0:
-                Q_ext = R_contact[:, step_idx + 1]  # Wall reaction force
+                Q_ext = R_contact_elastic  # ONLY elastic component
                 dW_ext = float(v_mid.T @ Q_ext) * self.h
                 W_ext[step_idx + 1] = W_ext[step_idx] + dW_ext
             else:

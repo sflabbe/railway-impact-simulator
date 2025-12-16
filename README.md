@@ -4,13 +4,13 @@ HHT-α railway impact simulator with Bouc–Wen hysteresis, inspired by the dyna
 
 It provides:
 
-- A command line interface (**`railway-sim`**) for single runs and parametric studies (speed mixes + envelopes)
+- A command line interface (**`railway-sim`**) for single runs and studies (speed mixes + envelopes, sensitivity, convergence)
 - CSV output for post‑processing
 - Optional ASCII plots for headless terminals (SSH, Termux, containers)
 - Optional Streamlit-based UI/dashboard (extra deps)
 
 > ⚠️ Python: **≥ 3.10** (project metadata).  
-> ⚠️ If you run very new Python versions (e.g. 3.13), some scientific wheels may not be available on all platforms yet.
+> ⚠️ On very new Python versions (e.g. 3.13), some scientific wheels may not be available on all platforms yet.
 
 ---
 
@@ -89,7 +89,7 @@ railway-sim --help
 
 ## 2. Optional UI / heavy dependencies
 
-The project defines an extra dependency group called `ui` (Streamlit + pyarrow + openpyxl).
+The project defines an extra dependency group called `ui` (Streamlit + Plotly + friends).
 
 Install the package with UI dependencies:
 
@@ -98,7 +98,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install ".[ui]"
 ```
 
-> ⚠️ On Android / Termux this is usually **not recommended**: `pyarrow` may attempt to compile native components and can be very slow or fail.
+> ⚠️ On Android / Termux this is usually **not recommended**: some packages may attempt to compile native components and can be slow or fail.
 
 ---
 
@@ -108,7 +108,7 @@ The repo ships example configuration files in `configs/`.
 
 ### 3.1 Single run
 
-Run the included example config:
+Run an included example config:
 
 ```bash
 railway-sim run \
@@ -159,9 +159,50 @@ This will typically write:
 - `..._summary.csv` (peaks, scenario stats, …)
 - log files with performance information
 
+### 3.3 Studies (convergence / sensitivity)
+
+The CLI also exposes study commands (run `railway-sim --help` for the full list).
+
+**Time-step convergence:**
+
+```bash
+railway-sim convergence \
+  --config configs/ice1_80kmh.yml \
+  --dts "2e-4,1e-4,5e-5" \
+  --quantity Impact_Force_MN \
+  --out results_parametric/convergence
+```
+
+**Numerical sensitivity sweep (dt / alpha / Newton tolerance):**
+
+```bash
+railway-sim numerics-sensitivity \
+  --config configs/ice1_80kmh.yml \
+  --dts "2e-4,1e-4" \
+  --alphas "0.05,0.10" \
+  --tols "1e-6,1e-8" \
+  --quantity Impact_Force_MN \
+  --out results_parametric/numerics_sensitivity
+```
+
+**Fixed DIF (strain-rate proxy) by scaling a stiffness-like parameter (default: `k_wall`):**
+
+```bash
+railway-sim strain-rate-sensitivity \
+  --config configs/ice1_80kmh.yml \
+  --difs "1.0,1.1,1.2" \
+  --k-path k_wall \
+  --quantity Impact_Force_MN \
+  --out results_parametric/strain_rate_fixed_dif
+```
+
 ---
 
 ## 4. Streamlit server (Linux / macOS / Windows)
+
+The Streamlit app entry point is:
+
+- `src/railway_simulator/core/app.py`
 
 1) Install UI extras:
 
@@ -169,27 +210,10 @@ This will typically write:
 python -m pip install ".[ui]"
 ```
 
-2) Find the Streamlit app entrypoint (a `*.py` file that imports Streamlit):
+2) Start the server:
 
 ```bash
-python - <<'PY'
-import pathlib
-hits = []
-for p in pathlib.Path(".").rglob("*.py"):
-    try:
-        t = p.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        continue
-    if "import streamlit" in t or "from streamlit" in t:
-        hits.append(str(p))
-print("\n".join(hits) if hits else "No Streamlit entrypoint found.")
-PY
-```
-
-3) Start the server:
-
-```bash
-streamlit run <path-to-streamlit-app>.py --server.address 127.0.0.1 --server.port 8501
+streamlit run src/railway_simulator/core/app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 Open `http://127.0.0.1:8501` in your browser.
@@ -197,7 +221,7 @@ Open `http://127.0.0.1:8501` in your browser.
 To access it from another device on your LAN:
 
 ```bash
-streamlit run <path-to-streamlit-app>.py --server.address 0.0.0.0 --server.port 8501
+streamlit run src/railway_simulator/core/app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
 > ⚠️ Security note: binding to `0.0.0.0` exposes the server on your local network. Use this only on trusted networks.
@@ -208,8 +232,8 @@ streamlit run <path-to-streamlit-app>.py --server.address 0.0.0.0 --server.port 
 
 Configs are loaded from `--config` / `--base-config` and merged into internal defaults.
 
-- Keys must match what the engine expects (unknown keys may raise errors like  
-  `SimulationParams.__init__() got an unexpected keyword argument ...`).
+- Descriptive metadata keys like `case_name` / `notes` are accepted and ignored by the solver.
+- Other unknown keys are ignored with a warning (helps catch typos).
 - The example configs under `configs/` are the best reference for valid keys and units.
 
 Minimal override example:
@@ -218,7 +242,10 @@ Minimal override example:
 # quickstart.yml
 v0_init: -22.22   # [m/s] towards the barrier (sign convention)
 T_max: 0.40       # [s] total simulated time
+h_init: 1.0e-4    # [s] timestep
 ```
+
+> Note: if you set `T_max` and `h_init` but do not set `step`, the simulator derives a consistent `step ≈ T_max / h_init`.
 
 ---
 
@@ -239,7 +266,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install --no-build-isolation .
 ```
 
-> ⚠️ Avoid installing `.[ui]` on pure Termux unless you know your device can build `pyarrow`.
+> ⚠️ Avoid installing `.[ui]` on pure Termux unless you know your device can build required native deps.
 
 ### 6.2 UI server via proot-distro (Debian on Termux)
 
@@ -270,13 +297,7 @@ python -m pip install ".[ui]"
 Then run Streamlit (same as desktop):
 
 ```bash
-streamlit run <path-to-streamlit-app>.py --server.address 127.0.0.1 --server.port 8501
-```
-
-To expose it to your LAN:
-
-```bash
-streamlit run <path-to-streamlit-app>.py --server.address 0.0.0.0 --server.port 8501
+streamlit run src/railway_simulator/core/app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 ---

@@ -1055,8 +1055,10 @@ class ImpactSimulator:
                                     c_eff = p.k_wall * delta[i] ** 1.5 * 8.0 * (1.0 - p.cr_wall) / (5.0 * p.cr_wall) / v0_i
                                 elif model == "gonthier":
                                     c_eff = p.k_wall * delta[i] ** 1.5 * (1.0 - p.cr_wall ** 2) / p.cr_wall / v0_i
-                                elif model in ["ye", "pant-wijeyewickrema", "anagnostopoulos"]:
-                                    c_eff = p.k_wall * delta[i] ** 2.0 * 3.0 * (1.0 - p.cr_wall) / (2.0 * p.cr_wall) / v0_i
+                                elif model == "pant-wijeyewickrema":
+                                    c_eff = p.k_wall * delta[i] ** 1.0 * 3.0 * (1.0 - p.cr_wall ** 2) / (2.0 * p.cr_wall ** 2) / v0_i
+                                elif model in ["ye", "anagnostopoulos"]:
+                                    c_eff = p.k_wall * delta[i] ** 1.0 * 3.0 * (1.0 - p.cr_wall) / (2.0 * p.cr_wall) / v0_i
                                 elif model == "hertz":
                                     c_eff = 0.0  # Hertz has no damping
                                 else:

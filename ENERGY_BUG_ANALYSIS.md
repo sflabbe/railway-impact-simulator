@@ -99,9 +99,14 @@ c_eff = k_wall * delta[i] ** 1.5 * 8.0 * (1.0 - cr_wall) / (5.0 * cr_wall * v0_i
 c_eff = k_wall * delta[i] ** 1.5 * (1.0 - cr_wall ** 2) / (cr_wall * v0_i)
 ```
 
-**Ye/Pant/Anagnostopoulos** (n=2.0):
+**Pant-Wijeyewickrema** (n=1.0):
 ```python
-c_eff = k_wall * delta[i] ** 2.0 * 3.0 * (1.0 - cr_wall) / (2.0 * cr_wall * v0_i)
+c_eff = k_wall * delta[i] ** 1.0 * 3.0 * (1.0 - cr_wall ** 2) / (2.0 * cr_wall ** 2 * v0_i)
+```
+
+**Ye/Anagnostopoulos** (n=1.0):
+```python
+c_eff = k_wall * delta[i] ** 1.0 * 3.0 * (1.0 - cr_wall) / (2.0 * cr_wall * v0_i)
 ```
 
 ### Fix 2: Investigate Alternative Energy Tracking

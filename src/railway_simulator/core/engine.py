@@ -194,6 +194,9 @@ class SimulationParams:
     # Optional metadata / consistency check: linear stiffness between masses
     k_train: np.ndarray | None = None
 
+    # Strain-rate analysis: characteristic length for ε̇ ≈ δ̇/L_ref
+    L_ref_m: float = 1.0
+
 
 @dataclass
 class TrainConfig:

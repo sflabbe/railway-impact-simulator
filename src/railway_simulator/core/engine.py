@@ -987,7 +987,7 @@ class ImpactSimulator:
             v_old = qp[:, step_idx]
 
             # HHT-α consistent velocity (matches force evaluation point)
-            alpha_hht = p.hht_alpha
+            alpha_hht = p.alpha_hht
             alpha_m = (1.0 - alpha_hht) / (2.0 * (1.0 + alpha_hht))
             v_mid = (1.0 - alpha_m) * v_old + alpha_m * v_new
 

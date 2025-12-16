@@ -273,7 +273,7 @@ def run_diagnostic(v0_kmh: float = 56, dt: float = 0.0001, alpha: float = -0.1):
     params.v0_kmh = v0_kmh
     params.dt = dt
     params.sim_time = 0.3
-    params.hht_alpha = alpha
+    params.alpha_hht = alpha
 
     engine = SimulationEngine(params)
     df = engine.run()

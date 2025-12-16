@@ -1117,14 +1117,10 @@ class ImpactSimulator:
             # =========================================================
             # EXTERNAL WORK: W_ext = ∫ qdot^T Q_ext dt
             # =========================================================
-            # FIX 1: Use ONLY elastic part of contact force for external work
-            # (damping part already counted in E_diss_contact_damp)
-            if step_idx > 0:
-                Q_ext = R_contact_elastic  # ONLY elastic component
-                dW_ext = float(v_mid.T @ Q_ext) * self.h
-                W_ext[step_idx + 1] = W_ext[step_idx] + dW_ext
-            else:
-                W_ext[step_idx + 1] = 0.0
+            # FIX 5: For RIGID wall, W_ext = 0 (wall doesn't move → no work)
+            # Wall reaction is a constraint force, not external work source
+            # Energy balance: E_num = E0 - (E_mech + E_diss)
+            W_ext[step_idx + 1] = 0.0  # Rigid wall case
 
             # =========================================================
             # NUMERICAL RESIDUAL: E_num = E0 + W_ext - (E_mech + E_diss)

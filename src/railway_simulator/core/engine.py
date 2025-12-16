@@ -33,6 +33,103 @@ from scipy.constants import g as GRAVITY
 logger = logging.getLogger(__name__)
 
 # ====================================================================
+# STRAIN-RATE METRICS
+# ====================================================================
+
+def strain_rate_metrics(
+    df: pd.DataFrame,
+    t_col: str = "Time_s",
+    penetration_col: str = "Penetration_mm",
+    penetration_units: str = "mm",
+    L_ref_m: float = 1.0,
+    contact_force_col: str | None = "Impact_Force_MN",
+    force_threshold: float = 0.001,  # MN
+    pen_threshold: float = 1e-9,  # m
+    smooth_window: int = 5,
+) -> Dict[str, float]:
+    """
+    Compute strain-rate proxy metrics from penetration time history.
+
+    Strain rate proxy: ε̇(t) ≈ δ̇(t) / L_ref
+    where δ(t) is penetration and L_ref is a characteristic length.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Results dataframe with time and penetration columns.
+    t_col : str
+        Column name for time (default: "Time_s").
+    penetration_col : str
+        Column name for penetration (default: "Penetration_mm").
+    penetration_units : str
+        Units of penetration: "m" or "mm" (default: "mm").
+    L_ref_m : float
+        Characteristic length in meters (default: 1.0 m).
+        Physical choices: wall thickness, crush zone length, buffer stroke.
+    contact_force_col : str | None
+        Optional force column to define contact window (default: "Impact_Force_MN").
+    force_threshold : float
+        Force threshold for contact detection in MN (default: 0.001 MN = 1 kN).
+    pen_threshold : float
+        Penetration threshold for contact detection in meters (default: 1e-9 m).
+    smooth_window : int
+        Smoothing window size for penetration (odd int, default: 5).
+        Set to 1 to disable smoothing.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+        - "strain_rate_peak_1_s": Peak strain rate (1/s)
+        - "strain_rate_rms_1_s": RMS strain rate (1/s)
+        - "strain_rate_p95_1_s": 95th percentile strain rate (1/s)
+    """
+    t = df[t_col].to_numpy(dtype=float)
+    pen = df[penetration_col].to_numpy(dtype=float)
+
+    # Convert to meters
+    if penetration_units == "mm":
+        pen = pen * 1e-3
+
+    # Clamp to avoid tiny negative noise
+    pen = np.maximum(pen, 0.0)
+
+    # Light smoothing (helps derivative noise)
+    if smooth_window and smooth_window > 1:
+        w = int(smooth_window)
+        if w % 2 == 0:
+            w += 1
+        k = np.ones(w) / w
+        pen_s = np.convolve(pen, k, mode="same")
+    else:
+        pen_s = pen
+
+    # Derivative (central diff via gradient)
+    pen_dot = np.gradient(pen_s, t)  # m/s
+    eps_dot = pen_dot / float(L_ref_m)  # 1/s
+
+    # Contact window: penetration > threshold OR force > threshold
+    mask = pen_s > float(pen_threshold)
+    if contact_force_col is not None and contact_force_col in df.columns:
+        f = df[contact_force_col].to_numpy(dtype=float)
+        mask = mask | (np.abs(f) > float(force_threshold))
+
+    if not np.any(mask):
+        return {
+            "strain_rate_peak_1_s": 0.0,
+            "strain_rate_rms_1_s": 0.0,
+            "strain_rate_p95_1_s": 0.0,
+        }
+
+    x = np.abs(eps_dot[mask])
+    return {
+        "strain_rate_peak_1_s": float(np.max(x)),
+        "strain_rate_rms_1_s": float(np.sqrt(np.mean(x**2))),
+        "strain_rate_p95_1_s": float(np.percentile(x, 95)),
+    }
+
+
+# ====================================================================
 # CONFIGURATION & DATA CLASSES
 # ====================================================================
 
@@ -1133,6 +1230,12 @@ class ImpactSimulator:
             df.attrs["h_requested"] = self.params.h_init
             df.attrs["newton_tol"] = self.params.newton_tol
             df.attrs["alpha_hht"] = self.params.alpha_hht
+
+            # Compute strain-rate metrics
+            # Use L_ref from params if available, otherwise default to 1.0 m
+            L_ref = getattr(self.params, "L_ref_m", 1.0)
+            strain_metrics = strain_rate_metrics(df, L_ref_m=L_ref)
+            df.attrs.update(strain_metrics)
         except Exception:
             # Metadata is best-effort; never break the simulation because of it
             logger.debug(

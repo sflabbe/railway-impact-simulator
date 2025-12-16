@@ -401,12 +401,29 @@ def main():
                 )
                 max_runs = st.number_input("Max runs to plot (overlay)", 1, 20, 10, 1, key="dif_max_runs")
 
+                st.markdown("**Strain-rate computation:**")
+                L_ref_m = st.slider(
+                    "L_ref (m)",
+                    min_value=0.1,
+                    max_value=10.0,
+                    value=1.0,
+                    step=0.1,
+                    help="Characteristic length for strain rate: ε̇ ≈ δ̇/L_ref. "
+                         "Physical choices: wall thickness, crush zone, buffer stroke. "
+                         "Default 1.0 m provides dimensionless rate proxy.",
+                    key="dif_L_ref",
+                )
+
                 run_dif = st.button("Run DIF study", type="primary", key="run_dif")
 
             with right:
                 if run_dif:
                     try:
                         dif_vals = parse_floats_csv(dif_str) if dif_str.strip() else [1.0]
+
+                        # Add L_ref to params for strain-rate computation
+                        params_with_L_ref = dict(params)
+                        params_with_L_ref["L_ref_m"] = L_ref_m
 
                         captured: list[tuple[dict, pd.DataFrame]] = []
 
@@ -416,7 +433,7 @@ def main():
                             return df
 
                         summary_df = run_fixed_dif_sensitivity(
-                            dict(params),
+                            params_with_L_ref,
                             dif_vals,
                             k_path=k_path.strip(),
                             quantity=q_label,

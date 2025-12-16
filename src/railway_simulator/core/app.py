@@ -172,6 +172,9 @@ def main():
         # --------------------------
         # Numerics sensitivity
         # --------------------------
+        # NOTE: No Streamlit caching is applied to run_simulation or run_numerics_sensitivity.
+        # If caching is added in the future, ensure the cache key includes:
+        # (dt, alpha_hht, newton_tol, max_iter, model params) to avoid stale results.
         with sub_sens:
             st.markdown("### Sensitivity to numerical parameters (Δt, HHT-α, tolerance)")
 
@@ -235,15 +238,28 @@ def main():
 
                     # Simple peak plot
                     try:
+                        # Use dt_requested if available (new), fallback to dt_s (old)
+                        dt_col = "dt_requested" if "dt_requested" in summary_df.columns else "dt_s"
                         fig_peak = go.Figure()
                         fig_peak.add_trace(
                             go.Scatter(
-                                x=summary_df["dt_s"],
+                                x=summary_df[dt_col],
                                 y=summary_df["peak_force_MN"],
                                 mode="markers+lines",
-                                name="Peak force",
+                                name="Peak force (sampled)",
+                                line=dict(dash="dot"),
                             )
                         )
+                        # Add interpolated peak if available
+                        if "peak_force_interp_MN" in summary_df.columns:
+                            fig_peak.add_trace(
+                                go.Scatter(
+                                    x=summary_df[dt_col],
+                                    y=summary_df["peak_force_interp_MN"],
+                                    mode="markers+lines",
+                                    name="Peak force (interpolated)",
+                                )
+                            )
                         fig_peak.update_layout(
                             title="Peak force vs Δt (aggregated over α/tol)",
                             xaxis_title="Δt (s)",
@@ -251,8 +267,8 @@ def main():
                             height=350,
                         )
                         st.plotly_chart(fig_peak, use_container_width=True)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        st.warning(f"Could not generate peak plot: {e}")
 
                     # Overlay time histories for the selected quantity
                     if captured:

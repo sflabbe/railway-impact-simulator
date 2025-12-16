@@ -70,7 +70,7 @@ def main():
             run_btn = st.button(
                 "▶️ **Run Simulation**",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
             )
 
         with col2:
@@ -162,7 +162,7 @@ def main():
                             quantity=quantity,
                             title=f"{quantity_label} – envelope over defined speeds",
                         )
-                        st.plotly_chart(fig_env, use_container_width=True)
+                        st.plotly_chart(fig_env, width='stretch')
 
                         st.markdown("#### Scenario summary")
                         st.dataframe(summary_df)
@@ -344,7 +344,7 @@ def main():
                             tickformat=".0e",
                             exponentformat="e",
                         )
-                        st.plotly_chart(fig_peak, use_container_width=True)
+                        st.plotly_chart(fig_peak, width='stretch')
                     except Exception as e:
                         st.warning(f"Could not generate peak plot: {e}")
 
@@ -375,7 +375,7 @@ def main():
                             yaxis_title=q_label,
                             height=450,
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
 
         # --------------------------
         # Strain-rate proxy (Fixed DIF)
@@ -472,7 +472,7 @@ def main():
                             yaxis_title="Peak force (MN)",
                             height=350,
                         )
-                        st.plotly_chart(fig_peak, use_container_width=True)
+                        st.plotly_chart(fig_peak, width='stretch')
                     except Exception:
                         pass
 
@@ -503,7 +503,7 @@ def main():
                             yaxis_title=q_label,
                             height=450,
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
 
     # --------------------------------------------------------------
     # ABOUT / DOCUMENTATION TAB

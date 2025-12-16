@@ -648,6 +648,8 @@ class HHTAlphaIntegrator:
         R_contact_old: np.ndarray,
         R_friction: np.ndarray,
         R_friction_old: np.ndarray,
+        R_mass_contact: np.ndarray,
+        R_mass_contact_old: np.ndarray,
         C: np.ndarray,
         qp: np.ndarray,
         qp_old: np.ndarray
@@ -657,8 +659,8 @@ class HHTAlphaIntegrator:
 
         M * a_new = (1-α)*R_new + α*R_old - (1-α)*C*v_new - α*C*v_old
         """
-        R_total_new = R_internal + R_contact + R_friction
-        R_total_old = R_internal_old + R_contact_old + R_friction_old
+        R_total_new = R_internal + R_contact + R_friction + R_mass_contact
+        R_total_old = R_internal_old + R_contact_old + R_friction_old + R_mass_contact_old
 
         force = (
             (1.0 - self.alpha) * R_total_new +
@@ -759,6 +761,11 @@ class ImpactSimulator:
             dy = p.y_init[i + 1] - p.y_init[i]
             self.u10[i] = np.hypot(dx, dy)
 
+        # Mass-to-mass contact tracking
+        # Minimum allowed spring lengths (5% of initial length to prevent mass overlap)
+        self.L_min = 0.05 * self.u10
+        self.mass_contact_active = np.zeros(p.n_masses - 1, dtype=bool)
+
         # HHT integrator
         self.integrator = HHTAlphaIntegrator(p.alpha_hht)
 
@@ -801,6 +808,7 @@ class ImpactSimulator:
         R_contact = np.zeros((dof, p.step + 1))
         R_friction = np.zeros((dof, p.step + 1))
         R_internal = np.zeros((dof, p.step + 1))
+        R_mass_contact = np.zeros((dof, p.step + 1))
 
         # Hysteretic and friction internal states
         X_bw = np.zeros((n - 1, p.step + 1))
@@ -820,6 +828,7 @@ class ImpactSimulator:
         E_contact = np.zeros(p.step + 1)
         E_damp_rayleigh = np.zeros(p.step + 1)
         E_fric = np.zeros(p.step + 1)
+        E_mass_contact = np.zeros(p.step + 1)
 
         # Initial kinetic energy
         v0 = qp[:, 0]
@@ -901,14 +910,24 @@ class ImpactSimulator:
                     v0_contact,
                 )
 
+                # --- Mass-to-mass contact ---
+                self._compute_mass_contact(
+                    step_idx,
+                    u_spring,
+                    q[:, step_idx + 1],
+                    qp[:, step_idx + 1],
+                    R_mass_contact,
+                )
+
                 # --- Corrector: update acceleration ---
                 qpp_old = qpp[:, step_idx + 1].copy()
-    
+
                 qpp[:, step_idx + 1] = self.integrator.compute_acceleration(
                     self.M,
                     R_internal[:, step_idx + 1], R_internal[:, step_idx],
                     R_contact[:, step_idx + 1], R_contact[:, step_idx],
                     R_friction[:, step_idx + 1], R_friction[:, step_idx],
+                    R_mass_contact[:, step_idx + 1], R_mass_contact[:, step_idx],
                     self.C,
                     qp[:, step_idx + 1],
                     qp[:, step_idx],
@@ -985,6 +1004,12 @@ class ImpactSimulator:
             dE_fric = max(p_fric, 0.0) * self.h
             E_fric[step_idx + 1] = E_fric[step_idx] + dE_fric
 
+            # 6) Mass-to-mass contact dissipation
+            F_mass_contact = R_mass_contact[:, step_idx + 1]
+            p_mass_contact = -float(np.dot(F_mass_contact, v_mid))
+            dE_mass_contact = max(p_mass_contact, 0.0) * self.h
+            E_mass_contact[step_idx + 1] = E_mass_contact[step_idx] + dE_mass_contact
+
         # Sync linear solves count from integrator
         self.linear_solves = self.integrator.n_lu
 
@@ -994,6 +1019,7 @@ class ImpactSimulator:
             "E_contact": E_contact,
             "E_damp_rayleigh": E_damp_rayleigh,
             "E_fric": E_fric,
+            "E_mass_contact": E_mass_contact,
         }
 
         return self._build_results_dataframe(
@@ -1142,6 +1168,90 @@ class ImpactSimulator:
 
         return contact_active, v0_contact
 
+    def _compute_mass_contact(
+        self,
+        step_idx: int,
+        u_spring: np.ndarray,
+        q: np.ndarray,
+        qp: np.ndarray,
+        R_mass_contact: np.ndarray,
+    ) -> None:
+        """
+        Detect and enforce contact between adjacent masses.
+
+        When spring compression causes adjacent masses to touch
+        (spring length ≤ L_min), add contact force to prevent
+        further compression.
+
+        Args:
+            step_idx: Current timestep index
+            u_spring: Spring deformations (negative = compression)
+            q: Current positions
+            qp: Current velocities
+            R_mass_contact: Mass contact force vector (output)
+        """
+        p = self.params
+        n = p.n_masses
+
+        # Contact parameters
+        k_contact = 1e8  # Contact stiffness [N/m] - very stiff
+        c_contact = 1e5  # Contact damping [N·s/m]
+
+        R_mass_contact[:, step_idx + 1] = 0.0
+
+        for i in range(n - 1):
+            # Current spring length: L = L0 + u_spring
+            # (u_spring is negative for compression)
+            L_current = self.u10[i] + u_spring[i, step_idx + 1]
+
+            # Check if masses are in contact (spring fully compressed)
+            if L_current <= self.L_min[i]:
+                penetration = self.L_min[i] - L_current
+                self.mass_contact_active[i] = True
+
+                # Get positions and velocities of masses i and i+1
+                r1 = q[[i, n + i], step_idx + 1]
+                r2 = q[[i + 1, n + i + 1], step_idx + 1]
+                v1 = qp[[i, n + i], step_idx + 1]
+                v2 = qp[[i + 1, n + i + 1], step_idx + 1]
+
+                # Contact normal (from mass i to mass i+1)
+                dr = r2 - r1
+                dist = np.linalg.norm(dr)
+                if dist > 1e-12:
+                    n_vec = dr / dist
+                else:
+                    # Masses at same location, use x-direction
+                    n_vec = np.array([1.0, 0.0])
+
+                # Relative velocity along normal
+                dv = v2 - v1
+                v_rel_normal = np.dot(dv, n_vec)
+
+                # Contact force (penalty + damping)
+                # Elastic component
+                F_elastic = k_contact * penetration
+
+                # Damping component (only if approaching)
+                F_damping = 0.0
+                if v_rel_normal < 0:  # masses approaching
+                    F_damping = c_contact * abs(v_rel_normal)
+
+                F_contact = F_elastic + F_damping
+
+                # Apply force along normal direction
+                # Force on mass i: push away from mass i+1 (direction -n_vec)
+                R_mass_contact[i, step_idx + 1] -= F_contact * n_vec[0]
+                R_mass_contact[n + i, step_idx + 1] -= F_contact * n_vec[1]
+
+                # Force on mass i+1: equal and opposite (direction +n_vec)
+                R_mass_contact[i + 1, step_idx + 1] += F_contact * n_vec[0]
+                R_mass_contact[n + i + 1, step_idx + 1] += F_contact * n_vec[1]
+
+            elif L_current > self.L_min[i] * 1.1:  # Hysteresis: 10% buffer
+                # Release contact if spring extends beyond 110% of minimum
+                self.mass_contact_active[i] = False
+
     @staticmethod
     def _check_convergence(qpp_new: np.ndarray, qpp_old: np.ndarray) -> float:
         """Symmetric relative change in acceleration."""
@@ -1188,9 +1298,10 @@ class ImpactSimulator:
         E_contact = energies["E_contact"]
         E_damp_rayleigh = energies["E_damp_rayleigh"]
         E_fric = energies["E_fric"]
+        E_mass_contact = energies["E_mass_contact"]
 
         E_mech = E_kin + E_spring + E_contact
-        E_diss_tracked = E_damp_rayleigh + E_fric
+        E_diss_tracked = E_damp_rayleigh + E_fric + E_mass_contact
         E_total_tracked = E_mech + E_diss_tracked
         E_initial = float(E_total_tracked[0]) if len(E_total_tracked) > 0 else 0.0
         E_balance_error = E_total_tracked - E_initial
@@ -1212,6 +1323,7 @@ class ImpactSimulator:
                 "E_contact_J": E_contact,
                 "E_damp_rayleigh_J": E_damp_rayleigh,
                 "E_friction_J": E_fric,
+                "E_mass_contact_J": E_mass_contact,
                 "E_mech_J": E_mech,
                 "E_diss_tracked_J": E_diss_tracked,
                 "E_total_tracked_J": E_total_tracked,

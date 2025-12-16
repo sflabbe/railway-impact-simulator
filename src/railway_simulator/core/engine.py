@@ -824,7 +824,8 @@ class ImpactSimulator:
 
         # Energy bookkeeping
         E_kin = np.zeros(p.step + 1)
-        E_spring = np.zeros(p.step + 1)
+        E_spring = np.zeros(p.step + 1)  # Elastic component only (bw_a > 0)
+        E_spring_hyst = np.zeros(p.step + 1)  # Hysteretic dissipation (1-bw_a)
         E_contact = np.zeros(p.step + 1)
         E_damp_rayleigh = np.zeros(p.step + 1)
         E_fric = np.zeros(p.step + 1)
@@ -970,10 +971,40 @@ class ImpactSimulator:
             # 1) Kinetic energy
             E_kin[step_idx + 1] = 0.5 * float(v_new.T @ self.M @ v_new)
 
-            # 2) Elastic energy in train springs
-            E_spring[step_idx + 1] = 0.5 * float(
-                np.sum(self.k_lin * u_spring[:, step_idx + 1] ** 2)
-            )
+            # 2) Spring energy (Bouc-Wen model)
+            # For Bouc-Wen: f = a*(fy/uy)*u + (1-a)*fy*xfunc
+            # - Elastic component (a > 0): stores energy E = 0.5*a*k*u^2
+            # - Hysteretic component (1-a): dissipates all work done
+
+            # 2a) Elastic energy (if bw_a > 0)
+            if p.bw_a > 1e-12:
+                # E_elastic = 0.5 * a * k * u^2
+                E_spring[step_idx + 1] = 0.5 * p.bw_a * float(
+                    np.sum(self.k_lin * u_spring[:, step_idx + 1] ** 2)
+                )
+            else:
+                E_spring[step_idx + 1] = 0.0
+
+            # 2b) Hysteretic dissipation (work done by hysteretic force)
+            if step_idx > 0:
+                # Compute spring forces: f = a*k*u + (1-a)*fy*xfunc
+                # Work done by hysteretic component: dW = (1-a)*fy*xfunc * du
+                dW_hyst = 0.0
+                for i in range(n - 1):
+                    # Hysteretic force component
+                    f_hyst = (1.0 - p.bw_a) * p.fy[i] * X_bw[i, step_idx + 1]
+
+                    # Deformation increment (sign: u_spring negative for compression)
+                    du_i = u_spring[i, step_idx + 1] - u_spring[i, step_idx]
+
+                    # Work done by hysteretic force (f and du have opposite signs in compression)
+                    # Power dissipated = |f_hyst * du_i / dt|
+                    p_hyst = abs(f_hyst * du_i / self.h)
+                    dW_hyst += p_hyst * self.h
+
+                E_spring_hyst[step_idx + 1] = E_spring_hyst[step_idx] + dW_hyst
+            else:
+                E_spring_hyst[step_idx + 1] = 0.0
 
             # 3) Elastic energy in wall contact
             delta = np.maximum(-u_contact[:n, step_idx + 1], 0.0)
@@ -1015,7 +1046,8 @@ class ImpactSimulator:
 
         energies = {
             "E_kin": E_kin,
-            "E_spring": E_spring,
+            "E_spring": E_spring,  # Elastic component only
+            "E_spring_hyst": E_spring_hyst,  # Hysteretic dissipation
             "E_contact": E_contact,
             "E_damp_rayleigh": E_damp_rayleigh,
             "E_fric": E_fric,
@@ -1294,14 +1326,19 @@ class ImpactSimulator:
             bw_state = np.zeros_like(self.t)
 
         E_kin = energies["E_kin"]
-        E_spring = energies["E_spring"]
+        E_spring = energies["E_spring"]  # Elastic only (bw_a > 0)
+        E_spring_hyst = energies["E_spring_hyst"]  # Hysteretic dissipation
         E_contact = energies["E_contact"]
         E_damp_rayleigh = energies["E_damp_rayleigh"]
         E_fric = energies["E_fric"]
         E_mass_contact = energies["E_mass_contact"]
 
+        # Mechanical energy: kinetic + elastic potential (spring elastic + contact)
         E_mech = E_kin + E_spring + E_contact
-        E_diss_tracked = E_damp_rayleigh + E_fric + E_mass_contact
+
+        # Total dissipation: Rayleigh + friction + mass contact + spring hysteresis
+        E_diss_tracked = E_damp_rayleigh + E_fric + E_mass_contact + E_spring_hyst
+
         E_total_tracked = E_mech + E_diss_tracked
         E_initial = float(E_total_tracked[0]) if len(E_total_tracked) > 0 else 0.0
         E_balance_error = E_total_tracked - E_initial
@@ -1319,7 +1356,8 @@ class ImpactSimulator:
                 "Backbone_Force_MN": F_backbone_MN,
                 # Energies in Joules
                 "E_kin_J": E_kin,
-                "E_spring_J": E_spring,
+                "E_spring_J": E_spring,  # Elastic component only
+                "E_spring_hyst_J": E_spring_hyst,  # Hysteretic dissipation
                 "E_contact_J": E_contact,
                 "E_damp_rayleigh_J": E_damp_rayleigh,
                 "E_friction_J": E_fric,

@@ -648,6 +648,8 @@ class HHTAlphaIntegrator:
         R_contact_old: np.ndarray,
         R_friction: np.ndarray,
         R_friction_old: np.ndarray,
+        R_mass_contact: np.ndarray,
+        R_mass_contact_old: np.ndarray,
         C: np.ndarray,
         qp: np.ndarray,
         qp_old: np.ndarray
@@ -657,8 +659,8 @@ class HHTAlphaIntegrator:
 
         M * a_new = (1-α)*R_new + α*R_old - (1-α)*C*v_new - α*C*v_old
         """
-        R_total_new = R_internal + R_contact + R_friction
-        R_total_old = R_internal_old + R_contact_old + R_friction_old
+        R_total_new = R_internal + R_contact + R_friction + R_mass_contact
+        R_total_old = R_internal_old + R_contact_old + R_friction_old + R_mass_contact_old
 
         force = (
             (1.0 - self.alpha) * R_total_new +
@@ -759,6 +761,11 @@ class ImpactSimulator:
             dy = p.y_init[i + 1] - p.y_init[i]
             self.u10[i] = np.hypot(dx, dy)
 
+        # Mass-to-mass contact tracking
+        # Minimum allowed spring lengths (5% of initial length to prevent mass overlap)
+        self.L_min = 0.05 * self.u10
+        self.mass_contact_active = np.zeros(p.n_masses - 1, dtype=bool)
+
         # HHT integrator
         self.integrator = HHTAlphaIntegrator(p.alpha_hht)
 
@@ -801,6 +808,7 @@ class ImpactSimulator:
         R_contact = np.zeros((dof, p.step + 1))
         R_friction = np.zeros((dof, p.step + 1))
         R_internal = np.zeros((dof, p.step + 1))
+        R_mass_contact = np.zeros((dof, p.step + 1))
 
         # Hysteretic and friction internal states
         X_bw = np.zeros((n - 1, p.step + 1))
@@ -814,16 +822,33 @@ class ImpactSimulator:
         FN_node = GRAVITY * p.masses
         vs = 1.0e-3  # Stribeck reference velocity
 
-        # Energy bookkeeping
-        E_kin = np.zeros(p.step + 1)
-        E_spring = np.zeros(p.step + 1)
-        E_contact = np.zeros(p.step + 1)
-        E_damp_rayleigh = np.zeros(p.step + 1)
-        E_fric = np.zeros(p.step + 1)
+        # Energy bookkeeping (Euler-Lagrange formulation)
+        # Mechanical energy
+        E_kin = np.zeros(p.step + 1)  # Kinetic energy T
+        E_pot_spring = np.zeros(p.step + 1)  # Spring potential (conservative part)
+        E_pot_contact = np.zeros(p.step + 1)  # Contact potential (elastic part)
+        E_pot = np.zeros(p.step + 1)  # Total potential V = E_pot_spring + E_pot_contact
+        E_mech = np.zeros(p.step + 1)  # Total mechanical E_mech = T + V
 
-        # Initial kinetic energy
+        # Work and dissipation (integrated from generalized forces)
+        W_ext = np.zeros(p.step + 1)  # External work ∫ qdot^T Q_ext dt
+        E_diss_rayleigh = np.zeros(p.step + 1)  # Rayleigh damping dissipation
+        E_diss_bw = np.zeros(p.step + 1)  # Bouc-Wen hysteretic dissipation
+        E_diss_contact_damp = np.zeros(p.step + 1)  # Contact damping dissipation
+        E_diss_friction = np.zeros(p.step + 1)  # Friction dissipation
+        E_diss_mass_contact = np.zeros(p.step + 1)  # Mass-to-mass contact dissipation
+        E_diss_total = np.zeros(p.step + 1)  # Total dissipation
+
+        # Numerical residual
+        E_num = np.zeros(p.step + 1)  # E_num = E0 + W_ext - (E_mech + E_diss)
+        E_num_ratio = np.zeros(p.step + 1)  # |E_num| / E0
+
+        # Initial conditions (all energy is kinetic, V(0) = 0)
         v0 = qp[:, 0]
         E_kin[0] = 0.5 * float(v0.T @ self.M @ v0)
+        E_pot[0] = 0.0
+        E_mech[0] = E_kin[0]
+        E0 = E_mech[0]  # Initial total energy
 
         # Time stepping
         for step_idx in range(p.step):
@@ -901,14 +926,24 @@ class ImpactSimulator:
                     v0_contact,
                 )
 
+                # --- Mass-to-mass contact ---
+                self._compute_mass_contact(
+                    step_idx,
+                    u_spring,
+                    q[:, step_idx + 1],
+                    qp[:, step_idx + 1],
+                    R_mass_contact,
+                )
+
                 # --- Corrector: update acceleration ---
                 qpp_old = qpp[:, step_idx + 1].copy()
-    
+
                 qpp[:, step_idx + 1] = self.integrator.compute_acceleration(
                     self.M,
                     R_internal[:, step_idx + 1], R_internal[:, step_idx],
                     R_contact[:, step_idx + 1], R_contact[:, step_idx],
                     R_friction[:, step_idx + 1], R_friction[:, step_idx],
+                    R_mass_contact[:, step_idx + 1], R_mass_contact[:, step_idx],
                     self.C,
                     qp[:, step_idx + 1],
                     qp[:, step_idx],
@@ -942,21 +977,40 @@ class ImpactSimulator:
 
 
             # --------------------------------------------------
-            # Energy bookkeeping (after convergence)
+            # Energy bookkeeping (Euler-Lagrange formulation)
             # --------------------------------------------------
+            # FIX 3: HHT-α consistent midpoint for velocity
+            # For HHT-α, use α_m = (1-α)/(2(1+α)) for velocity weighting
+            q_new = q[:, step_idx + 1]
+            q_old = q[:, step_idx]
             v_new = qp[:, step_idx + 1]
             v_old = qp[:, step_idx]
-            v_mid = 0.5 * (v_old + v_new)
 
-            # 1) Kinetic energy
+            # HHT-α consistent velocity (matches force evaluation point)
+            alpha_hht = p.hht_alpha
+            alpha_m = (1.0 - alpha_hht) / (2.0 * (1.0 + alpha_hht))
+            v_mid = (1.0 - alpha_m) * v_old + alpha_m * v_new
+
+            # =========================================================
+            # KINETIC ENERGY: T = 0.5 * v^T M v
+            # =========================================================
             E_kin[step_idx + 1] = 0.5 * float(v_new.T @ self.M @ v_new)
 
-            # 2) Elastic energy in train springs
-            E_spring[step_idx + 1] = 0.5 * float(
-                np.sum(self.k_lin * u_spring[:, step_idx + 1] ** 2)
-            )
+            # =========================================================
+            # POTENTIAL ENERGY: V = V_spring + V_contact
+            # =========================================================
 
-            # 3) Elastic energy in wall contact
+            # Spring potential (conservative part of Bouc-Wen)
+            # For Bouc-Wen: f = a*k*u + (1-a)*fy*z
+            # Conservative part: f_cons = a*k*u → V = 0.5*a*k*u^2
+            if p.bw_a > 1e-12:
+                E_pot_spring[step_idx + 1] = 0.5 * p.bw_a * float(
+                    np.sum(self.k_lin * u_spring[:, step_idx + 1] ** 2)
+                )
+            else:
+                E_pot_spring[step_idx + 1] = 0.0
+
+            # Contact potential (elastic part only)
             delta = np.maximum(-u_contact[:n, step_idx + 1], 0.0)
             model = self.params.contact_model.lower()
             if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
@@ -966,34 +1020,139 @@ class ImpactSimulator:
 
             if np.any(delta > 0.0):
                 if exp == 1.0:
-                    E_contact[step_idx + 1] = 0.5 * self.params.k_wall * float(np.sum(delta ** 2))
+                    E_pot_contact[step_idx + 1] = 0.5 * self.params.k_wall * float(np.sum(delta ** 2))
                 else:
-                    E_contact[step_idx + 1] = (
+                    # For Hertzian: V = ∫ k*δ^n dδ = k*δ^(n+1)/(n+1)
+                    E_pot_contact[step_idx + 1] = (
                         self.params.k_wall / (exp + 1.0) * float(np.sum(delta ** (exp + 1.0)))
                     )
             else:
-                E_contact[step_idx + 1] = 0.0
+                E_pot_contact[step_idx + 1] = 0.0
 
-            # 4) Rayleigh damping loss
-            p_damp = float(v_mid.T @ self.C @ v_mid)
-            dE_damp = max(p_damp, 0.0) * self.h
-            E_damp_rayleigh[step_idx + 1] = E_damp_rayleigh[step_idx] + dE_damp
+            # Total potential and mechanical energy
+            E_pot[step_idx + 1] = E_pot_spring[step_idx + 1] + E_pot_contact[step_idx + 1]
+            E_mech[step_idx + 1] = E_kin[step_idx + 1] + E_pot[step_idx + 1]
 
-            # 5) Friction loss
-            F_fric = R_friction[:, step_idx + 1]
-            p_fric = -float(np.dot(F_fric, v_mid))
-            dE_fric = max(p_fric, 0.0) * self.h
-            E_fric[step_idx + 1] = E_fric[step_idx] + dE_fric
+            # =========================================================
+            # DISSIPATION: E_diss = -∫ qdot^T Q_nc dt
+            # =========================================================
+            if step_idx > 0:
+                # Separate non-conservative forces Q_nc
+                Q_nc_rayleigh = -self.C @ v_mid
+                Q_nc_friction = R_friction[:, step_idx + 1]
+                Q_nc_mass_contact = R_mass_contact[:, step_idx + 1]
+
+                # Bouc-Wen hysteretic (non-conservative) forces
+                Q_nc_bw = np.zeros(dof)
+                for i in range(n - 1):
+                    # Non-conservative part: (1-a)*fy*z
+                    f_nc = (1.0 - p.bw_a) * p.fy[i] * X_bw[i, step_idx + 1]
+
+                    # FIX 4: 2D force distribution along spring direction
+                    r1 = q[[i, n + i], step_idx + 1]
+                    r2 = q[[i + 1, n + i + 1], step_idx + 1]
+                    dr = r2 - r1
+                    L = np.linalg.norm(dr)
+                    if L > 1e-12:
+                        n_vec = dr / L  # Unit vector along spring
+                    else:
+                        n_vec = np.array([1.0, 0.0])  # Fallback
+
+                    # Distribute to nodes in 2D
+                    Q_nc_bw[i] -= f_nc * n_vec[0]  # x-component, mass i
+                    Q_nc_bw[n + i] -= f_nc * n_vec[1]  # y-component, mass i
+                    Q_nc_bw[i + 1] += f_nc * n_vec[0]  # x-component, mass i+1
+                    Q_nc_bw[n + i + 1] += f_nc * n_vec[1]  # y-component, mass i+1
+
+                # Contact damping (non-conservative) forces
+                # FIX 1: Extract damping from actual R_contact instead of reconstructing
+                Q_nc_contact_damp = np.zeros(dof)
+
+                # Compute elastic-only contact force for comparison
+                R_contact_elastic = np.zeros(dof)
+                if np.any(delta > 0.0):
+                    for i in range(n):
+                        if delta[i] > 0.0:
+                            # Elastic force only (no damping term)
+                            if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
+                                f_elastic = -p.k_wall * delta[i]
+                            else:  # Hertzian models
+                                f_elastic = -p.k_wall * delta[i] ** 1.5
+
+                            R_contact_elastic[i] = f_elastic
+
+                # Damping component = Total - Elastic
+                # This ensures consistency: no reconstruction, no double counting
+                R_contact_total = R_contact[:, step_idx + 1]
+                Q_nc_contact_damp = R_contact_total - R_contact_elastic
+
+                # Integrate dissipation: dE_diss = -qdot^T Q_nc dt (NO abs, NO max)
+                dE_rayleigh = -float(v_mid.T @ Q_nc_rayleigh) * self.h
+                dE_bw = -float(v_mid.T @ Q_nc_bw) * self.h
+                dE_contact_damp = -float(v_mid.T @ Q_nc_contact_damp) * self.h
+                dE_friction = -float(v_mid.T @ Q_nc_friction) * self.h
+                dE_mass_contact = -float(v_mid.T @ Q_nc_mass_contact) * self.h
+
+                E_diss_rayleigh[step_idx + 1] = E_diss_rayleigh[step_idx] + dE_rayleigh
+                E_diss_bw[step_idx + 1] = E_diss_bw[step_idx] + dE_bw
+                E_diss_contact_damp[step_idx + 1] = E_diss_contact_damp[step_idx] + dE_contact_damp
+                E_diss_friction[step_idx + 1] = E_diss_friction[step_idx] + dE_friction
+                E_diss_mass_contact[step_idx + 1] = E_diss_mass_contact[step_idx] + dE_mass_contact
+            else:
+                R_contact_elastic = np.zeros(dof)
+                E_diss_rayleigh[step_idx + 1] = 0.0
+                E_diss_bw[step_idx + 1] = 0.0
+                E_diss_contact_damp[step_idx + 1] = 0.0
+                E_diss_friction[step_idx + 1] = 0.0
+                E_diss_mass_contact[step_idx + 1] = 0.0
+
+            E_diss_total[step_idx + 1] = (
+                E_diss_rayleigh[step_idx + 1]
+                + E_diss_bw[step_idx + 1]
+                + E_diss_contact_damp[step_idx + 1]
+                + E_diss_friction[step_idx + 1]
+                + E_diss_mass_contact[step_idx + 1]
+            )
+
+            # =========================================================
+            # EXTERNAL WORK: W_ext = ∫ qdot^T Q_ext dt
+            # =========================================================
+            # FIX 5: For RIGID wall, W_ext = 0 (wall doesn't move → no work)
+            # Wall reaction is a constraint force, not external work source
+            # Energy balance: E_num = E0 - (E_mech + E_diss)
+            W_ext[step_idx + 1] = 0.0  # Rigid wall case
+
+            # =========================================================
+            # NUMERICAL RESIDUAL: E_num = E0 + W_ext - (E_mech + E_diss)
+            # =========================================================
+            E_num[step_idx + 1] = E0 + W_ext[step_idx + 1] - (E_mech[step_idx + 1] + E_diss_total[step_idx + 1])
+            if abs(E0) > 1e-12:
+                E_num_ratio[step_idx + 1] = abs(E_num[step_idx + 1]) / abs(E0)
+            else:
+                E_num_ratio[step_idx + 1] = 0.0
 
         # Sync linear solves count from integrator
         self.linear_solves = self.integrator.n_lu
 
         energies = {
-            "E_kin": E_kin,
-            "E_spring": E_spring,
-            "E_contact": E_contact,
-            "E_damp_rayleigh": E_damp_rayleigh,
-            "E_fric": E_fric,
+            # Mechanical energy components
+            "E_kin": E_kin,  # Kinetic energy T
+            "E_pot_spring": E_pot_spring,  # Spring potential (conservative part)
+            "E_pot_contact": E_pot_contact,  # Contact potential (elastic part)
+            "E_pot": E_pot,  # Total potential V
+            "E_mech": E_mech,  # Total mechanical E = T + V
+            # Work and dissipation
+            "W_ext": W_ext,  # External work
+            "E_diss_rayleigh": E_diss_rayleigh,  # Rayleigh damping dissipation
+            "E_diss_bw": E_diss_bw,  # Bouc-Wen hysteretic dissipation
+            "E_diss_contact_damp": E_diss_contact_damp,  # Contact damping dissipation
+            "E_diss_friction": E_diss_friction,  # Friction dissipation
+            "E_diss_mass_contact": E_diss_mass_contact,  # Mass contact dissipation
+            "E_diss_total": E_diss_total,  # Total dissipation
+            # Numerical residual
+            "E_num": E_num,  # Numerical residual
+            "E_num_ratio": E_num_ratio,  # |E_num| / E0
+            "E0": E0,  # Initial energy
         }
 
         return self._build_results_dataframe(
@@ -1142,6 +1301,90 @@ class ImpactSimulator:
 
         return contact_active, v0_contact
 
+    def _compute_mass_contact(
+        self,
+        step_idx: int,
+        u_spring: np.ndarray,
+        q: np.ndarray,
+        qp: np.ndarray,
+        R_mass_contact: np.ndarray,
+    ) -> None:
+        """
+        Detect and enforce contact between adjacent masses.
+
+        When spring compression causes adjacent masses to touch
+        (spring length ≤ L_min), add contact force to prevent
+        further compression.
+
+        Args:
+            step_idx: Current timestep index
+            u_spring: Spring deformations (negative = compression)
+            q: Current positions
+            qp: Current velocities
+            R_mass_contact: Mass contact force vector (output)
+        """
+        p = self.params
+        n = p.n_masses
+
+        # Contact parameters
+        k_contact = 1e8  # Contact stiffness [N/m] - very stiff
+        c_contact = 1e5  # Contact damping [N·s/m]
+
+        R_mass_contact[:, step_idx + 1] = 0.0
+
+        for i in range(n - 1):
+            # Current spring length: L = L0 + u_spring
+            # (u_spring is negative for compression)
+            L_current = self.u10[i] + u_spring[i, step_idx + 1]
+
+            # Check if masses are in contact (spring fully compressed)
+            if L_current <= self.L_min[i]:
+                penetration = self.L_min[i] - L_current
+                self.mass_contact_active[i] = True
+
+                # Get positions and velocities of masses i and i+1
+                r1 = q[[i, n + i], step_idx + 1]
+                r2 = q[[i + 1, n + i + 1], step_idx + 1]
+                v1 = qp[[i, n + i], step_idx + 1]
+                v2 = qp[[i + 1, n + i + 1], step_idx + 1]
+
+                # Contact normal (from mass i to mass i+1)
+                dr = r2 - r1
+                dist = np.linalg.norm(dr)
+                if dist > 1e-12:
+                    n_vec = dr / dist
+                else:
+                    # Masses at same location, use x-direction
+                    n_vec = np.array([1.0, 0.0])
+
+                # Relative velocity along normal
+                dv = v2 - v1
+                v_rel_normal = np.dot(dv, n_vec)
+
+                # Contact force (penalty + damping)
+                # Elastic component
+                F_elastic = k_contact * penetration
+
+                # Damping component (only if approaching)
+                F_damping = 0.0
+                if v_rel_normal < 0:  # masses approaching
+                    F_damping = c_contact * abs(v_rel_normal)
+
+                F_contact = F_elastic + F_damping
+
+                # Apply force along normal direction
+                # Force on mass i: push away from mass i+1 (direction -n_vec)
+                R_mass_contact[i, step_idx + 1] -= F_contact * n_vec[0]
+                R_mass_contact[n + i, step_idx + 1] -= F_contact * n_vec[1]
+
+                # Force on mass i+1: equal and opposite (direction +n_vec)
+                R_mass_contact[i + 1, step_idx + 1] += F_contact * n_vec[0]
+                R_mass_contact[n + i + 1, step_idx + 1] += F_contact * n_vec[1]
+
+            elif L_current > self.L_min[i] * 1.1:  # Hysteresis: 10% buffer
+                # Release contact if spring extends beyond 110% of minimum
+                self.mass_contact_active[i] = False
+
     @staticmethod
     def _check_convergence(qpp_new: np.ndarray, qpp_old: np.ndarray) -> float:
         """Symmetric relative change in acceleration."""
@@ -1183,17 +1426,22 @@ class ImpactSimulator:
         else:
             bw_state = np.zeros_like(self.t)
 
+        # Extract energy components from Euler-Lagrange formulation
         E_kin = energies["E_kin"]
-        E_spring = energies["E_spring"]
-        E_contact = energies["E_contact"]
-        E_damp_rayleigh = energies["E_damp_rayleigh"]
-        E_fric = energies["E_fric"]
-
-        E_mech = E_kin + E_spring + E_contact
-        E_diss_tracked = E_damp_rayleigh + E_fric
-        E_total_tracked = E_mech + E_diss_tracked
-        E_initial = float(E_total_tracked[0]) if len(E_total_tracked) > 0 else 0.0
-        E_balance_error = E_total_tracked - E_initial
+        E_pot_spring = energies["E_pot_spring"]
+        E_pot_contact = energies["E_pot_contact"]
+        E_pot = energies["E_pot"]
+        E_mech = energies["E_mech"]
+        W_ext = energies["W_ext"]
+        E_diss_rayleigh = energies["E_diss_rayleigh"]
+        E_diss_bw = energies["E_diss_bw"]
+        E_diss_contact_damp = energies["E_diss_contact_damp"]
+        E_diss_friction = energies["E_diss_friction"]
+        E_diss_mass_contact = energies["E_diss_mass_contact"]
+        E_diss_total = energies["E_diss_total"]
+        E_num = energies["E_num"]
+        E_num_ratio = energies["E_num_ratio"]
+        E0 = energies["E0"]
 
         df = pd.DataFrame(
             {
@@ -1206,17 +1454,24 @@ class ImpactSimulator:
                 "Position_x_m": q[0, :],
                 "BoucWen_State_1": bw_state,
                 "Backbone_Force_MN": F_backbone_MN,
-                # Energies in Joules
+                # Mechanical energy components [J]
                 "E_kin_J": E_kin,
-                "E_spring_J": E_spring,
-                "E_contact_J": E_contact,
-                "E_damp_rayleigh_J": E_damp_rayleigh,
-                "E_friction_J": E_fric,
+                "E_pot_spring_J": E_pot_spring,
+                "E_pot_contact_J": E_pot_contact,
+                "E_pot_J": E_pot,
                 "E_mech_J": E_mech,
-                "E_diss_tracked_J": E_diss_tracked,
-                "E_total_tracked_J": E_total_tracked,
-                "E_total_initial_J": np.full_like(self.t, E_initial, dtype=float),
-                "E_balance_error_J": E_balance_error,
+                # Work and dissipation [J]
+                "W_ext_J": W_ext,
+                "E_diss_rayleigh_J": E_diss_rayleigh,
+                "E_diss_bw_J": E_diss_bw,
+                "E_diss_contact_damp_J": E_diss_contact_damp,
+                "E_diss_friction_J": E_diss_friction,
+                "E_diss_mass_contact_J": E_diss_mass_contact,
+                "E_diss_total_J": E_diss_total,
+                # Numerical residual [J]
+                "E_num_J": E_num,
+                "E_num_ratio": E_num_ratio,
+                "E0_J": np.full_like(self.t, E0, dtype=float),
             }
         )
 

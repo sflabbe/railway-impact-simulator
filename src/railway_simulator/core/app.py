@@ -196,6 +196,11 @@ def main():
 
                 max_runs = st.number_input("Max runs to plot (overlay)", 1, 20, 10, 1)
 
+                st.markdown("**Recommended Δt criteria:**")
+                peak_tol = st.slider("Peak error (%)", 0.0, 5.0, 1.0, 0.1, key="sens_peak_tol")
+                impulse_tol = st.slider("Impulse error (%)", 0.0, 5.0, 1.0, 0.1, key="sens_impulse_tol")
+                pen_tol = st.slider("Penetration error (%)", 0.0, 10.0, 3.0, 0.5, key="sens_pen_tol")
+
                 run_sens = st.button("Run numerics sensitivity", type="primary", key="run_sens")
 
             with right:
@@ -292,19 +297,32 @@ def main():
                                 )
                             )
 
-                        # Compute recommended Δt (if enough data)
+                        # Compute recommended Δt using user-specified thresholds
                         if "peak_force_interp_rel_to_baseline_pct" in summary_df.columns and len(valid_df) > 2:
-                            # Find cases with <1% peak error and <1% impulse error
+                            # Check peak error
                             peak_err = valid_df["peak_force_interp_rel_to_baseline_pct"].abs()
-                            impulse_err = pd.Series(0.0, index=valid_df.index)
+                            meets_peak = peak_err <= peak_tol
+
+                            # Check impulse error
+                            meets_impulse = pd.Series(True, index=valid_df.index)
                             if "impulse_MN_s" in valid_df.columns:
                                 baseline_impulse = valid_df["impulse_MN_s"].iloc[valid_df[dt_col].argmin()]
                                 if baseline_impulse != 0:
                                     impulse_err = 100.0 * (valid_df["impulse_MN_s"] - baseline_impulse).abs() / baseline_impulse
+                                    meets_impulse = impulse_err <= impulse_tol
 
-                            converged = (peak_err < 1.0) & (impulse_err < 1.0)
+                            # Check penetration error
+                            meets_pen = pd.Series(True, index=valid_df.index)
+                            if "max_penetration_mm" in valid_df.columns:
+                                baseline_pen = valid_df["max_penetration_mm"].iloc[valid_df[dt_col].argmin()]
+                                if baseline_pen != 0:
+                                    pen_err = 100.0 * (valid_df["max_penetration_mm"] - baseline_pen).abs() / baseline_pen
+                                    meets_pen = pen_err <= pen_tol
+
+                            # All criteria must be met
+                            converged = meets_peak & meets_impulse & meets_pen
                             if converged.any():
-                                # Recommend largest dt that meets criteria (most efficient)
+                                # Recommend largest dt that meets ALL criteria (most efficient)
                                 recommended_dt = valid_df.loc[converged, dt_col].max()
                                 fig_peak.add_vline(
                                     x=recommended_dt,
@@ -315,13 +333,17 @@ def main():
                                 )
 
                         fig_peak.update_layout(
-                            title="Peak force vs Δt (log scale)",
+                            title=f"Peak force vs Δt (criteria: peak≤{peak_tol}%, impulse≤{impulse_tol}%, pen≤{pen_tol}%)",
                             xaxis_title="Δt (s)",
                             yaxis_title="Peak force (MN)",
                             height=400,
                         )
-                        # LOG SCALE for x-axis
-                        fig_peak.update_xaxes(type="log")
+                        # LOG SCALE for x-axis with clean decade formatting
+                        fig_peak.update_xaxes(
+                            type="log",
+                            tickformat=".0e",
+                            exponentformat="e",
+                        )
                         st.plotly_chart(fig_peak, use_container_width=True)
                     except Exception as e:
                         st.warning(f"Could not generate peak plot: {e}")

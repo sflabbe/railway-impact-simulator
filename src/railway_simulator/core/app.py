@@ -234,6 +234,11 @@ def main():
                     st.info("Run the study to see results.")
                 else:
                     st.markdown("#### Summary")
+                    st.info(
+                        "📊 **Baseline:** Relative errors are computed with respect to the finest "
+                        "resolution case (smallest Δt, most negative α, tightest tolerance). "
+                        "This shows numerical error vs. the most accurate result."
+                    )
                     st.dataframe(summary_df)
 
                     # Simple peak plot

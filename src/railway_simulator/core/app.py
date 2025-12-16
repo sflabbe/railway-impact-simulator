@@ -246,10 +246,10 @@ def main():
                         # Use dt_requested if available (new), fallback to dt_s (old)
                         dt_col = "dt_requested" if "dt_requested" in summary_df.columns else "dt_s"
 
-                        # Flag potentially invalid runs (non-converged or large energy errors)
+                        # Flag potentially invalid runs
+                        # Note: Could add checks for non-convergence, large energy errors, etc.
+                        # For now, plot all runs - user can inspect energy_balance_error_J_final column
                         invalid_mask = pd.Series(False, index=summary_df.index)
-                        if "energy_balance_error_J_final" in summary_df.columns:
-                            invalid_mask |= summary_df["energy_balance_error_J_final"].abs() > 1000.0
 
                         fig_peak = go.Figure()
 

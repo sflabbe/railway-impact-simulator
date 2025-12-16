@@ -34,6 +34,13 @@ app = typer.Typer(
 from .studies.cli import register_study_commands
 register_study_commands(app)
 
+# ----------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------
+
+# Conversion factor from km/h to m/s
+KMH_TO_MS = 3.6
+
 
 @app.command()
 def ui(
@@ -72,6 +79,19 @@ def ui(
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _speed_kmh_to_v0_init(speed_kmh: float) -> float:
+    """
+    Convert speed in km/h to initial velocity in m/s towards barrier.
+
+    Args:
+        speed_kmh: Speed magnitude in km/h (positive value)
+
+    Returns:
+        Velocity in m/s (negative, towards barrier)
+    """
+    return -float(speed_kmh) / KMH_TO_MS
 
 
 def _load_config(path: Path) -> dict:
@@ -193,6 +213,40 @@ def _print_and_log(logger: logging.Logger, msg: str) -> None:
     logger.info(msg)
 
 
+def _resolve_envelope_column(
+    envelope_df: pd.DataFrame,
+    quantity: str,
+) -> str:
+    """
+    Resolve the correct column name for the given quantity in an envelope DataFrame.
+
+    Tries in order:
+    1. Exact match: quantity
+    2. With suffix: f"{quantity}_envelope"
+    3. Fallback: first non-time column
+
+    Returns the resolved column name.
+    Raises RuntimeError if no suitable column is found.
+    """
+    if quantity in envelope_df.columns:
+        return quantity
+
+    env_col = f"{quantity}_envelope"
+    if env_col in envelope_df.columns:
+        return env_col
+
+    # Fallback: first non-time column
+    non_time_cols = [
+        c for c in envelope_df.columns
+        if c not in ("Time_s", "Time_ms")
+    ]
+    if not non_time_cols:
+        raise RuntimeError(
+            f"Could not find column for quantity '{quantity}' in envelope_df."
+        )
+    return non_time_cols[0]
+
+
 def _ascii_plot(
     x: np.ndarray,
     y: np.ndarray,
@@ -240,28 +294,44 @@ def _ascii_plot(
     return "\n".join(lines)
 
 
-def _compute_single_run_performance(
-    results_df: pd.DataFrame,
+def _compute_performance_metrics(
+    time_series_df: pd.DataFrame,
     wall_time: float,
     params: dict,
+    n_scenarios: int = 1,
 ) -> dict:
-    time_s = results_df["Time_s"].to_numpy()
-    if len(time_s) < 2:
-        return {
-            "wall_time": wall_time,
-            "T_max": None,
-            "steps": None,
-            "dt_mean": None,
-            "dt_min": None,
-            "dt_max": None,
-            "real_time_factor": None,
-            "linear_solves": None,
-            "n_dof": None,
-            "flops_lu": None,
-            "mflops": None,
-            "mflops_per_s": None,
-        }
+    """
+    Compute performance metrics from simulation results.
 
+    Args:
+        time_series_df: DataFrame with Time_s column (results or envelope)
+        wall_time: Wall clock time in seconds
+        params: Simulation parameters dict
+        n_scenarios: Number of scenarios run (1 for single run, >1 for parametric)
+
+    Returns:
+        Dictionary of performance metrics
+    """
+    empty_metrics = {
+        "wall_time": wall_time,
+        "T_max": None,
+        "steps": None,
+        "dt_mean": None,
+        "dt_min": None,
+        "dt_max": None,
+        "real_time_factor": None,
+        "linear_solves": None,
+        "n_dof": None,
+        "flops_lu": None,
+        "mflops": None,
+        "mflops_per_s": None,
+    }
+
+    time_s = time_series_df["Time_s"].to_numpy()
+    if len(time_s) < 2:
+        return empty_metrics
+
+    # Time-stepping metrics
     dts = np.diff(time_s)
     steps = len(dts)
     T_max = float(time_s[-1] - time_s[0])
@@ -270,18 +340,21 @@ def _compute_single_run_performance(
     dt_max = float(np.max(dts))
     real_time_factor = T_max / wall_time if wall_time > 0 else None
 
+    # DOF calculation
     n_masses = int(params.get("n_masses", len(params.get("masses", []))))
     n_dof = 2 * n_masses
 
-    # Try to get actual metrics from DataFrame attributes
-    n_lu_actual = results_df.attrs.get("n_lu", None)
-    if n_lu_actual is not None and n_lu_actual > 0:
+    # Linear solves estimation
+    # For single runs, try to get actual count from DataFrame attributes
+    n_lu_actual = time_series_df.attrs.get("n_lu", None)
+    if n_scenarios == 1 and n_lu_actual is not None and n_lu_actual > 0:
         linear_solves = int(n_lu_actual)
     else:
-        # Fallback to heuristic estimate: ~3 Newton iterations per time step
+        # Fallback heuristic: ~3 Newton iterations per time step per scenario
         avg_newton = 3.0
-        linear_solves = int(steps * avg_newton)
+        linear_solves = int(steps * n_scenarios * avg_newton)
 
+    # FLOPS estimation
     flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
     flops_lu = flops_per_lu * linear_solves
     mflops = flops_lu / 1e6
@@ -301,6 +374,15 @@ def _compute_single_run_performance(
         "mflops": mflops,
         "mflops_per_s": mflops_per_s,
     }
+
+
+def _compute_single_run_performance(
+    results_df: pd.DataFrame,
+    wall_time: float,
+    params: dict,
+) -> dict:
+    """Backward-compatible wrapper for single run performance computation."""
+    return _compute_performance_metrics(results_df, wall_time, params, n_scenarios=1)
 
 
 def _compute_parametric_performance(
@@ -309,57 +391,8 @@ def _compute_parametric_performance(
     base_params: dict,
     n_scenarios: int,
 ) -> dict:
-    time_s = envelope_df["Time_s"].to_numpy()
-    if len(time_s) < 2:
-        return {
-            "wall_time": wall_time,
-            "T_max": None,
-            "steps": None,
-            "dt_mean": None,
-            "dt_min": None,
-            "dt_max": None,
-            "real_time_factor": None,
-            "linear_solves": None,
-            "n_dof": None,
-            "flops_lu": None,
-            "mflops": None,
-            "mflops_per_s": None,
-        }
-
-    dts = np.diff(time_s)
-    steps = len(dts)
-    T_max = float(time_s[-1] - time_s[0])
-    dt_mean = float(np.mean(dts))
-    dt_min = float(np.min(dts))
-    dt_max = float(np.max(dts))
-    real_time_factor = T_max / wall_time if wall_time > 0 else None
-
-    n_masses = int(base_params.get("n_masses", len(base_params.get("masses", []))))
-    n_dof = 2 * n_masses
-
-    # Heuristic estimate: ~3 Newton iterations per time step per scenario
-    avg_newton = 3.0
-    linear_solves = int(steps * n_scenarios * avg_newton)
-
-    flops_per_lu = (2.0 / 3.0) * (n_dof ** 3)
-    flops_lu = flops_per_lu * linear_solves
-    mflops = flops_lu / 1e6
-    mflops_per_s = mflops / wall_time if wall_time > 0 else None
-
-    return {
-        "wall_time": wall_time,
-        "T_max": T_max,
-        "steps": steps,
-        "dt_mean": dt_mean,
-        "dt_min": dt_min,
-        "dt_max": dt_max,
-        "real_time_factor": real_time_factor,
-        "linear_solves": linear_solves,
-        "n_dof": n_dof,
-        "flops_lu": flops_lu,
-        "mflops": mflops,
-        "mflops_per_s": mflops_per_s,
-    }
+    """Backward-compatible wrapper for parametric performance computation."""
+    return _compute_performance_metrics(envelope_df, wall_time, base_params, n_scenarios=n_scenarios)
 
 
 # ----------------------------------------------------------------------
@@ -476,7 +509,7 @@ def run(
         )
     elif speed_kmh is not None:
         # Second level: speed in km/h
-        params["v0_init"] = -float(speed_kmh) / 3.6
+        params["v0_init"] = _speed_kmh_to_v0_init(speed_kmh)
         velocity_source = "CLI speed-kmh"
         _print_and_log(
             logger,
@@ -694,7 +727,7 @@ def parametric(
         _print_and_log(logger, msg)
 
         params_i = dict(base_params)
-        params_i["v0_init"] = -v_kmh / 3.6  # m/s, negative towards barrier
+        params_i["v0_init"] = _speed_kmh_to_v0_init(v_kmh)
 
         scen = ScenarioDefinition(
             name=name,
@@ -811,24 +844,7 @@ def parametric(
         typer.echo("")
         typer.echo(f"ASCII envelope plot ({quantity} vs Time_ms):")
 
-        # Resolve correct column name, e.g. "Impact_Force_MN_envelope"
-        if quantity in envelope_df.columns:
-            y_col = quantity
-        else:
-            env_col = f"{quantity}_envelope"
-            if env_col in envelope_df.columns:
-                y_col = env_col
-            else:
-                # Fallback: first non-time column
-                non_time_cols = [
-                    c for c in envelope_df.columns
-                    if c not in ("Time_s", "Time_ms")
-                ]
-                if not non_time_cols:
-                    raise RuntimeError(
-                        f"Could not find column for quantity '{quantity}' in envelope_df."
-                    )
-                y_col = non_time_cols[0]
+        y_col = _resolve_envelope_column(envelope_df, quantity)
 
         ascii_str = _ascii_plot(
             envelope_df["Time_ms"].to_numpy(),
@@ -841,23 +857,7 @@ def parametric(
 
     # Matplotlib envelope plot
     if plot:
-        # same column resolution logic as above
-        if quantity in envelope_df.columns:
-            y_col = quantity
-        else:
-            env_col = f"{quantity}_envelope"
-            if env_col in envelope_df.columns:
-                y_col = env_col
-            else:
-                non_time_cols = [
-                    c for c in envelope_df.columns
-                    if c not in ("Time_s", "Time_ms")
-                ]
-                if not non_time_cols:
-                    raise RuntimeError(
-                        f"Could not find column for quantity '{quantity}' in envelope_df."
-                    )
-                y_col = non_time_cols[0]
+        y_col = _resolve_envelope_column(envelope_df, quantity)
 
         t_ms = envelope_df["Time_ms"].to_numpy()
         y = envelope_df[y_col].to_numpy()

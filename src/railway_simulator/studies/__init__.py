@@ -168,6 +168,17 @@ def harmonize_time_grid(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse_floats_csv(s: str) -> List[float]:
-    """Parse '1,2,3' or '1 2 3' into list of floats."""
-    parts = re.split(r"[,\s]+", s.strip())
-    return [float(p) for p in parts if p]
+    """
+    Parse comma/space-separated floats, e.g. "1e-4,5e-5" or "1 2 3".
+
+    Returns empty list if input is empty/whitespace.
+    Raises ValueError if any part cannot be parsed as float.
+    """
+    s = (s or '').strip()
+    if not s:
+        return []
+    parts = [p for p in re.split(r'[\s,]+', s) if p]
+    try:
+        return [float(p) for p in parts]
+    except ValueError as e:
+        raise ValueError(f'Could not parse floats from: {s!r}') from e

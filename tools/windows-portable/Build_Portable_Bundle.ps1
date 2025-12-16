@@ -1,6 +1,6 @@
 param(
   [switch]$IncludeUI,
-  [string]$PythonVersion = "3.12.12",
+  [string]$PythonVersion = "3.12.8",
   [ValidateSet("amd64","win32","arm64")] [string]$Arch = "amd64",
   [string]$OutputDir = "dist_portable",
   [string]$UiHost = "127.0.0.1",

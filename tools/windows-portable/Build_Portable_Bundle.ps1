@@ -81,18 +81,31 @@ if (!(Test-Path $GetPip)) {
 }
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 & $PyExe $GetPip --no-warn-script-location
+if ($LASTEXITCODE -ne 0) { throw "Failed to install pip" }
 
 Write-Section "Upgrade packaging tools"
-& $PyExe -m pip install --upgrade pip setuptools wheel --no-warn-script-location
+# Use --no-cache-dir to avoid long path issues on Windows
+# Install pip first
+& $PyExe -m pip install --upgrade --no-cache-dir pip --no-warn-script-location
+if ($LASTEXITCODE -ne 0) { throw "Failed to upgrade pip" }
+
+# Install setuptools and wheel separately with --no-cache-dir
+& $PyExe -m pip install --upgrade --no-cache-dir setuptools wheel --no-warn-script-location
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "Warning: setuptools/wheel installation had errors. Continuing anyway..." -ForegroundColor Yellow
+}
 
 Write-Section "Install project into embedded Python"
 Push-Location $RepoRoot
 try {
+  # Use --no-cache-dir and --prefer-binary to avoid path length issues
+  # These flags help avoid Windows MAX_PATH limitations
   if ($IncludeUI) {
-    & $PyExe -m pip install ".[ui]" --no-warn-script-location
+    & $PyExe -m pip install --no-cache-dir --prefer-binary ".[ui]" --no-warn-script-location
   } else {
-    & $PyExe -m pip install . --no-warn-script-location
+    & $PyExe -m pip install --no-cache-dir --prefer-binary . --no-warn-script-location
   }
+  if ($LASTEXITCODE -ne 0) { throw "Failed to install project" }
 } finally {
   Pop-Location
 }

@@ -35,3 +35,14 @@ results_parametric/
 studies/
 !src/railway_simulator/studies/
 !src/railway_simulator/studies/**
+
+# --- Windows portable bundle outputs ---
+dist_portable/
+RailwayImpactSimulator_Portable_Windows.zip
+
+# --- local/venv/build junk ---
+.venv/
+build/
+dist/
+*.egg-info/
+__pycache__/

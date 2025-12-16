@@ -85,6 +85,26 @@ Check that the entry point is available:
 railway-sim --help
 ```
 
+### 1.4 Portable Windows bundle (no Python required)
+
+If you need to hand this to a non-developer (e.g., a professor) as a **self-contained ZIP** for Windows,
+use the portable bundle builder included in this repo:
+
+- `BUILD_PORTABLE_CLI.cmd` → builds a portable ZIP with the CLI
+- `BUILD_PORTABLE_UI.cmd`  → builds a portable ZIP with CLI + Streamlit UI (`.[ui]`)
+
+The builder creates:
+
+- `dist_portable\RailwayImpactSimulator_Portable_Windows.zip`
+
+Your professor can unzip it and run:
+
+- `Example_Run_ICE1_80kmh.bat`
+- `Run_CLI.bat`
+- `Run_UI.bat` (if built with UI)
+
+See `tools/windows-portable/README_PORTABLE.md` for details.
+
 ---
 
 ## 2. Optional UI / heavy dependencies

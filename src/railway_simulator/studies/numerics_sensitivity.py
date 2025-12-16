@@ -74,8 +74,10 @@ def run_numerics_sensitivity(
                     baseline_peak = peak
                 rel_peak = None if baseline_peak == 0 else 100.0 * (peak - baseline_peak) / baseline_peak
 
+                attrs = getattr(df, "attrs", {})
                 row = {
-                    "dt_s": float(dt),
+                    "dt_requested": float(dt),
+                    "dt_eff": float(attrs.get("dt_eff", dt)),
                     "alpha_hht": float(alpha),
                     "newton_tol": float(tol),
                     "peak_force_MN": peak,
@@ -83,8 +85,10 @@ def run_numerics_sensitivity(
                     "impulse_MN_s": impulse,
                     "max_penetration_mm": max_pen,
                     "energy_balance_error_J_final": e_final,
-                    "n_lu": int(getattr(df, "attrs", {}).get("n_lu", 0)),
-                    "n_nonlinear_iters": int(getattr(df, "attrs", {}).get("n_nonlinear_iters", 0)),
+                    "n_lu": int(attrs.get("n_lu", 0)),
+                    "n_nonlinear_iters": int(attrs.get("n_nonlinear_iters", 0)),
+                    "max_iters_per_step": int(attrs.get("max_iters_per_step", 0)),
+                    "max_residual": float(attrs.get("max_residual", float("nan"))),
                     "step": int(cfg.get("step", np.nan)),
                 }
                 rows.append(row)

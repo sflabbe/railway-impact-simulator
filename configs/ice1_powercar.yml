@@ -2,7 +2,7 @@ case_name: ICE1_powercar_discrete6
 notes: ICE 1 power car discretized into 6 equal masses (78 t total). Simplified uniform
   stiffness/yield for all inter-mass springs.
 v0_init: -22.22
-T_max: 0.6
+T_max: 0.3
 h_init: 0.0001
 alpha_hht: -0.15
 contact_model: lankarani-nikravesh

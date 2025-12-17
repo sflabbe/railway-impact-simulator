@@ -8,3 +8,5 @@ contact_model: "lankarani-nikravesh"
 # You can override stiffness as well:
 k_wall: 45_000_000.0   # 45 MN/m
 cr_wall: 0.8
+
+d0: 0.01

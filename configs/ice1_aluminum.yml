@@ -20,13 +20,13 @@ masses:
 # Longitudinal positions of the masses [m]
 # (measured from the front node)
 x_init:
-  - 1.50
-  - 4.50
-  - 8.00
-  - 11.50
-  - 15.00
-  - 18.50
-  - 21.50
+  - 0.0
+  - 3.0
+  - 6.5
+  - 10.0
+  - 13.5
+  - 17.0
+  - 20.0
 
 # Vertical positions [m] (all on track axis)
 y_init:
@@ -95,4 +95,4 @@ max_iter: 50
 
 # Angle and gap (may be overwritten by CLI or UI)
 angle_rad: 0.0
-d0: 0.0
+d0: 0.01

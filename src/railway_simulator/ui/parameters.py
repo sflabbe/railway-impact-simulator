@@ -22,16 +22,213 @@ import yaml
 from railway_simulator.core.engine import TrainBuilder, TrainConfig
 
 
+
+def _invalidate_sim_cache() -> None:
+    """Clear cached simulation outputs when parameters/config change."""
+    for k in ("sim_results", "sim_params_core"):
+        st.session_state.pop(k, None)
+
+
+def _normalize_yaml_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize YAML-loaded configuration for internal use (types/arrays)."""
+    out: Dict[str, Any] = dict(cfg) if isinstance(cfg, dict) else {}
+
+    # arrays
+    for k in ("masses", "x_init", "y_init", "fy", "uy"):
+        if k in out and out.get(k) is not None:
+            try:
+                out[k] = np.asarray(out[k], dtype=float)
+            except Exception:
+                pass
+
+    # scalars / tuples
+    if "n_masses" in out and out.get("n_masses") is not None:
+        try:
+            out["n_masses"] = int(out["n_masses"])
+        except Exception:
+            pass
+
+    if "T_int" in out and isinstance(out.get("T_int"), (list, tuple)) and len(out["T_int"]) == 2:
+        try:
+            out["T_int"] = (float(out["T_int"][0]), float(out["T_int"][1]))
+        except Exception:
+            pass
+
+    return out
+
+
+def _get_cfg_dir() -> Path:
+    """Locate ./configs directory both when running from repo root and from source tree."""
+    cfg_dir = Path.cwd() / "configs"
+    if cfg_dir.is_dir():
+        return cfg_dir
+    return Path(__file__).resolve().parents[3] / "configs"
+
+
+def _load_active_yaml_cfg() -> Dict[str, Any] | None:
+    """If YAML mode is active, load the selected YAML and store it in session_state."""
+    if st.session_state.get("train_config_mode") != "YAML example configs":
+        return None
+
+    cfg_dir = _get_cfg_dir()
+    yaml_files = sorted(cfg_dir.glob("*.yml"))
+    if not yaml_files:
+        return None
+
+    idx = int(st.session_state.get("yaml_config_idx", 0) or 0)
+    idx = max(0, min(idx, len(yaml_files) - 1))
+    yaml_path = yaml_files[idx]
+
+    try:
+        d = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(d, dict):
+            d = {}
+    except Exception:
+        d = {}
+
+    d = _normalize_yaml_cfg(d)
+    st.session_state["yaml_example_cfg"] = d
+    st.session_state["yaml_config_path"] = str(yaml_path)
+    return d
+
+
+def _sync_time_widgets_from_yaml(cfg: Dict[str, Any]) -> None:
+    """Sync sidebar time/integration widgets to YAML values (so UI matches what runs)."""
+    def _set_if_present(key: str, value):
+        if value is None:
+            return
+        st.session_state[key] = value
+
+    # velocity (km/h) from v0_init (m/s)
+    v0 = cfg.get("v0_init", None)
+    if v0 is not None:
+        try:
+            v0_kmh = float(abs(float(v0)) * 3.6)
+            v0_kmh = float(np.clip(v0_kmh, 10.0, 200.0))
+            _set_if_present("ui_v0_kmh", int(round(v0_kmh)))
+        except Exception:
+            pass
+
+    # time step (ms) from h_init (s)
+    h = cfg.get("h_init", None)
+    if h is not None:
+        try:
+            h_ms = float(float(h) * 1000.0)
+            h_ms = float(np.clip(h_ms, 0.01, 1.0))
+            _set_if_present("ui_h_ms", h_ms)
+        except Exception:
+            pass
+
+    # max time (s)
+    T_max = cfg.get("T_max", None)
+    if T_max is not None:
+        try:
+            _set_if_present("ui_T_max", float(np.clip(float(T_max), 0.1, 10.0)))
+        except Exception:
+            pass
+
+    # initial gap (cm) from d0 (m)
+    d0 = cfg.get("d0", None)
+    if d0 is not None:
+        try:
+            d0_cm = float(float(d0) * 100.0)
+            d0_cm = float(np.clip(d0_cm, 0.0, 100.0))
+            _set_if_present("ui_d0_cm", d0_cm)
+        except Exception:
+            pass
+
+    # impact angle (deg) from angle_rad
+    ang = cfg.get("angle_rad", None)
+    if ang is not None:
+        try:
+            ang_deg = float(float(ang) * 180.0 / np.pi)
+            ang_deg = float(np.clip(ang_deg, 0.0, 45.0))
+            _set_if_present("ui_angle_deg", ang_deg)
+        except Exception:
+            pass
+
+    # HHT-alpha
+    alpha = cfg.get("alpha_hht", None)
+    if alpha is not None:
+        try:
+            a = float(np.clip(float(alpha), -0.3, 0.0))
+            _set_if_present("ui_alpha_hht", a)
+        except Exception:
+            pass
+
+    # solver and related
+    solver = cfg.get("solver", None)
+    if solver is not None:
+        solver = str(solver).strip().lower()
+        if solver not in ("newton", "picard"):
+            solver = "newton"
+        _set_if_present("ui_solver", solver)
+
+    jac_mode = cfg.get("newton_jacobian_mode", None)
+    if jac_mode is not None:
+        jac_mode = str(jac_mode).strip().lower()
+        if jac_mode not in ("per_step", "each_iter"):
+            jac_mode = "per_step"
+        _set_if_present("ui_newton_jacobian_mode", jac_mode)
+
+    tol = cfg.get("newton_tol", None)
+    if tol is not None:
+        try:
+            _set_if_present("ui_newton_tol", float(tol))
+        except Exception:
+            pass
+
+    mi = cfg.get("max_iter", None)
+    if mi is not None:
+        try:
+            _set_if_present("ui_max_iter", int(mi))
+        except Exception:
+            pass
+
+
+
 def build_parameter_ui() -> Dict[str, Any]:
     """Build parameter input UI in sidebar."""
     with st.sidebar:
         st.header("⚙️ Parameters")
 
+        # YAML mode pre-pass: load selected YAML early so the sidebar widgets match what will run.
+        yaml_cfg = _load_active_yaml_cfg()
+        yaml_active = isinstance(yaml_cfg, dict) and bool(yaml_cfg)
+
+        apply_full = bool(st.session_state.get("yaml_apply_full", False))
+        use_time = bool(st.session_state.get("yaml_use_time", True))
+        use_material = bool(st.session_state.get("yaml_use_material", True))
+        use_contact = bool(st.session_state.get("yaml_use_contact", True))
+
+        if yaml_active:
+            fp = f"{st.session_state.get('yaml_config_path', '')}|{int(apply_full)}|{int(use_time)}|{int(use_material)}|{int(use_contact)}"
+            if st.session_state.get("_yaml_fp") != fp:
+                st.session_state["_yaml_fp"] = fp
+                _invalidate_sim_cache()
+                if apply_full or use_time:
+                    _sync_time_widgets_from_yaml(yaml_cfg)
+        else:
+            st.session_state.pop("_yaml_fp", None)
+
         params: Dict[str, Any] = {}
 
         # Time & Integration
+        time_lock = yaml_active and (apply_full or use_time)
         with st.expander("🕐 Time & Integration", expanded=True):
-            v0_kmh = st.slider("Impact Velocity (km/h)", 10, 200, 56, 1)
+            if time_lock:
+                st.caption("🔒 Locked by YAML (Time & Integration)")
+
+            v0_kmh = st.slider(
+                "Impact Velocity (km/h)",
+                10,
+                200,
+                56,
+                1,
+                key="ui_v0_kmh",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
+            )
             params["v0_init"] = -v0_kmh / 3.6
 
             h_ms = st.number_input(
@@ -41,6 +238,9 @@ def build_parameter_ui() -> Dict[str, Any]:
                 0.1,
                 0.01,
                 help="Time step size in milliseconds",
+                key="ui_h_ms",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
             )
             T_max = st.number_input(
                 "Max Simulation Time (s)",
@@ -53,6 +253,9 @@ def build_parameter_ui() -> Dict[str, Any]:
                     "For building response, aim for at least 5–10 natural periods "
                     "of the equivalent SDOF."
                 ),
+                key="ui_T_max",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
             )
 
             params["h_init"] = h_ms / 1000.0
@@ -67,10 +270,22 @@ def build_parameter_ui() -> Dict[str, Any]:
                 1.0,
                 0.1,
                 help="Additional initial gap between front mass and wall",
+                key="ui_d0_cm",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
             )
             params["d0"] = d0_cm / 100.0
 
-            angle_deg = st.number_input("Impact Angle (°)", 0.0, 45.0, 0.0, 0.1)
+            angle_deg = st.number_input(
+                "Impact Angle (°)",
+                0.0,
+                45.0,
+                0.0,
+                0.1,
+                key="ui_angle_deg",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
+            )
             params["angle_rad"] = angle_deg * np.pi / 180
 
             params["alpha_hht"] = st.slider(
@@ -80,6 +295,9 @@ def build_parameter_ui() -> Dict[str, Any]:
                 -0.1,
                 0.01,
                 help="Negative values add numerical damping",
+                key="ui_alpha_hht",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
             )
 
             params["solver"] = st.selectbox(
@@ -91,9 +309,11 @@ def build_parameter_ui() -> Dict[str, Any]:
                     "Choose the nonlinear solver used inside each implicit HHT-α step. "
                     "Newton is more robust near contact/strong nonlinearity; Picard is a legacy fixed-point iteration."
                 ),
+                key="ui_solver",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
             )
 
-            
             # Newton Jacobian update strategy (only relevant for Newton solver)
             if params["solver"] == "newton":
                 params["newton_jacobian_mode"] = st.selectbox(
@@ -106,15 +326,34 @@ def build_parameter_ui() -> Dict[str, Any]:
                         "'Per step' reuses J within the time step (modified Newton, much faster). "
                         "'Each iteration' rebuilds J every Newton iteration (pure but very slow)."
                     ),
+                    key="ui_newton_jacobian_mode",
+                    on_change=_invalidate_sim_cache,
+                    disabled=time_lock,
                 )
             else:
                 params["newton_jacobian_mode"] = "per_step"
 
             params["newton_tol"] = st.number_input(
-                "Convergence tolerance", 1e-8, 1e-2, 1e-4, format="%.1e"
+                "Convergence tolerance",
+                1e-8,
+                1e-2,
+                1e-4,
+                format="%.1e",
+                key="ui_newton_tol",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
             )
 
-            params["max_iter"] = st.number_input("Max iterations", 5, 100, 50, 1)
+            params["max_iter"] = st.number_input(
+                "Max iterations",
+                5,
+                100,
+                50,
+                1,
+                key="ui_max_iter",
+                on_change=_invalidate_sim_cache,
+                disabled=time_lock,
+            )
 
         # Train Geometry
         train_params = build_train_geometry_ui()
@@ -155,18 +394,18 @@ def build_parameter_ui() -> Dict[str, Any]:
                 "contact_model",
                 "k_wall",
                 "cr_wall",
+                "friction_model",
                 "mu_s",
                 "mu_k",
                 "sigma_0",
                 "sigma_1",
                 "sigma_2",
                 # building keys (optional)
-                "enable_building_sdof",
+                "building_enable",
                 "building_mass",
                 "building_zeta",
                 "building_height",
-                "building_k",
-                "building_c",
+                "building_model",
                 "building_uy",
                 "building_uy_mm",
                 "building_alpha",
@@ -219,10 +458,13 @@ def build_train_geometry_ui() -> Dict[str, Any]:
             "Configuration mode",
             ("Research locomotive model", "Example trains", "YAML example configs"),
             index=0,
+            key="train_config_mode",
+            on_change=_invalidate_sim_cache,
         )
 
         # Clear YAML selection when leaving YAML mode (avoid stale overrides).
         if config_mode != "YAML example configs":
+            # Clear YAML selection when leaving YAML mode (avoid stale overrides).
             for k in (
                 "yaml_example_cfg",
                 "yaml_apply_full",
@@ -230,8 +472,11 @@ def build_train_geometry_ui() -> Dict[str, Any]:
                 "yaml_use_material",
                 "yaml_use_contact",
                 "yaml_config_path",
+                "yaml_config_idx",
+                "_yaml_fp",
             ):
                 st.session_state.pop(k, None)
+            _invalidate_sim_cache()
 
         if config_mode == "Research locomotive model":
             n_masses = st.slider("Number of Masses", 2, 20, 7)
@@ -311,13 +556,15 @@ def build_train_geometry_ui() -> Dict[str, Any]:
                 d = {}
             case = d.get("case_name", p.stem)
             labels.append(f"{p.name} — {case}")
-            parsed.append(d)
+            parsed.append(_normalize_yaml_cfg(d))
 
         idx = st.selectbox(
             "YAML config",
             options=list(range(len(yaml_files))),
             format_func=lambda i: labels[i],
             index=0,
+            key="yaml_config_idx",
+            on_change=_invalidate_sim_cache,
         )
 
         yaml_path = yaml_files[idx]
@@ -332,30 +579,33 @@ def build_train_geometry_ui() -> Dict[str, Any]:
 
         apply_full = st.checkbox(
             "Apply full YAML config (overrides all sidebar params)",
-            value=False,
+            value=bool(st.session_state.get("yaml_apply_full", False)),
             help="If enabled, the simulation will run exactly with the YAML values (time/material/contact/etc).",
+            key="yaml_apply_full",
+            on_change=_invalidate_sim_cache,
         )
 
         use_time = st.checkbox(
             "Use time/integration values from YAML (v0_init, T_max, h_init, α, tol, ...)",
-            value=True,
+            value=bool(st.session_state.get("yaml_use_time", True)),
             disabled=apply_full,
+            key="yaml_use_time",
+            on_change=_invalidate_sim_cache,
         )
         use_material = st.checkbox(
             "Use train material values from YAML (fy/uy/Bouc–Wen)",
-            value=True,
+            value=bool(st.session_state.get("yaml_use_material", True)),
             disabled=apply_full,
+            key="yaml_use_material",
+            on_change=_invalidate_sim_cache,
         )
         use_contact = st.checkbox(
             "Use contact/friction values from YAML (k_wall/contact model/μ)",
-            value=True,
+            value=bool(st.session_state.get("yaml_use_contact", True)),
             disabled=apply_full,
+            key="yaml_use_contact",
+            on_change=_invalidate_sim_cache,
         )
-
-        st.session_state["yaml_apply_full"] = bool(apply_full)
-        st.session_state["yaml_use_time"] = bool(use_time)
-        st.session_state["yaml_use_material"] = bool(use_material)
-        st.session_state["yaml_use_contact"] = bool(use_contact)
 
         # Geometry: required keys
         n_masses = int(yaml_cfg.get("n_masses", 0) or 0)

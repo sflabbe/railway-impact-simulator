@@ -35,6 +35,39 @@ from scipy.constants import g as GRAVITY
 
 logger = logging.getLogger(__name__)
 
+
+# ====================================================================
+# SIMULATION CONSTANTS
+# ====================================================================
+
+class SimulationConstants:
+    """Physical and numerical constants for the railway impact simulator.
+
+    Centralizes magic numbers to improve maintainability and make
+    parameter tuning more explicit.
+    """
+
+    # Contact/collision parameters
+    MASS_CONTACT_STIFFNESS = 1e8  # N/m - Stiffness for mass-to-mass contact
+    MASS_CONTACT_DAMPING = 1e5    # N·s/m - Damping for mass-to-mass contact
+    MIN_SPRING_LENGTH_FRACTION = 0.05  # Minimum spring length as fraction of initial
+
+    # Friction parameters
+    STRIBECK_VELOCITY = 1.0e-3  # m/s - Reference velocity for Stribeck friction
+    MIN_VELOCITY_THRESHOLD = 1e-8  # m/s - Minimum velocity for numerical stability
+
+    # Numerical tolerances
+    ZERO_TOL = 1e-12  # General zero tolerance for numerical comparisons
+
+    # Newton-Raphson parameters
+    FD_EPSILON = 1e-6  # Finite difference epsilon for Jacobian
+    MAX_LINE_SEARCH_ITERS = 8  # Maximum backtracking iterations
+    ARMIJO_COEFF = 1e-4  # Armijo condition coefficient
+
+    # Default building damping ratio
+    DEFAULT_BUILDING_ZETA = 0.05  # 5% critical damping for building SDOF
+
+
 # ====================================================================
 # STRAIN-RATE METRICS
 # ====================================================================
@@ -236,7 +269,7 @@ class BoucWenModel:
             A, beta, gamma, n: Bouc-Wen parameters
             uy: Yield deformation
         """
-        if abs(uy) < 1e-12:
+        if abs(uy) < SimulationConstants.ZERO_TOL:
             return 0.0
         return (A - np.abs(x) ** n * (beta + np.sign(u * x) * gamma)) * u / uy
 
@@ -325,7 +358,7 @@ class FrictionModels:
     def dahl(z_prev: float, v: float, F_coulomb: float,
              sigma_0: float, h: float) -> Tuple[float, float]:
         """Dahl friction model."""
-        Fc = max(abs(F_coulomb), 1e-12)
+        Fc = max(abs(F_coulomb), SimulationConstants.ZERO_TOL)
         z_dot = (1.0 - sigma_0 / Fc * z_prev * np.sign(v)) * v
         z = z_prev + z_dot * h
         F = sigma_0 * z
@@ -548,7 +581,7 @@ class StructuralDynamics:
             dy = y[j] - y[i]
             L0 = np.hypot(dx, dy)
 
-            if L0 < 1e-12:
+            if L0 < SimulationConstants.ZERO_TOL:
                 continue
 
             cx = dx / L0
@@ -580,7 +613,7 @@ class StructuralDynamics:
         C = α*M + β*K
         """
         eigenvalues, _ = np.linalg.eig(np.linalg.solve(M, K))
-        positive = np.real(eigenvalues[np.real(eigenvalues) > 1e-12])
+        positive = np.real(eigenvalues[np.real(eigenvalues) > SimulationConstants.ZERO_TOL])
         freqs = np.sqrt(np.abs(positive))
         freqs = np.real(freqs)
         freqs.sort()
@@ -772,7 +805,7 @@ class ImpactSimulator:
 
         # Mass-to-mass contact tracking
         # Minimum allowed spring lengths (5% of initial length to prevent mass overlap)
-        self.L_min = 0.05 * self.u10
+        self.L_min = SimulationConstants.MIN_SPRING_LENGTH_FRACTION * self.u10
         self.mass_contact_active = np.zeros(p.n_masses - 1, dtype=bool)
 
         # HHT integrator
@@ -781,11 +814,11 @@ class ImpactSimulator:
         # Pre-compute friction enablement (optimization)
         self.friction_enabled = not (
             p.friction_model in ("none", "off", "", None)
-            or (abs(p.mu_s) < 1e-12 and abs(p.mu_k) < 1e-12)
+            or (abs(p.mu_s) < SimulationConstants.ZERO_TOL and abs(p.mu_k) < SimulationConstants.ZERO_TOL)
             or (
-                abs(p.sigma_0) < 1e-12
-                and abs(p.sigma_1) < 1e-12
-                and abs(p.sigma_2) < 1e-12
+                abs(p.sigma_0) < SimulationConstants.ZERO_TOL
+                and abs(p.sigma_1) < SimulationConstants.ZERO_TOL
+                and abs(p.sigma_2) < SimulationConstants.ZERO_TOL
             )
         )
 
@@ -829,7 +862,7 @@ class ImpactSimulator:
 
         # Normal forces for friction (per node)
         FN_node = GRAVITY * p.masses
-        vs = 1.0e-3  # Stribeck reference velocity
+        vs = SimulationConstants.STRIBECK_VELOCITY
 
         # --------------------------------------------------------------
         # Initial forces & acceleration (t0 consistency)
@@ -1017,7 +1050,7 @@ class ImpactSimulator:
                         r2 = q_trial[[i + 1, n + i + 1]]
                         dr = r2 - r1
                         L = np.linalg.norm(dr)
-                        n_vec = (dr / L) if L > 1e-12 else np.array([1.0, 0.0])
+                        n_vec = (dr / L) if L > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
 
                         R_int_new[i] += -f_spring * n_vec[0]
                         R_int_new[n + i] += -f_spring * n_vec[1]
@@ -1105,8 +1138,8 @@ class ImpactSimulator:
 
                     # --- Mass-to-mass contact (penalty) ---
                     R_mc_new = np.zeros(dof)
-                    k_contact = 1e8
-                    c_contact = 1e5
+                    k_contact = SimulationConstants.MASS_CONTACT_STIFFNESS
+                    c_contact = SimulationConstants.MASS_CONTACT_DAMPING
 
                     for i in range(n - 1):
                         L_current = self.u10[i] + u_s_new[i]
@@ -1120,7 +1153,7 @@ class ImpactSimulator:
 
                             dr = r2 - r1
                             dist = np.linalg.norm(dr)
-                            n_vec = (dr / dist) if dist > 1e-12 else np.array([1.0, 0.0])
+                            n_vec = (dr / dist) if dist > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
 
                             dv = v2 - v1
                             v_rel_normal = float(np.dot(dv, n_vec))
@@ -1201,7 +1234,7 @@ class ImpactSimulator:
                     rebuild_J = (J_cache is None) or (jac_mode in ("each_iter", "pure", "every_iter"))
                     if rebuild_J:
                         J = np.zeros((dof, dof), dtype=float)
-                        eps0 = 1e-6
+                        eps0 = SimulationConstants.FD_EPSILON
                         for j in range(dof):
                             dq = eps0 * (1.0 + abs(q_guess[j]))
                             q_pert = q_guess.copy()
@@ -1223,9 +1256,9 @@ class ImpactSimulator:
                     # Backtracking line search (simple Armijo)
                     lam = 1.0
                     q_next = q_guess + dq_vec
-                    for _ls in range(8):
+                    for _ls in range(SimulationConstants.MAX_LINE_SEARCH_ITERS):
                         r_try, _ = _eval_state(q_next)
-                        if np.linalg.norm(r_try) <= (1.0 - 1e-4 * lam) * rnorm:
+                        if np.linalg.norm(r_try) <= (1.0 - SimulationConstants.ARMIJO_COEFF * lam) * rnorm:
                             break
                         lam *= 0.5
                         q_next = q_guess + lam * dq_vec
@@ -1322,7 +1355,7 @@ class ImpactSimulator:
                         r2 = q[[i + 1, n + i + 1], step_idx + 1]
                         dr = r2 - r1
                         L = np.linalg.norm(dr)
-                        if L > 1e-12:
+                        if L > SimulationConstants.ZERO_TOL:
                             n_vec = dr / L
                         else:
                             n_vec = np.array([1.0, 0.0])
@@ -1439,7 +1472,7 @@ class ImpactSimulator:
             # Spring potential (conservative part of Bouc-Wen) at end level
             # For Bouc-Wen: f = a*k*u + (1-a)*fy*z
             # Conservative part: f_cons = a*k*u → V = 0.5*a*k*u^2
-            if p.bw_a > 1e-12:
+            if p.bw_a > SimulationConstants.ZERO_TOL:
                 E_pot_spring[step_idx + 1] = 0.5 * p.bw_a * float(
                     np.sum(self.k_lin * u_spring[:, step_idx + 1] ** 2)
                 )
@@ -1497,13 +1530,13 @@ class ImpactSimulator:
                 r2n = q[[i + 1, n + i + 1], step_idx + 1]
                 drn = r2n - r1n
                 Ln = np.linalg.norm(drn)
-                n_vec_n = (drn / Ln) if Ln > 1e-12 else np.array([1.0, 0.0])
+                n_vec_n = (drn / Ln) if Ln > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
 
                 r1o = q[[i, n + i], step_idx]
                 r2o = q[[i + 1, n + i + 1], step_idx]
                 dro = r2o - r1o
                 Lo = np.linalg.norm(dro)
-                n_vec_o = (dro / Lo) if Lo > 1e-12 else np.array([1.0, 0.0])
+                n_vec_o = (dro / Lo) if Lo > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
 
                 # new
                 Q_bw_new[i] -= f_nc_new * n_vec_n[0]
@@ -1602,7 +1635,7 @@ class ImpactSimulator:
             # NUMERICAL RESIDUAL: E_num = E0 + W_ext - (E_mech + E_diss)
             # =========================================================
             E_num[step_idx + 1] = E0 + W_ext[step_idx + 1] - (E_mech[step_idx + 1] + E_diss_total[step_idx + 1])
-            if abs(E0) > 1e-12:
+            if abs(E0) > SimulationConstants.ZERO_TOL:
                 E_num_ratio[step_idx + 1] = abs(E_num[step_idx + 1]) / abs(E0)
             else:
                 E_num_ratio[step_idx + 1] = 0.0
@@ -1687,7 +1720,7 @@ class ImpactSimulator:
         z_friction: np.ndarray,
         R_friction: np.ndarray,
         vs: float,
-    ):
+    ) -> None:
         """
         Compute friction forces per mass node and distribute to x/z DOFs.
 
@@ -1843,8 +1876,8 @@ class ImpactSimulator:
         n = p.n_masses
 
         # Contact parameters
-        k_contact = 1e8  # Contact stiffness [N/m] - very stiff
-        c_contact = 1e5  # Contact damping [N·s/m]
+        k_contact = SimulationConstants.MASS_CONTACT_STIFFNESS  # Contact stiffness [N/m]
+        c_contact = SimulationConstants.MASS_CONTACT_DAMPING  # Contact damping [N·s/m]
 
         R_mass_contact[:, step_idx + 1] = 0.0
 
@@ -1867,7 +1900,7 @@ class ImpactSimulator:
                 # Contact normal (from mass i to mass i+1)
                 dr = r2 - r1
                 dist = np.linalg.norm(dr)
-                if dist > 1e-12:
+                if dist > SimulationConstants.ZERO_TOL:
                     n_vec = dr / dist
                 else:
                     # Masses at same location, use x-direction
@@ -2072,7 +2105,7 @@ def get_default_simulation_params() -> dict:
         # ------------------------------------------------------------------
         "building_enable": False,
         "building_mass": 5.0e6,       # [kg] if enabled
-        "building_zeta": 0.05,        # 5 % critical
+        "building_zeta": SimulationConstants.DEFAULT_BUILDING_ZETA,  # 5% critical
         "building_height": 10.0,      # [m]
         "building_model": "linear",   # or "takeda"
         "building_uy": 0.05,          # [m]
@@ -2216,7 +2249,7 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
                 if k_train.size == 1 and k_eff.size > 1:
                     k_train = np.full_like(k_eff, float(k_train.ravel()[0]))
                 if k_train.shape == k_eff.shape:
-                    rel = np.max(np.abs(k_train - k_eff) / (np.abs(k_eff) + 1e-12))
+                    rel = np.max(np.abs(k_train - k_eff) / (np.abs(k_eff) + SimulationConstants.ZERO_TOL))
                     if rel > 0.02:  # >2% mismatch
                         logger.warning(
                             "k_train provided (YAML) differs from implied fy/uy by up to %.1f%%. "

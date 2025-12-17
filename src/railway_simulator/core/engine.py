@@ -1,5 +1,4 @@
-"""
-Engine 1 (Picard) for the Railway Impact Simulator.
+"""Engine for the Railway Impact Simulator.
 
 This module is UI-agnostic: it contains the HHT-α time integration,
 Bouc–Wen hysteresis, friction and contact laws, and the main
@@ -7,9 +6,13 @@ ImpactSimulator class.
 
 Nonlinear solver
 ----------------
-This engine uses a fixed-point iteration in acceleration (Picard-type)
-on top of HHT-α. The tolerance parameter is called `newton_tol` for
-historical reasons, but this is **not** a full Newton–Raphson scheme.
+The engine supports two implicit nonlinear solvers on top of HHT-α:
+
+- ``solver='newton'``: Newton–Raphson on the displacement unknown ``q_{n+1}``
+  (residual assembled consistently with the current HHT-α equilibrium form;
+  Jacobian by finite differences for robustness across Bouc–Wen, contact,
+  friction and mass-contact).
+- ``solver='picard'``: legacy fixed-point iteration in acceleration.
 
 Use from CLI, Streamlit app or tests as:
 
@@ -18,7 +21,7 @@ Use from CLI, Streamlit app or tests as:
     sim_params = SimulationParams(**params_dict)
     df = run_simulation(sim_params)
 
-For a future true Newton–Raphson variant, see `core.engine_newton`.
+Set ``SimulationParams.solver`` (or the YAML key ``solver``) to switch.
 """
 
 
@@ -197,6 +200,9 @@ class SimulationParams:
     # Strain-rate analysis
     L_ref_m: float = 1.0  # Characteristic length for strain-rate computation (m)
 
+    # Nonlinear solver selection
+    solver: str = "newton"  # "newton" (Newton–Raphson) or "picard" (legacy)
+    newton_jacobian_mode: str = "per_step"  # "per_step" (fast) or "each_iter" (pure/slow)
 
 @dataclass
 class TrainConfig:
@@ -679,11 +685,14 @@ class HHTAlphaIntegrator:
 # ====================================================================
 
 class ImpactSimulator:
-    """Main HHT-α simulation engine with fixed-point iterations (Picard-type).
+    """Main HHT-α simulation engine.
 
-    This is the baseline engine used by the CLI and the Streamlit app.
-    A second engine with a true Newton–Raphson scheme can be implemented
-    cleanly in `core.engine_newton` using the same SimulationParams.
+    Solver selection is controlled by ``SimulationParams.solver``:
+
+    - ``"newton"``: Newton–Raphson on the displacement unknown ``q_{n+1}``
+      using a finite-difference Jacobian of the *discrete* HHT-α residual.
+      This is robust across Bouc–Wen, contact, friction, and mass-contact.
+    - ``"picard"``: legacy fixed-point iteration in acceleration.
     """
 
     def __init__(self, params: SimulationParams):
@@ -915,155 +924,486 @@ class ImpactSimulator:
         E0 = E_mech[0]  # Initial total energy
 
         # Time stepping
+        solver = str(getattr(p, "solver", "newton")).lower()
         for step_idx in range(p.step):
-        
-            # Initial guess for a_{n+1}
-            qpp[:, step_idx + 1] = qpp[:, step_idx]
-        
+
             converged = False
             err = np.inf
             iters_this_step = 0
 
-            for it in range(p.max_iter):
-                # Reset forces for this iteration
-                R_internal[:, step_idx + 1] = 0.0
-                R_contact[:, step_idx + 1] = 0.0
-                R_friction[:, step_idx + 1] = 0.0
-                u_contact[:, step_idx + 1] = 0.0
+            if solver in ("newton", "nr", "newton-raphson", "newton_raphson"):
+                # =========================================================
+                # Newton–Raphson on displacement q_{n+1}
+                # =========================================================
+                beta = self.integrator.beta
+                gamma = self.integrator.gamma
+                alpha = self.integrator.alpha
+                h = self.h
 
-                # Predictor with current acceleration guess
-                q[:, step_idx + 1], qp[:, step_idx + 1] = self.integrator.predict(
-                    q[:, step_idx],
-                    qp[:, step_idx],
-                    qpp[:, step_idx],
-                    qpp[:, step_idx + 1],
-                    self.h,
+                a0 = 1.0 / (beta * h * h)
+
+                q_n = q[:, step_idx]
+                v_n = qp[:, step_idx]
+                a_n = qpp[:, step_idx]
+
+                # Constant-acceleration predictor for q_{n+1}
+                q_guess = q_n + h * v_n + 0.5 * h * h * a_n
+
+                # Cached previous-step state (treated as constant in this step)
+                u_s_old = u_spring[:, step_idx].copy()
+                u_c_old = u_contact[:, step_idx].copy()
+                X_old = X_bw[:, step_idx].copy()
+                z_old = z_friction[:, step_idx].copy()
+
+                R_total_old = (
+                    R_internal[:, step_idx]
+                    + R_contact[:, step_idx]
+                    + R_friction[:, step_idx]
+                    + R_mass_contact[:, step_idx]
                 )
+                Cv_old = self.C @ v_n
 
-                # --- Internal Bouc-Wen springs ---
-                for i in range(n - 1):
-                    r1 = q[[i, n + i], step_idx + 1]
-                    r2 = q[[i + 1, n + i + 1], step_idx + 1]
-                    u_spring[i, step_idx + 1] = np.linalg.norm(r2 - r1) - self.u10[i]
+                contact_active_prev = bool(contact_active)
+                v0_contact_prev = v0_contact.copy()
 
-                if step_idx > 0:
-                    du = (u_spring[:, step_idx + 1] - u_spring[:, step_idx]) / self.h
-                else:
-                    du = np.zeros(n - 1)
-
-                # Bouc–Wen springs: compute scalar force and distribute in 2D (x/y) along current spring direction
-                u_comp = -u_spring[:, step_idx + 1]  # compression positive (legacy convention)
-                du_comp = -du
-
-                # Assemble internal forces directly in global DOFs
-                R_internal[:, step_idx + 1] = 0.0
-                for i in range(n - 1):
-                    # Update hysteretic state for this spring
-                    X_bw[i, step_idx + 1] = BoucWenModel.integrate_rk4(
-                        X_bw[i, step_idx],
-                        du_comp[i],
-                        self.h,
-                        self.params.bw_A,
-                        self.params.bw_beta,
-                        self.params.bw_gamma,
-                        self.params.bw_n,
-                        self.params.uy[i],
+                def _av_from_q(q_trial: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+                    """Compute (v_{n+1}, a_{n+1}) from trial q_{n+1} (Newmark inversion)."""
+                    a_trial = a0 * (
+                        q_trial
+                        - q_n
+                        - h * v_n
+                        - h * h * (0.5 - beta) * a_n
                     )
+                    v_trial = v_n + h * ((1.0 - gamma) * a_n + gamma * a_trial)
+                    return v_trial, a_trial
 
-                    # Scalar spring force (acts along spring axis)
-                    f_spring = (
-                        self.params.bw_a * (self.k_lin[i] * u_comp[i])
-                        + (1.0 - self.params.bw_a) * self.params.fy[i] * X_bw[i, step_idx + 1]
-                    )
+                def _eval_state(q_trial: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+                    """Return (residual, state-dict) for Newton iterations."""
+                    v_trial, a_trial = _av_from_q(q_trial)
 
-                    # Current spring direction
-                    r1 = q[[i, n + i], step_idx + 1]
-                    r2 = q[[i + 1, n + i + 1], step_idx + 1]
-                    dr = r2 - r1
-                    L = np.linalg.norm(dr)
-                    if L > 1e-12:
-                        n_vec = dr / L
+                    # --- Springs (Bouc–Wen in 2D) ---
+                    u_s_new = np.zeros_like(u_s_old)
+                    R_int_new = np.zeros(dof)
+                    X_new = np.zeros_like(X_old)
+
+                    # Spring deformations
+                    for i in range(n - 1):
+                        r1 = q_trial[[i, n + i]]
+                        r2 = q_trial[[i + 1, n + i + 1]]
+                        u_s_new[i] = np.linalg.norm(r2 - r1) - self.u10[i]
+
+                    du = (u_s_new - u_s_old) / h
+                    u_comp = -u_s_new
+                    du_comp = -du
+
+                    for i in range(n - 1):
+                        X_new[i] = BoucWenModel.integrate_rk4(
+                            X_old[i],
+                            du_comp[i],
+                            h,
+                            self.params.bw_A,
+                            self.params.bw_beta,
+                            self.params.bw_gamma,
+                            self.params.bw_n,
+                            self.params.uy[i],
+                        )
+
+                        f_spring = (
+                            p.bw_a * (self.k_lin[i] * u_comp[i])
+                            + (1.0 - p.bw_a) * p.fy[i] * X_new[i]
+                        )
+
+                        r1 = q_trial[[i, n + i]]
+                        r2 = q_trial[[i + 1, n + i + 1]]
+                        dr = r2 - r1
+                        L = np.linalg.norm(dr)
+                        n_vec = (dr / L) if L > 1e-12 else np.array([1.0, 0.0])
+
+                        R_int_new[i] += -f_spring * n_vec[0]
+                        R_int_new[n + i] += -f_spring * n_vec[1]
+                        R_int_new[i + 1] += +f_spring * n_vec[0]
+                        R_int_new[n + i + 1] += +f_spring * n_vec[1]
+
+                    # --- Friction (regularized) ---
+                    R_fric_new = np.zeros(dof)
+                    z_new = z_old.copy()
+                    if self.friction_enabled:
+                        Fc_node = p.mu_k * np.abs(FN_node)
+                        Fs_node = p.mu_s * np.abs(FN_node)
+
+                        for i in range(n):
+                            vx = v_trial[i]
+                            vz = v_trial[n + i]
+                            v_t = np.hypot(vx, vz)
+
+                            z_prev = z_old[i]
+                            z_i = z_prev
+                            fx = 0.0
+                            fz = 0.0
+
+                            if v_t > 1e-8:
+                                if p.friction_model == "dahl":
+                                    F_tmp, z_i = FrictionModels.dahl(
+                                        z_prev, v_t, Fc_node[i], p.sigma_0, h
+                                    )
+                                elif p.friction_model == "lugre":
+                                    F_tmp, z_i = FrictionModels.lugre(
+                                        z_prev, v_t, Fc_node[i], Fs_node[i], vs,
+                                        p.sigma_0, p.sigma_1, p.sigma_2, h
+                                    )
+                                elif p.friction_model == "coulomb":
+                                    F_tmp = FrictionModels.coulomb_stribeck(
+                                        v_t, Fc_node[i], Fs_node[i], vs, p.sigma_2
+                                    )
+                                elif p.friction_model == "brown-mcphee":
+                                    F_tmp = FrictionModels.brown_mcphee(
+                                        v_t, Fc_node[i], Fs_node[i], vs
+                                    )
+                                else:
+                                    F_tmp, z_i = FrictionModels.lugre(
+                                        z_prev, v_t, Fc_node[i], Fs_node[i], vs,
+                                        p.sigma_0, p.sigma_1, p.sigma_2, h
+                                    )
+
+                                F_mag = abs(F_tmp)
+                                fx = -F_mag * vx / v_t
+                                fz = -F_mag * vz / v_t
+
+                            R_fric_new[i] = fx
+                            R_fric_new[n + i] = fz
+                            z_new[i] = z_i
+
+                    # --- Wall contact (unilateral) ---
+                    u_c_new = np.zeros_like(u_c_old)
+                    u_c_new[:n] = np.where(q_trial[:n] < 0.0, q_trial[:n], 0.0)
+                    du_c = (u_c_new - u_c_old) / h
+
+                    v0_eff = v0_contact_prev.copy()
+                    contact_active_new = contact_active_prev
+                    if np.any(u_c_new[:n] < 0.0):
+                        if (not contact_active_prev) and np.any(du_c[:n] < 0.0):
+                            contact_active_new = True
+                            mask = du_c[:n] < 0.0
+                            v0_eff[:n] = np.where(mask, du_c[:n], 1.0)
+                            v0_eff[:n][v0_eff[:n] == 0.0] = 1.0
+
+                        R_raw = ContactModels.compute_force(
+                            u_c_new,
+                            du_c,
+                            v0_eff,
+                            p.k_wall,
+                            p.cr_wall,
+                            p.contact_model,
+                        )
+                        R_cont_new = -R_raw
                     else:
-                        n_vec = np.array([1.0, 0.0])
+                        # Loss of contact
+                        if np.any(u_c_old[:n] < 0.0):
+                            contact_active_new = False
+                            v0_eff = np.ones_like(v0_eff)
+                        R_cont_new = np.zeros(dof)
 
-                    # Distribute to nodes (action = -reaction)
-                    R_internal[i, step_idx + 1] += -f_spring * n_vec[0]
-                    R_internal[n + i, step_idx + 1] += -f_spring * n_vec[1]
-                    R_internal[i + 1, step_idx + 1] += +f_spring * n_vec[0]
-                    R_internal[n + i + 1, step_idx + 1] += +f_spring * n_vec[1]
+                    # --- Mass-to-mass contact (penalty) ---
+                    R_mc_new = np.zeros(dof)
+                    k_contact = 1e8
+                    c_contact = 1e5
 
+                    for i in range(n - 1):
+                        L_current = self.u10[i] + u_s_new[i]
+                        if L_current <= self.L_min[i]:
+                            penetration = self.L_min[i] - L_current
 
-                # --- Friction ---
-                self._compute_friction(
-                    step_idx,
-                    qp[:, step_idx + 1],
-                    FN_node,
-                    z_friction,
-                    R_friction,
-                    vs,
-                )
+                            r1 = q_trial[[i, n + i]]
+                            r2 = q_trial[[i + 1, n + i + 1]]
+                            v1 = v_trial[[i, n + i]]
+                            v2 = v_trial[[i + 1, n + i + 1]]
 
-                # --- Contact ---
-                contact_active, v0_contact = self._compute_contact(
-                    step_idx,
-                    q[:, step_idx + 1],
-                    qp[:, step_idx + 1],
-                    u_contact,
-                    R_contact,
-                    contact_active,
-                    v0_contact,
-                )
+                            dr = r2 - r1
+                            dist = np.linalg.norm(dr)
+                            n_vec = (dr / dist) if dist > 1e-12 else np.array([1.0, 0.0])
 
-                # --- Mass-to-mass contact ---
-                self._compute_mass_contact(
-                    step_idx,
-                    u_spring,
-                    q[:, step_idx + 1],
-                    qp[:, step_idx + 1],
-                    R_mass_contact,
-                )
+                            dv = v2 - v1
+                            v_rel_normal = float(np.dot(dv, n_vec))
 
-                # --- Corrector: update acceleration ---
-                qpp_old = qpp[:, step_idx + 1].copy()
+                            F_elastic = k_contact * penetration
+                            F_damping = c_contact * abs(v_rel_normal) if v_rel_normal < 0.0 else 0.0
+                            F_contact = F_elastic + F_damping
 
-                qpp[:, step_idx + 1] = self.integrator.compute_acceleration(
-                    self.M,
-                    R_internal[:, step_idx + 1], R_internal[:, step_idx],
-                    R_contact[:, step_idx + 1], R_contact[:, step_idx],
-                    R_friction[:, step_idx + 1], R_friction[:, step_idx],
-                    R_mass_contact[:, step_idx + 1], R_mass_contact[:, step_idx],
-                    self.C,
-                    qp[:, step_idx + 1],
-                    qp[:, step_idx],
-                )
+                            R_mc_new[i] -= F_contact * n_vec[0]
+                            R_mc_new[n + i] -= F_contact * n_vec[1]
+                            R_mc_new[i + 1] += F_contact * n_vec[0]
+                            R_mc_new[n + i + 1] += F_contact * n_vec[1]
 
-                # Track nonlinear iterations (linear solves tracked in integrator)
-                self.total_iters += 1
-                iters_this_step += 1
+                    # Assemble total forces
+                    R_total_new = R_int_new + R_cont_new + R_fric_new + R_mc_new
+                    Cv_new = self.C @ v_trial
 
-                # Convergence check
-                err = self._check_convergence(qpp[:, step_idx + 1], qpp_old)
+                    # Residual consistent with compute_acceleration():
+                    #   M a_{n+1} - [(1-α)R_{n+1} + αR_n - (1-α)C v_{n+1} - α C v_n] = 0
+                    force = (
+                        (1.0 - alpha) * R_total_new
+                        + alpha * R_total_old
+                        - (1.0 - alpha) * Cv_new
+                        - alpha * Cv_old
+                    )
+                    r = (self.M @ a_trial) - force
 
-                # Track max residual across all iterations
-                if err > self.max_residual:
-                    self.max_residual = err
+                    state = {
+                        "q": q_trial,
+                        "v": v_trial,
+                        "a": a_trial,
+                        "R_internal": R_int_new,
+                        "R_contact": R_cont_new,
+                        "R_friction": R_fric_new,
+                        "R_mass_contact": R_mc_new,
+                        "u_spring": u_s_new,
+                        "u_contact": u_c_new,
+                        "X_bw": X_new,
+                        "z_friction": z_new,
+                        "contact_active": contact_active_new,
+                        "v0_contact": v0_eff,
+                    }
+                    return r, state
 
-                if err < self.params.newton_tol:
-                    converged = True
-                    break
+                # Newton loop
+                state_last: Dict[str, Any] | None = None
+                jac_mode = str(getattr(p, "newton_jacobian_mode", "per_step")).lower()
+                J_cache: np.ndarray | None = None
+                contact_cache: bool | None = None
+                for it in range(p.max_iter):
+                    r0, state0 = _eval_state(q_guess)
+                    state_last = state0
+
+                    iters_this_step = it + 1
+                    self.total_iters += 1
+
+                    rnorm = float(np.linalg.norm(r0))
+                    ref = float(np.linalg.norm(R_total_old) + 1.0)
+                    err = rnorm / ref
+                    if err > self.max_residual:
+                        self.max_residual = err
+
+                    if err < self.params.newton_tol:
+                        converged = True
+                        break
+                    # Finite-difference Jacobian J = ∂r/∂q (FD; expensive)
+                    # newton_jacobian_mode:
+                    #   - 'per_step': build once per time step (modified Newton; fast)
+                    #   - 'each_iter': rebuild each Newton iteration (pure FD Newton; slow)
+                    contact_now = bool(state0.get("contact_active", False))
+                    if contact_cache is None:
+                        contact_cache = contact_now
+                    elif contact_now != contact_cache:
+                        # Contact state changed -> refresh Jacobian for stability
+                        J_cache = None
+                        contact_cache = contact_now
+
+                    rebuild_J = (J_cache is None) or (jac_mode in ("each_iter", "pure", "every_iter"))
+                    if rebuild_J:
+                        J = np.zeros((dof, dof), dtype=float)
+                        eps0 = 1e-6
+                        for j in range(dof):
+                            dq = eps0 * (1.0 + abs(q_guess[j]))
+                            q_pert = q_guess.copy()
+                            q_pert[j] += dq
+                            r_pert, _ = _eval_state(q_pert)
+                            J[:, j] = (r_pert - r0) / dq
+                        J_cache = J
+                    else:
+                        J = J_cache
+
+                    # Solve for update
+                    try:
+                        dq_vec = np.linalg.solve(J, -r0)
+                    except np.linalg.LinAlgError:
+                        dq_vec = np.linalg.lstsq(J, -r0, rcond=None)[0]
+
+                    self.linear_solves += 1
+
+                    # Backtracking line search (simple Armijo)
+                    lam = 1.0
+                    q_next = q_guess + dq_vec
+                    for _ls in range(8):
+                        r_try, _ = _eval_state(q_next)
+                        if np.linalg.norm(r_try) <= (1.0 - 1e-4 * lam) * rnorm:
+                            break
+                        lam *= 0.5
+                        q_next = q_guess + lam * dq_vec
+
+                    q_guess = q_next
+
+                # Commit last iterate (converged or best-effort)
+                if state_last is None:
+                    _, state_last = _eval_state(q_guess)
+
+                q[:, step_idx + 1] = state_last["q"]
+                qp[:, step_idx + 1] = state_last["v"]
+                qpp[:, step_idx + 1] = state_last["a"]
+                R_internal[:, step_idx + 1] = state_last["R_internal"]
+                R_contact[:, step_idx + 1] = state_last["R_contact"]
+                R_friction[:, step_idx + 1] = state_last["R_friction"]
+                R_mass_contact[:, step_idx + 1] = state_last["R_mass_contact"]
+                u_spring[:, step_idx + 1] = state_last["u_spring"]
+                u_contact[:, step_idx + 1] = state_last["u_contact"]
+                X_bw[:, step_idx + 1] = state_last["X_bw"]
+                z_friction[:, step_idx + 1] = state_last["z_friction"]
+                contact_active = bool(state_last["contact_active"])
+                v0_contact = state_last["v0_contact"]
+
+                if not converged:
+                    logger.warning(
+                        "Newton solver did not converge at step %d (||r||/ref = %.3e)",
+                        step_idx,
+                        err,
+                    )
+
+            else:
+                # =========================================================
+                # Legacy Picard iteration in acceleration (kept for reference)
+                # =========================================================
+
+                # Initial guess for a_{n+1}
+                qpp[:, step_idx + 1] = qpp[:, step_idx]
+
+                for it in range(p.max_iter):
+                    # Reset forces for this iteration
+                    R_internal[:, step_idx + 1] = 0.0
+                    R_contact[:, step_idx + 1] = 0.0
+                    R_friction[:, step_idx + 1] = 0.0
+                    u_contact[:, step_idx + 1] = 0.0
+
+                    # Predictor with current acceleration guess
+                    q[:, step_idx + 1], qp[:, step_idx + 1] = self.integrator.predict(
+                        q[:, step_idx],
+                        qp[:, step_idx],
+                        qpp[:, step_idx],
+                        qpp[:, step_idx + 1],
+                        self.h,
+                    )
+
+                    # --- Internal Bouc-Wen springs ---
+                    for i in range(n - 1):
+                        r1 = q[[i, n + i], step_idx + 1]
+                        r2 = q[[i + 1, n + i + 1], step_idx + 1]
+                        u_spring[i, step_idx + 1] = np.linalg.norm(r2 - r1) - self.u10[i]
+
+                    if step_idx > 0:
+                        du = (u_spring[:, step_idx + 1] - u_spring[:, step_idx]) / self.h
+                    else:
+                        du = np.zeros(n - 1)
+
+                    # Bouc–Wen springs: compute scalar force and distribute in 2D (x/y) along current spring direction
+                    u_comp = -u_spring[:, step_idx + 1]  # compression positive (legacy convention)
+                    du_comp = -du
+
+                    # Assemble internal forces directly in global DOFs
+                    R_internal[:, step_idx + 1] = 0.0
+                    for i in range(n - 1):
+                        # Update hysteretic state for this spring
+                        X_bw[i, step_idx + 1] = BoucWenModel.integrate_rk4(
+                            X_bw[i, step_idx],
+                            du_comp[i],
+                            self.h,
+                            self.params.bw_A,
+                            self.params.bw_beta,
+                            self.params.bw_gamma,
+                            self.params.bw_n,
+                            self.params.uy[i],
+                        )
+
+                        # Scalar spring force (acts along spring axis)
+                        f_spring = (
+                            self.params.bw_a * (self.k_lin[i] * u_comp[i])
+                            + (1.0 - self.params.bw_a) * self.params.fy[i] * X_bw[i, step_idx + 1]
+                        )
+
+                        # Current spring direction
+                        r1 = q[[i, n + i], step_idx + 1]
+                        r2 = q[[i + 1, n + i + 1], step_idx + 1]
+                        dr = r2 - r1
+                        L = np.linalg.norm(dr)
+                        if L > 1e-12:
+                            n_vec = dr / L
+                        else:
+                            n_vec = np.array([1.0, 0.0])
+
+                        # Distribute to nodes (action = -reaction)
+                        R_internal[i, step_idx + 1] += -f_spring * n_vec[0]
+                        R_internal[n + i, step_idx + 1] += -f_spring * n_vec[1]
+                        R_internal[i + 1, step_idx + 1] += +f_spring * n_vec[0]
+                        R_internal[n + i + 1, step_idx + 1] += +f_spring * n_vec[1]
+
+                    # --- Friction ---
+                    self._compute_friction(
+                        step_idx,
+                        qp[:, step_idx + 1],
+                        FN_node,
+                        z_friction,
+                        R_friction,
+                        vs,
+                    )
+
+                    # --- Contact ---
+                    contact_active, v0_contact = self._compute_contact(
+                        step_idx,
+                        q[:, step_idx + 1],
+                        qp[:, step_idx + 1],
+                        u_contact,
+                        R_contact,
+                        contact_active,
+                        v0_contact,
+                    )
+
+                    # --- Mass-to-mass contact ---
+                    self._compute_mass_contact(
+                        step_idx,
+                        u_spring,
+                        q[:, step_idx + 1],
+                        qp[:, step_idx + 1],
+                        R_mass_contact,
+                    )
+
+                    # --- Corrector: update acceleration ---
+                    qpp_old = qpp[:, step_idx + 1].copy()
+
+                    qpp[:, step_idx + 1] = self.integrator.compute_acceleration(
+                        self.M,
+                        R_internal[:, step_idx + 1], R_internal[:, step_idx],
+                        R_contact[:, step_idx + 1], R_contact[:, step_idx],
+                        R_friction[:, step_idx + 1], R_friction[:, step_idx],
+                        R_mass_contact[:, step_idx + 1], R_mass_contact[:, step_idx],
+                        self.C,
+                        qp[:, step_idx + 1],
+                        qp[:, step_idx],
+                    )
+
+                    # Track iterations
+                    self.total_iters += 1
+                    iters_this_step += 1
+
+                    # Convergence check
+                    err = self._check_convergence(qpp[:, step_idx + 1], qpp_old)
+                    if err > self.max_residual:
+                        self.max_residual = err
+
+                    if err < self.params.newton_tol:
+                        converged = True
+                        break
+
+                iters_this_step = max(iters_this_step, 1)
+
+                if not converged:
+                    logger.warning(
+                        "Picard solver did not converge at step %d (rel Δa = %.3e)",
+                        step_idx,
+                        err,
+                    )
 
             # Track max iterations needed per step
             if iters_this_step > self.max_iters_per_step:
                 self.max_iters_per_step = iters_this_step
 
             iters_hist[step_idx] = iters_this_step
-
-            if not converged:
-                logger.warning(
-                    "Nonlinear solver did not converge at step %d (rel Δa = %.3e)",
-                    step_idx,
-                    err,
-                )
 
 
             # --------------------------------------------------
@@ -1765,6 +2105,8 @@ def get_default_simulation_params() -> dict:
         "alpha_hht": -0.15,      # HHT-α parameter
         "newton_tol": 1e-6,
         "max_iter": 25,
+        "solver": "newton",     # "newton" (NR) or "picard" (legacy)
+        "newton_jacobian_mode": "per_step",  # "per_step" (fast) or "each_iter" (pure/slow)
         "h_init": h_init,        # [s]
         "T_max": T_max,          # [s]
         "step": n_steps,         # number of steps
@@ -1774,7 +2116,7 @@ def get_default_simulation_params() -> dict:
 
 def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
     """
-    High-level convenience wrapper (engine v1: HHT-α + fixed-point in acceleration).
+    High-level convenience wrapper.
 
     - If a dict is passed, it may contain only overrides; missing fields are
       filled from get_default_simulation_params(), and all types are normalised

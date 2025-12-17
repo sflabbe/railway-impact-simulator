@@ -82,6 +82,34 @@ def build_parameter_ui() -> Dict[str, Any]:
                 help="Negative values add numerical damping",
             )
 
+            params["solver"] = st.selectbox(
+                "Nonlinear solver",
+                options=["newton", "picard"],
+                index=0,
+                format_func=lambda s: "Newton–Raphson (recommended)" if s == "newton" else "Picard (legacy)",
+                help=(
+                    "Choose the nonlinear solver used inside each implicit HHT-α step. "
+                    "Newton is more robust near contact/strong nonlinearity; Picard is a legacy fixed-point iteration."
+                ),
+            )
+
+            
+            # Newton Jacobian update strategy (only relevant for Newton solver)
+            if params["solver"] == "newton":
+                params["newton_jacobian_mode"] = st.selectbox(
+                    "Newton Jacobian",
+                    options=["per_step", "each_iter"],
+                    index=0,
+                    format_func=lambda s: "Per step (fast)" if s == "per_step" else "Each iteration (pure, slow)",
+                    help=(
+                        "Controls how often the Newton Jacobian is rebuilt when using the finite-difference Jacobian. "
+                        "'Per step' reuses J within the time step (modified Newton, much faster). "
+                        "'Each iteration' rebuilds J every Newton iteration (pure but very slow)."
+                    ),
+                )
+            else:
+                params["newton_jacobian_mode"] = "per_step"
+
             params["newton_tol"] = st.number_input(
                 "Convergence tolerance", 1e-8, 1e-2, 1e-4, format="%.1e"
             )
@@ -114,6 +142,8 @@ def build_parameter_ui() -> Dict[str, Any]:
                 "h_init",
                 "alpha_hht",
                 "newton_tol",
+                "newton_jacobian_mode",
+                "solver",
                 "max_iter",
                 "d0",
                 "angle_rad",

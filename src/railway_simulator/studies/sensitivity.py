@@ -58,7 +58,7 @@ def run_sensitivity_study(
         t = df["Time_s"].to_numpy()
         f = df[quantity].to_numpy()
         peak = float(np.nanmax(f))
-        impulse = float(np.trapz(f, t))
+        impulse = float(getattr(np, "trapezoid", np.trapz)(f, t))
         max_pen = float(np.nanmax(df.get("Penetration_mm", pd.Series([np.nan])).to_numpy()))
         max_acc = float(np.nanmax(df.get("Acceleration_g", pd.Series([np.nan])).to_numpy()))
         e_final = float(df.get("E_balance_error_J", pd.Series([np.nan])).iloc[-1]) if len(df) else float("nan")

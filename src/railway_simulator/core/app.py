@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+import time
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -94,8 +96,8 @@ def main():
             "Run reproducible sweeps using the same configuration as the Simulator tab."
         )
 
-        sub_env, sub_sens, sub_dif = st.tabs(
-            ["🚄 Speed envelope", "🧮 Numerics sensitivity", "⚡ Strain-rate (DIF)"]
+        sub_env, sub_sens, sub_dif, sub_solver = st.tabs(
+            ["🚄 Speed envelope", "🧮 Numerics sensitivity", "⚡ Strain-rate (DIF)", "🔁 Solver comparison"]
         )
 
         # --------------------------
@@ -135,6 +137,13 @@ def main():
                 key="env_quantity",
             )
             quantity = quantity_options[quantity_label]
+            compare_solvers_env = st.checkbox(
+                "Compare nonlinear solvers (Newton vs Picard)",
+                value=False,
+                key="compare_solvers_env",
+                help="Runs the same speed envelope twice (solver=newton and solver=picard) and overlays the results.",
+            )
+
 
             if st.button("Run parametric envelope", type="primary", key="run_env"):
                 try:
@@ -146,26 +155,101 @@ def main():
                     else:
                         base_params = dict(params)
 
-                        scenarios = build_speed_scenarios(
-                            base_params,
-                            speeds_kmh=speeds,
-                            weights=weights,
-                            prefix="v",
-                        )
+                        if compare_solvers_env:
+                            solvers = ["newton", "picard"]
+                            env_by_solver: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
 
-                        envelope_df, summary_df, _ = run_parametric_envelope(
-                            scenarios, quantity=quantity
-                        )
+                            prog = st.progress(0.0)
+                            total = len(solvers)
+                            for i, solver in enumerate(solvers, start=1):
+                                base_i = dict(base_params)
+                                base_i["solver"] = solver
+                                scenarios_i = build_speed_scenarios(
+                                    base_i,
+                                    speeds_kmh=speeds,
+                                    weights=weights,
+                                    prefix=f"{solver[0]}v",
+                                )
+                                envelope_df_i, summary_df_i, _ = run_parametric_envelope(
+                                    scenarios_i, quantity=quantity
+                                )
+                                summary_df_i = summary_df_i.copy()
+                                summary_df_i["solver"] = solver
+                                env_by_solver[solver] = (envelope_df_i, summary_df_i)
+                                prog.progress(i / total)
 
-                        fig_env = make_envelope_figure(
-                            envelope_df,
-                            quantity=quantity,
-                            title=f"{quantity_label} – envelope over defined speeds",
-                        )
-                        st.plotly_chart(fig_env, width='stretch')
+                            fig = go.Figure()
+                            for solver, (env_df, _) in env_by_solver.items():
+                                fig.add_trace(
+                                    go.Scatter(
+                                        x=env_df["Time_ms"],
+                                        y=env_df[f"{quantity}_envelope"],
+                                        mode="lines",
+                                        name=f"Envelope ({solver})",
+                                    )
+                                )
+                                fig.add_trace(
+                                    go.Scatter(
+                                        x=env_df["Time_ms"],
+                                        y=env_df[f"{quantity}_weighted_mean"],
+                                        mode="lines",
+                                        name=f"Weighted mean ({solver})",
+                                        line=dict(dash="dot"),
+                                    )
+                                )
 
-                        st.markdown("#### Scenario summary")
-                        st.dataframe(summary_df)
+                            fig.update_layout(
+                                title=f"{quantity_label} – envelope (Newton vs Picard)",
+                                xaxis_title="Time (ms)",
+                                yaxis_title=quantity,
+                                height=520,
+                            )
+                            st.plotly_chart(fig, width='stretch')
+
+                            st.markdown("#### Scenario summary (both solvers)")
+                            summary_all = pd.concat(
+                                [v[1] for v in env_by_solver.values()],
+                                ignore_index=True,
+                            )
+                            try:
+                                pivot = summary_all.pivot_table(
+                                    index=["scenario", "speed_kmh"],
+                                    columns="solver",
+                                    values="peak",
+                                    aggfunc="first",
+                                )
+                                if "newton" in pivot.columns and "picard" in pivot.columns:
+                                    pivot = pivot.reset_index()
+                                    pivot["peak_diff_pct_picard_vs_newton"] = 100.0 * (
+                                        (pivot["picard"] - pivot["newton"]) / pivot["newton"]
+                                    )
+                                    st.dataframe(pivot)
+                                else:
+                                    st.dataframe(summary_all)
+                            except Exception:
+                                st.dataframe(summary_all)
+
+                        else:
+                            scenarios = build_speed_scenarios(
+                                base_params,
+                                speeds_kmh=speeds,
+                                weights=weights,
+                                prefix="v",
+                            )
+
+                            envelope_df, summary_df, _ = run_parametric_envelope(
+                                scenarios, quantity=quantity
+                            )
+
+                            fig_env = make_envelope_figure(
+                                envelope_df,
+                                quantity=quantity,
+                                title=f"{quantity_label} – envelope over defined speeds",
+                            )
+                            st.plotly_chart(fig_env, width='stretch')
+
+                            st.markdown("#### Scenario summary")
+                            st.dataframe(summary_df)
                 except Exception as exc:
                     st.error(f"Parametric study failed: {exc}")
 
@@ -506,7 +590,176 @@ def main():
                         st.plotly_chart(fig, width='stretch')
 
     # --------------------------------------------------------------
-    # ABOUT / DOCUMENTATION TAB
+            # --------------------------
+        # Solver comparison (Newton vs Picard)
+        # --------------------------
+        with sub_solver:
+            st.markdown("### Newton–Raphson vs Picard (nonlinear solver comparison)")
+            st.caption(
+                "Runs identical cases with both solvers and compares outputs and performance. "
+                "Useful to validate that Picard and Newton give the same physics (within tolerance)."
+            )
+
+            default_speed = float(abs(float(params.get("v0_init", -56.0 / 3.6))) * 3.6)
+            speeds_str = st.text_input(
+                "Speeds to compare (km/h)",
+                value=f"{default_speed:.0f}",
+                key="solvercmp_speeds",
+                help="Comma-separated list, e.g. `40,56,80`.",
+            )
+
+            q_label = st.selectbox(
+                "Quantity to compare (time history + peak/impulse)",
+                ["Impact_Force_MN", "Acceleration_g", "Penetration_mm"],
+                index=0,
+                key="solvercmp_quantity",
+            )
+
+            max_speeds = st.number_input(
+                "Max speeds to run (safety limit)",
+                min_value=1,
+                max_value=20,
+                value=5,
+                step=1,
+                key="solvercmp_max_speeds",
+            )
+
+            run_cmp = st.button("Run solver comparison", type="primary", key="run_solver_cmp")
+
+            if run_cmp:
+                try:
+                    speeds = parse_floats_csv(speeds_str) if speeds_str.strip() else []
+                    speeds = [float(s) for s in speeds][: int(max_speeds)]
+
+                    if not speeds:
+                        st.warning("Please provide at least one speed.")
+                    else:
+                        base = dict(params)
+                        solvers = ["newton", "picard"]
+
+                        rows: list[dict[str, float | str]] = []
+                        series: dict[tuple[str, float], pd.DataFrame] = {}
+
+                        prog = st.progress(0.0)
+                        total = max(1, len(solvers) * len(speeds))
+                        done = 0
+
+                        for solver in solvers:
+                            for sp in speeds:
+                                cfg = dict(base)
+                                cfg["solver"] = solver
+                                cfg["v0_init"] = -abs(float(sp)) / 3.6
+
+                                t0 = time.perf_counter()
+                                df = run_simulation(cfg)
+                                runtime_s = float(time.perf_counter() - t0)
+
+                                series[(solver, float(sp))] = df
+
+                                # Time axis for impulse (seconds)
+                                if "Time_s" in df.columns:
+                                    t = df["Time_s"].to_numpy()
+                                    t_ms = df["Time_s"].to_numpy() * 1000.0
+                                elif "Time_ms" in df.columns:
+                                    t_ms = df["Time_ms"].to_numpy()
+                                    t = t_ms / 1000.0
+                                else:
+                                    dt = float(cfg.get("h_init", 1e-4))
+                                    t = np.arange(len(df), dtype=float) * dt
+                                    t_ms = t * 1000.0
+
+                                y = df[q_label].to_numpy() if q_label in df.columns else np.array([])
+
+                                peak = float(np.nanmax(y)) if y.size else float("nan")
+                                impulse = float(getattr(np, "trapezoid", np.trapz)(y, t)) if y.size else float("nan")
+
+                                rows.append(
+                                    {
+                                        "speed_kmh": float(sp),
+                                        "solver": solver,
+                                        "peak": peak,
+                                        "impulse": impulse,
+                                        "runtime_s": runtime_s,
+                                    }
+                                )
+
+                                done += 1
+                                prog.progress(done / total)
+
+                        summary = pd.DataFrame(rows)
+                        st.session_state["solvercmp_summary"] = summary
+                        st.session_state["solvercmp_series"] = series
+                except Exception as exc:
+                    st.error(f"Solver comparison failed: {exc}")
+
+            summary = st.session_state.get("solvercmp_summary", None)
+            series = st.session_state.get("solvercmp_series", None)
+
+            if summary is None:
+                st.info("Run the comparison to see results.")
+            else:
+                st.markdown("#### Summary")
+                st.dataframe(summary)
+
+                # Pivot for quick peak difference
+                try:
+                    pivot = summary.pivot_table(
+                        index="speed_kmh",
+                        columns="solver",
+                        values="peak",
+                        aggfunc="first",
+                    )
+                    if "newton" in pivot.columns and "picard" in pivot.columns:
+                        pivot = pivot.reset_index()
+                        pivot["peak_diff_pct_picard_vs_newton"] = 100.0 * (
+                            (pivot["picard"] - pivot["newton"]) / pivot["newton"]
+                        )
+                        st.markdown("#### Peak difference")
+                        st.dataframe(pivot)
+                except Exception:
+                    pass
+
+                # Overlay time history for a selected speed
+                if isinstance(series, dict) and len(series) > 0:
+                    speeds_avail = sorted({float(v) for v in summary["speed_kmh"].unique()})
+                    if speeds_avail:
+                        sel_speed = st.selectbox(
+                            "Overlay time history (select speed)",
+                            options=speeds_avail,
+                            index=0,
+                            key="solvercmp_overlay_speed",
+                        )
+
+                        fig = go.Figure()
+                        for solver in ["newton", "picard"]:
+                            df = series.get((solver, float(sel_speed)))
+                            if df is None or q_label not in df.columns:
+                                continue
+
+                            if "Time_ms" in df.columns:
+                                t_ms = df["Time_ms"]
+                            else:
+                                t_ms = df["Time_s"] * 1000.0
+
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=t_ms,
+                                    y=df[q_label],
+                                    mode="lines",
+                                    name=f"{solver}",
+                                )
+                            )
+
+                        fig.update_layout(
+                            title=f"{q_label} – Newton vs Picard @ {sel_speed:.0f} km/h",
+                            xaxis_title="Time (ms)",
+                            yaxis_title=q_label,
+                            height=450,
+                        )
+                        st.plotly_chart(fig, width='stretch')
+
+
+# ABOUT / DOCUMENTATION TAB
     # --------------------------------------------------------------
     with tab_about:
         display_header()

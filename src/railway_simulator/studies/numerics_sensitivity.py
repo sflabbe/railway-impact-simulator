@@ -139,7 +139,7 @@ def run_numerics_sensitivity(
 
                 peak = float(np.nanmax(f))
                 peak_interp, t_peak_interp = _interpolate_peak_parabolic(t, f)
-                impulse = float(np.trapz(f, t))
+                impulse = float(getattr(np, "trapezoid", np.trapz)(f, t))
                 max_pen = float(np.nanmax(df.get("Penetration_mm", pd.Series([np.nan])).to_numpy()))
                 e_final = float(df.get("E_balance_error_J", pd.Series([np.nan])).iloc[-1]) if len(df) else float("nan")
 

@@ -9,6 +9,9 @@ contact_model: lankarani-nikravesh
 k_wall: 45_000_000.0   # 45 MN/m
 cr_wall: 0.8
 n_masses: 6
+solver: picard
+newton_tol: 1.0e-6
+max_iter: 50
 masses:
 - 9550.0
 - 9550.0

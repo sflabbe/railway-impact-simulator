@@ -225,18 +225,24 @@ def create_results_plots(df: pd.DataFrame) -> go.Figure:
         fig.update_xaxes(title_text="Time (ms)", row=5, col=1)
 
     # Energy Balance Quality: Numerical Residual Ratio
+    # NOTE: E_num_ratio is stored as a *ratio* (dimensionless). We plot it in percent.
     if "E_num_ratio" in df.columns:
+        residual_ratio = df["E_num_ratio"].astype(float)
+        residual_pct = 100.0 * residual_ratio
+
         fig.add_trace(
             go.Scatter(
                 x=df["Time_ms"],
-                y=df["E_num_ratio"] * 100,  # Convert to percentage
+                y=residual_pct,
                 line=dict(width=2, color="red"),
-                name="|E_num| / E₀",
+                name="|E_num| / E₀ (%)",
                 showlegend=True,
+                hovertemplate="t=%{x:.3f} ms<br>|E_num|/E₀=%{y:.6f}%<extra></extra>",
             ),
             row=6,
             col=1,
         )
+
         # Add 1% target reference line
         fig.add_trace(
             go.Scatter(
@@ -245,11 +251,20 @@ def create_results_plots(df: pd.DataFrame) -> go.Figure:
                 line=dict(width=1, color="green", dash="dash"),
                 name="1% target",
                 showlegend=True,
+                hovertemplate="t=%{x:.3f} ms<br>target=1.000000%<extra></extra>",
             ),
             row=6,
             col=1,
         )
-        fig.update_yaxes(title_text="Residual (%)", row=6, col=1)
+
+        y_max = max(1.0, float(residual_pct.max()) * 1.10)
+        fig.update_yaxes(
+            title_text="Residual (% of E₀)",
+            range=[0.0, y_max],
+            tickformat=".3f",
+            row=6,
+            col=1,
+        )
         fig.update_xaxes(title_text="Time (ms)", row=6, col=1)
 
     fig.update_layout(

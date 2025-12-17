@@ -33,6 +33,67 @@ from railway_simulator.ui import (
 )
 
 
+def _get_time_axis(df: pd.DataFrame) -> tuple[np.ndarray, str]:
+    """Extract time axis from dataframe in milliseconds.
+
+    Args:
+        df: DataFrame with either Time_ms or Time_s column
+
+    Returns:
+        Tuple of (time_values_ms, axis_label)
+    """
+    if "Time_ms" in df.columns:
+        return df["Time_ms"].to_numpy(), "Time (ms)"
+    elif "Time_s" in df.columns:
+        return df["Time_s"].to_numpy() * 1000.0, "Time (ms)"
+    else:
+        # Fallback: assume time step from config
+        return np.arange(len(df)) * 0.1, "Time (ms)"
+
+
+def _plot_time_history_overlay(
+    captured: list[tuple[dict, pd.DataFrame]],
+    q_label: str,
+    max_runs: int,
+    label_fn,
+    title: str = "Time histories (overlay)"
+) -> go.Figure:
+    """Create overlay plot of time histories from captured simulations.
+
+    Args:
+        captured: List of (config, dataframe) tuples from simulation runs
+        q_label: Column name of quantity to plot
+        max_runs: Maximum number of runs to include in overlay
+        label_fn: Callable that takes (cfg, df, index) and returns label string
+        title: Plot title
+
+    Returns:
+        Plotly figure with overlaid time histories
+    """
+    fig = go.Figure()
+    shown = 0
+    xlab = "Time (ms)"
+
+    for idx, (cfg, df) in enumerate(captured):
+        if shown >= int(max_runs):
+            break
+        if q_label not in df.columns:
+            continue
+
+        t, xlab = _get_time_axis(df)
+        label = label_fn(cfg, df, idx)
+        fig.add_trace(go.Scatter(x=t, y=df[q_label], mode="lines", name=label))
+        shown += 1
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=xlab,
+        yaxis_title=q_label,
+        height=450,
+    )
+    return fig
+
+
 def main():
     """Main Streamlit application."""
     st.set_page_config(
@@ -61,7 +122,7 @@ def main():
             st.subheader("📊 Configuration")
             try:
                 st.metric("Velocity", f"{-float(params['v0_init']) * 3.6:.1f} km/h")
-            except Exception:
+            except (ValueError, KeyError, TypeError):
                 st.metric("Velocity", "—")
             st.metric("Masses", int(params.get("n_masses", 0)))
             st.metric("Time Step", f"{float(params.get('h_init', 0.0))*1000:.2f} ms")
@@ -435,30 +496,14 @@ def main():
                     # Overlay time histories for the selected quantity
                     if captured:
                         st.markdown("#### Time histories (overlay)")
-                        fig = go.Figure()
-                        shown = 0
-                        for cfg, df in captured:
-                            if shown >= int(max_runs):
-                                break
-                            if q_label not in df.columns:
-                                continue
-                            if "Time_ms" in df.columns:
-                                t = df["Time_ms"]
-                                xlab = "Time (ms)"
-                            else:
-                                t = df["Time_s"] * 1000.0
-                                xlab = "Time (ms)"
+
+                        def label_fn(cfg, df, idx):
                             dt = float(cfg.get("h_init", np.nan))
                             a = float(cfg.get("alpha_hht", np.nan))
                             tol = float(cfg.get("newton_tol", np.nan))
-                            label = f"dt={dt:.1e}s, α={a:+.2f}, tol={tol:.1e}"
-                            fig.add_trace(go.Scatter(x=t, y=df[q_label], mode="lines", name=label))
-                            shown += 1
-                        fig.update_layout(
-                            xaxis_title=xlab,
-                            yaxis_title=q_label,
-                            height=450,
-                        )
+                            return f"dt={dt:.1e}s, α={a:+.2f}, tol={tol:.1e}"
+
+                        fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
                         st.plotly_chart(fig, width='stretch')
 
         # --------------------------
@@ -557,36 +602,19 @@ def main():
                             height=350,
                         )
                         st.plotly_chart(fig_peak, width='stretch')
-                    except Exception:
-                        pass
+                    except (KeyError, ValueError, IndexError) as e:
+                        st.info(f"Peak vs DIF plot not available: {e}")
 
                     # Overlay time histories
                     if captured:
                         st.markdown("#### Time histories (overlay)")
-                        fig = go.Figure()
-                        shown = 0
-                        for cfg, df in captured:
-                            if shown >= int(max_runs):
-                                break
-                            if q_label not in df.columns:
-                                continue
-                            if "Time_ms" in df.columns:
-                                t = df["Time_ms"]
-                                xlab = "Time (ms)"
-                            else:
-                                t = df["Time_s"] * 1000.0
-                                xlab = "Time (ms)"
-                            dif = float(cfg.get("dif", np.nan)) if "dif" in cfg else np.nan
-                            # If dif isn't present in cfg (it won't be), infer from scaled parameter
-                            dif_val = float(summary_df["dif"].iloc[shown]) if (shown < len(summary_df)) else float("nan")
-                            label = f"DIF={dif_val:.3f}"
-                            fig.add_trace(go.Scatter(x=t, y=df[q_label], mode="lines", name=label))
-                            shown += 1
-                        fig.update_layout(
-                            xaxis_title=xlab,
-                            yaxis_title=q_label,
-                            height=450,
-                        )
+
+                        def label_fn(cfg, df, idx):
+                            # DIF value is in summary_df, not in cfg
+                            dif_val = float(summary_df["dif"].iloc[idx]) if (idx < len(summary_df)) else float("nan")
+                            return f"DIF={dif_val:.3f}"
+
+                        fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
                         st.plotly_chart(fig, width='stretch')
 
     # --------------------------------------------------------------
@@ -657,16 +685,8 @@ def main():
                                 series[(solver, float(sp))] = df
 
                                 # Time axis for impulse (seconds)
-                                if "Time_s" in df.columns:
-                                    t = df["Time_s"].to_numpy()
-                                    t_ms = df["Time_s"].to_numpy() * 1000.0
-                                elif "Time_ms" in df.columns:
-                                    t_ms = df["Time_ms"].to_numpy()
-                                    t = t_ms / 1000.0
-                                else:
-                                    dt = float(cfg.get("h_init", 1e-4))
-                                    t = np.arange(len(df), dtype=float) * dt
-                                    t_ms = t * 1000.0
+                                t_ms, _ = _get_time_axis(df)
+                                t = t_ms / 1000.0
 
                                 y = df[q_label].to_numpy() if q_label in df.columns else np.array([])
 
@@ -716,8 +736,8 @@ def main():
                         )
                         st.markdown("#### Peak difference")
                         st.dataframe(pivot)
-                except Exception:
-                    pass
+                except (KeyError, ValueError) as e:
+                    st.debug(f"Peak difference table not available: {e}")
 
                 # Overlay time history for a selected speed
                 if isinstance(series, dict) and len(series) > 0:
@@ -736,10 +756,7 @@ def main():
                             if df is None or q_label not in df.columns:
                                 continue
 
-                            if "Time_ms" in df.columns:
-                                t_ms = df["Time_ms"]
-                            else:
-                                t_ms = df["Time_s"] * 1000.0
+                            t_ms, _ = _get_time_axis(df)
 
                             fig.add_trace(
                                 go.Scatter(

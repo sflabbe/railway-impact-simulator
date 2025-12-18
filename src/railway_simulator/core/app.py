@@ -617,8 +617,8 @@ def main():
                         fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
                         st.plotly_chart(fig, width='stretch')
 
-    # --------------------------------------------------------------
-            # --------------------------
+  
+        # --------------------------
         # Solver comparison (Newton vs Picard)
         # --------------------------
         with sub_solver:

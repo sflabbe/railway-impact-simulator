@@ -303,7 +303,7 @@ def build_parameter_ui() -> Dict[str, Any]:
             params["solver"] = st.selectbox(
                 "Nonlinear solver",
                 options=["newton", "picard"],
-                index=0,
+                index=1,
                 format_func=lambda s: "Newton–Raphson (recommended)" if s == "newton" else "Picard (legacy)",
                 help=(
                     "Choose the nonlinear solver used inside each implicit HHT-α step. "

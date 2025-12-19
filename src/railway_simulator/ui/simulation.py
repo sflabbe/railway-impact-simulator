@@ -29,7 +29,12 @@ from railway_simulator.studies.strain_rate_sensitivity import run_fixed_dif_sens
 
 # Import from other UI modules
 from .export import to_excel
-from .plotting import create_mass_kinematics_plots, create_results_plots, create_spring_plots
+from .plotting import (
+    create_mass_kinematics_plots,
+    create_results_plots,
+    create_spring_plots,
+    create_mass_force_displacement_plots,
+)
 from .sdof import (
     compute_building_sdof_response,
     compute_force_response_spectrum,
@@ -371,6 +376,22 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
             )
 
             mass_fig = create_mass_kinematics_plots(df, mass_index)
+            st.markdown("#### Mass force–displacement")
+
+            mode_label = st.selectbox(
+                "Force used for mass loop",
+                ["Net (left - right)", "Left spring", "Right spring"],
+                key="ui_mass_force_mode",
+            )
+
+            mode = {"Net (left - right)": "net", "Left spring": "left", "Right spring": "right"}[mode_label]
+
+            mfd_fig = create_mass_force_displacement_plots(df, mass_index, mode=mode)
+            if mfd_fig is None:
+                st.info("No spring-force data available for this mass (or not enough masses/springs in this run).")
+            else:
+                safe_plotly_chart(st, mfd_fig, width="stretch")
+
             if mass_fig is None:
                 st.info("Mass kinematics columns are not available in these results.")
             else:

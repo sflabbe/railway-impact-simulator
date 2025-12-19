@@ -280,3 +280,218 @@ def create_results_plots(df: pd.DataFrame) -> go.Figure:
         margin=dict(t=60, b=100, l=60, r=80),
     )
     return fig
+
+
+def create_mass_kinematics_plots(df: pd.DataFrame, mass_index: int) -> go.Figure | None:
+    """
+    Create time history plots for mass acceleration, velocity, and position.
+
+    Args:
+        df: DataFrame with simulation results.
+        mass_index: Zero-based mass index.
+
+    Returns:
+        Plotly figure with 3 subplots or None if data is missing.
+    """
+    time_col = "Time_ms" if "Time_ms" in df.columns else "Time_s" if "Time_s" in df.columns else None
+    if time_col is None:
+        return None
+
+    idx = mass_index + 1
+    position_cols = (f"Mass{idx}_Position_x_m", f"Mass{idx}_Position_y_m")
+    velocity_cols = (f"Mass{idx}_Velocity_x_m_s", f"Mass{idx}_Velocity_y_m_s")
+    acceleration_cols = (f"Mass{idx}_Acceleration_x_m_s2", f"Mass{idx}_Acceleration_y_m_s2")
+
+    required_cols = (*position_cols, *velocity_cols, *acceleration_cols)
+    if not all(col in df.columns for col in required_cols):
+        return None
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        subplot_titles=("Acceleration", "Velocity", "Position"),
+        vertical_spacing=0.08,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=df[acceleration_cols[0]],
+            line=dict(width=2, color="#1f77b4"),
+            name="Ax",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=df[acceleration_cols[1]],
+            line=dict(width=2, color="#ff7f0e"),
+            name="Ay",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Acceleration (m/s²)", row=1, col=1)
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=df[velocity_cols[0]],
+            line=dict(width=2, color="#2ca02c"),
+            name="Vx",
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=df[velocity_cols[1]],
+            line=dict(width=2, color="#d62728"),
+            name="Vy",
+        ),
+        row=2,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Velocity (m/s)", row=2, col=1)
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=df[position_cols[0]],
+            line=dict(width=2, color="#9467bd"),
+            name="X",
+        ),
+        row=3,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=df[position_cols[1]],
+            line=dict(width=2, color="#8c564b"),
+            name="Y",
+        ),
+        row=3,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Position (m)", row=3, col=1)
+    fig.update_xaxes(title_text="Time (ms)" if time_col == "Time_ms" else "Time (s)", row=3, col=1)
+
+    fig.update_layout(
+        height=900,
+        showlegend=True,
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.1, yanchor="top"),
+        margin=dict(t=60, b=80, l=60, r=60),
+    )
+    return fig
+
+
+def create_spring_plots(df: pd.DataFrame, spring_index: int) -> go.Figure | None:
+    """
+    Create spring plots: hysteresis, displacement vs time, force vs time.
+
+    Args:
+        df: DataFrame with simulation results.
+        spring_index: Zero-based spring index.
+
+    Returns:
+        Plotly figure with 3 subplots or None if data is missing.
+    """
+    time_col = "Time_ms" if "Time_ms" in df.columns else "Time_s" if "Time_s" in df.columns else None
+    if time_col is None:
+        return None
+
+    idx = spring_index + 1
+    disp_col = f"Spring{idx}_Disp_m"
+    force_col = f"Spring{idx}_Force_N"
+    if disp_col not in df.columns or force_col not in df.columns:
+        return None
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        subplot_titles=("Spring Hysteresis", "Displacement vs Time", "Force vs Time"),
+        vertical_spacing=0.08,
+    )
+
+    force_mn = df[force_col] / 1e6
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[disp_col],
+            y=force_mn,
+            mode="lines",
+            line=dict(width=2, color="#1f77b4"),
+            name="Hysteresis",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+
+    y0, y1 = fig.layout.yaxis.domain
+    cb_y = 0.5 * (y0 + y1)
+    cb_len = 0.9 * (y1 - y0)
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[disp_col],
+            y=force_mn,
+            mode="markers",
+            marker=dict(
+                size=0,
+                color=df[time_col],
+                colorscale="Viridis",
+                showscale=True,
+                colorbar=dict(
+                    title="Time (ms)" if time_col == "Time_ms" else "Time (s)",
+                    x=1.02,
+                    y=cb_y,
+                    len=cb_len,
+                ),
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.update_xaxes(title_text="Displacement (m)", row=1, col=1)
+    fig.update_yaxes(title_text="Force (MN)", row=1, col=1)
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=df[disp_col],
+            line=dict(width=2, color="#ff7f0e"),
+            name="Displacement",
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Displacement (m)", row=2, col=1)
+
+    fig.add_trace(
+        go.Scatter(
+            x=df[time_col],
+            y=force_mn,
+            line=dict(width=2, color="#2ca02c"),
+            name="Force",
+            showlegend=False,
+        ),
+        row=3,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Force (MN)", row=3, col=1)
+    fig.update_xaxes(title_text="Time (ms)" if time_col == "Time_ms" else "Time (s)", row=3, col=1)
+
+    fig.update_layout(
+        height=900,
+        showlegend=False,
+        margin=dict(t=60, b=80, l=60, r=80),
+    )
+    return fig

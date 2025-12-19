@@ -29,7 +29,7 @@ from railway_simulator.studies.strain_rate_sensitivity import run_fixed_dif_sens
 
 # Import from other UI modules
 from .export import to_excel
-from .plotting import create_results_plots
+from .plotting import create_mass_kinematics_plots, create_results_plots, create_spring_plots
 from .sdof import (
     compute_building_sdof_response,
     compute_force_response_spectrum,
@@ -105,8 +105,13 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
     # ------------------------------------------------------
     # 3) Tabs de resultados (igual que antes, usando df + building_df)
     # ------------------------------------------------------
-    tab_global, tab_building, tab_train = st.tabs(
-        ["📈 Global Results", "🏢 Building Response (SDOF)", "🚃 Train Configuration"]
+    tab_global, tab_building, tab_train, tab_springs = st.tabs(
+        [
+            "📈 Global Results",
+            "🏢 Building Response (SDOF)",
+            "🚃 Train Configuration",
+            "🧷 Springs & Masses",
+        ]
     )
 
     # ----- Global results -----
@@ -344,5 +349,75 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
         else:
             st.caption("No mass data available for the current configuration.")
 
+    # ----- Springs and masses results -----
+    with tab_springs:
+        st.markdown("### Spring and mass response histories")
+
+        n_masses = int(
+            df.attrs.get(
+                "n_masses",
+                params.get("n_masses", len(params.get("masses", []))),
+            )
+            or 0
+        )
+
+        if n_masses <= 0:
+            st.info("No mass results available for the current simulation.")
+        else:
+            mass_index = st.selectbox(
+                "Mass index",
+                options=list(range(n_masses)),
+                format_func=lambda i: f"Mass {i} (node {i + 1})",
+            )
+
+            mass_fig = create_mass_kinematics_plots(df, mass_index)
+            if mass_fig is None:
+                st.info("Mass kinematics columns are not available in these results.")
+            else:
+                st.plotly_chart(mass_fig, width="stretch")
+
+            if n_masses < 2:
+                st.info("Spring results are not available for a single-mass model.")
+            else:
+                st.markdown("#### Spring response")
+                spring_index = st.selectbox(
+                    "Spring index",
+                    options=list(range(n_masses - 1)),
+                    format_func=lambda i: f"Spring {i} (between masses {i + 1} and {i + 2})",
+                )
+
+                spring_fig = create_spring_plots(df, spring_index)
+                if spring_fig is None:
+                    st.info("Spring response columns are not available in these results.")
+                else:
+                    st.plotly_chart(spring_fig, width="stretch")
+
+                show_neighbors = st.checkbox(
+                    "Show neighbor springs for selected mass",
+                    value=False,
+                    help="Displays springs connected to the selected mass (i-1 and i).",
+                )
+                if show_neighbors:
+                    neighbor_indices = []
+                    if mass_index > 0:
+                        neighbor_indices.append(mass_index - 1)
+                    if mass_index < n_masses - 1:
+                        neighbor_indices.append(mass_index)
+
+                    if not neighbor_indices:
+                        st.info("No neighboring springs for the selected mass.")
+                    else:
+                        for neighbor_idx in neighbor_indices:
+                            st.markdown(
+                                f"**Neighbor spring {neighbor_idx}** "
+                                f"(between masses {neighbor_idx + 1} and {neighbor_idx + 2})"
+                            )
+                            neighbor_fig = create_spring_plots(df, neighbor_idx)
+                            if neighbor_fig is None:
+                                st.info(
+                                    f"Spring {neighbor_idx} response columns are not available."
+                                )
+                            else:
+                                st.plotly_chart(neighbor_fig, width="stretch")
 
 

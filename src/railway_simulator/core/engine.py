@@ -1705,7 +1705,7 @@ class ImpactSimulator:
         }
 
         return self._build_results_dataframe(
-            q, qp, qpp, R_contact, u_contact, X_bw, energies
+            q, qp, qpp, R_contact, u_contact, u_spring, X_bw, energies
         )
 
     # ----------------------------------------------------------------
@@ -1950,10 +1950,12 @@ class ImpactSimulator:
         qpp: np.ndarray,
         R_contact: np.ndarray,
         u_contact: np.ndarray,
+        u_spring: np.ndarray,
         X_bw: np.ndarray,
         energies: Dict[str, np.ndarray],
     ) -> pd.DataFrame:
         """Build results DataFrame for export (including energy bookkeeping)."""
+        n_masses = self.params.n_masses
         F_total = R_contact[0, :]          # [N], positive in compression
         F_total_clamped = np.maximum(F_total, 0.0)
 
@@ -2023,6 +2025,26 @@ class ImpactSimulator:
                 "E0_J": np.full_like(self.t, E0, dtype=float),
             }
         )
+
+        for i in range(n_masses):
+            idx = i + 1
+            df[f"Mass{idx}_Position_x_m"] = q[i, :]
+            df[f"Mass{idx}_Position_y_m"] = q[n_masses + i, :]
+            df[f"Mass{idx}_Velocity_x_m_s"] = qp[i, :]
+            df[f"Mass{idx}_Velocity_y_m_s"] = qp[n_masses + i, :]
+            df[f"Mass{idx}_Acceleration_x_m_s2"] = qpp[i, :]
+            df[f"Mass{idx}_Acceleration_y_m_s2"] = qpp[n_masses + i, :]
+
+        if n_masses > 1:
+            u_comp = -u_spring
+            f_spring = (
+                self.params.bw_a * (self.k_lin[:, None] * u_comp)
+                + (1.0 - self.params.bw_a) * (self.params.fy[:, None] * X_bw)
+            )
+            for i in range(n_masses - 1):
+                idx = i + 1
+                df[f"Spring{idx}_Disp_m"] = u_spring[i, :]
+                df[f"Spring{idx}_Force_N"] = f_spring[i, :]
 
         # Attach some solver statistics as DataFrame metadata
         try:

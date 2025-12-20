@@ -33,6 +33,10 @@ import numpy as np
 import pandas as pd
 from scipy.constants import g as GRAVITY
 
+from .contact import ContactModels
+from .friction import FrictionModels
+from .integrator import HHTAlphaIntegrator
+
 logger = logging.getLogger(__name__)
 
 
@@ -346,186 +350,11 @@ class BoucWenModel:
 
 
 # ====================================================================
-# FRICTION MODELS
+# FRICTION & CONTACT MODELS (now imported from separate modules)
 # ====================================================================
-
-class FrictionModels:
-    """Collection of friction model implementations."""
-
-    @staticmethod
-    def lugre(z_prev: float, v: float, F_coulomb: float, F_static: float,
-              v_stribeck: float, sigma_0: float, sigma_1: float,
-              sigma_2: float, h: float) -> Tuple[float, float]:
-        """LuGre friction model.
-
-        Notes
-        -----
-        The internal bristle state ODE
-
-            z_dot = v - |v| * z / g(v)
-
-        can become stiff when g(v) is small and/or when the time step is large.
-        A naive explicit Euler update makes friction sweeps artificially sensitive
-        to Δt and may create non-physical outliers (e.g. one μ case behaving very
-        differently).
-
-        Here we use the closed-form solution for constant (v, g) over one step,
-        which is unconditionally stable:
-
-            z_{n+1} = z_n e^{-k h} + g sign(v) (1 - e^{-k h}),   k = |v| / g
-
-        and then evaluate z_dot at the end of the step for the damping term.
-        """
-        v_stribeck = max(abs(v_stribeck), 1e-10)
-        # g(v) is the steady-state bristle deflection (units of length)
-        g = (F_coulomb + (F_static - F_coulomb) * np.exp(-(v / v_stribeck) ** 2)) / max(abs(sigma_0), 1e-12)
-        g = max(abs(g), 1e-12)
-
-        v_abs = float(np.abs(v))
-        if v_abs < 1e-12:
-            # No slip: keep bristle state, no velocity-dependent terms
-            z = z_prev
-            z_dot = 0.0
-        else:
-            k = v_abs / g
-            # Stable closed-form update for the linear ODE
-            exp_kh = float(np.exp(-k * h))
-            z = float(z_prev) * exp_kh + float(np.sign(v)) * g * (1.0 - exp_kh)
-            # Evaluate z_dot at the end of the step for sigma_1 term
-            z_dot = float(v) - v_abs * z / g
-
-        F = float(sigma_0) * z + float(sigma_1) * z_dot + float(sigma_2) * float(v)
-        return F, z
-
-    @staticmethod
-    def dahl(z_prev: float, v: float, F_coulomb: float,
-             sigma_0: float, h: float) -> Tuple[float, float]:
-        """Dahl friction model.
-
-        Uses a stable closed-form update of the internal state for constant
-        velocity sign over one time step (same motivation as LuGre).
-        """
-        Fc = max(abs(F_coulomb), SimulationConstants.ZERO_TOL)
-        v_abs = float(np.abs(v))
-        if v_abs < 1e-12:
-            z = z_prev
-        else:
-            # z_dot = v - (sigma_0 * |v| / Fc) * z
-            k = float(sigma_0) * v_abs / float(Fc)
-            exp_kh = float(np.exp(-k * h))
-            z_ss = float(Fc) / max(float(sigma_0), 1e-12) * float(np.sign(v))
-            z = float(z_prev) * exp_kh + z_ss * (1.0 - exp_kh)
-
-        F = float(sigma_0) * float(z)
-        return F, float(z)
-
-    @staticmethod
-    def coulomb_stribeck(v: float, Fc: float, Fs: float,
-                         vs: float, Fv: float) -> float:
-        """Coulomb + Stribeck + viscous friction."""
-        vs = max(vs, 1e-6)
-        v_abs = np.abs(v)
-        return (Fc + (Fs - Fc) * np.exp(-(v_abs / vs) ** 2)) * np.sign(v) + Fv * v
-
-    @staticmethod
-    def brown_mcphee(v: float, Fc: float, Fs: float, vs: float) -> float:
-        """Brown & McPhee friction model."""
-        vs = max(vs, 1e-6)
-        v_abs = np.abs(v)
-        x = v_abs / vs
-
-        term1 = Fc * np.tanh(4.0 * x)
-        term2 = (Fs - Fc) * x / ((0.25 * x ** 2 + 0.75) ** 2)
-
-        return (term1 + term2) * np.sign(v)
-
-
-# ====================================================================
-# CONTACT MODELS
-# ====================================================================
-
-class ContactModels:
-    """Normal contact force model implementations."""
-
-    MODELS = {
-        "hooke": lambda k, d, cr, dv, v0: -k * d,
-        "hertz": lambda k, d, cr, dv, v0: -k * d ** 1.5,
-        "hunt-crossley": lambda k, d, cr, dv, v0: (
-            -k * d ** 1.5 * (1.0 + 3.0 * (1.0 - cr) / 2.0 * (dv / v0))
-        ),
-        "lankarani-nikravesh": lambda k, d, cr, dv, v0: (
-            -k * d ** 1.5 * (1.0 + 3.0 * (1.0 - cr ** 2) / 4.0 * (dv / v0))
-        ),
-        "flores": lambda k, d, cr, dv, v0: (
-            -k * d ** 1.5 * (1.0 + 8.0 * (1.0 - cr) / (5.0 * cr) * (dv / v0))
-        ),
-        "gonthier": lambda k, d, cr, dv, v0: (
-            -k * d ** 1.5 * (1.0 + (1.0 - cr ** 2) / cr * (dv / v0))
-        ),
-        "ye": lambda k, d, cr, dv, v0: (
-            -k * d * (1.0 + 3.0 * (1.0 - cr) / (2.0 * cr) * (dv / v0))
-        ),
-        "pant-wijeyewickrema": lambda k, d, cr, dv, v0: (
-            -k * d * (1.0 + 3.0 * (1.0 - cr ** 2) / (2.0 * cr ** 2) * (dv / v0))
-        ),
-        "anagnostopoulos": lambda k, d, cr, dv, v0: (
-            -k * d * (1.0 + 3.0 * (1.0 - cr) / (2.0 * cr) * (dv / v0))
-        ),
-    }
-
-    @staticmethod
-    def compute_force(u_contact: np.ndarray, du_contact: np.ndarray,
-                      v0: np.ndarray, k_wall: float, cr_wall: float,
-                      model: str) -> np.ndarray:
-        """
-        Compute normal contact forces (unilateral: compression only).
-
-        Args:
-            u_contact: Penetration (negative when in contact)
-            du_contact: Penetration velocity
-            v0: Initial contact velocity
-            k_wall: Wall stiffness
-            cr_wall: Coefficient of restitution
-            model: Contact model name
-        """
-        u = np.asarray(u_contact, dtype=float)
-        du = np.asarray(du_contact, dtype=float)
-        v0_arr = np.asarray(v0, dtype=float)
-
-        # Penetration magnitude (δ = -u for u < 0)
-        delta = -u
-        R = np.zeros_like(u)
-
-        # Only compute forces where there's penetration
-        mask = delta > 0.0
-        if not np.any(mask):
-            return R
-
-        d = delta[mask]
-        dv = du[mask]
-        v0m = v0_arr[mask]
-
-        # Prevent division by zero
-        v0m = np.where(
-            np.abs(v0m) < 1e-8,
-            np.sign(v0m) * 1e-8 + (v0m == 0) * 1e-8,
-            v0m,
-        )
-
-        # Get model function (default to anagnostopoulos)
-        model_func = ContactModels.MODELS.get(
-            model.lower(),
-            ContactModels.MODELS["anagnostopoulos"],
-        )
-
-        # Raw model force: negative = compression, positive = tension
-        R_raw = model_func(k_wall, d, cr_wall, dv, v0m)
-
-        # Enforce unilateral contact: no tension allowed
-        R_comp = np.minimum(R_raw, 0.0)
-
-        R[mask] = R_comp
-        return R
+# FrictionModels: imported from .friction
+# ContactModels: imported from .contact
+# HHTAlphaIntegrator: imported from .integrator
 
 
 # ====================================================================
@@ -689,84 +518,6 @@ class StructuralDynamics:
 
 # ====================================================================
 # TIME INTEGRATION (HHT-α)
-# ====================================================================
-
-class HHTAlphaIntegrator:
-    """HHT-α implicit time integration."""
-
-    def __init__(self, alpha: float):
-        """
-        Initialize HHT-α integrator.
-
-        Args:
-            alpha: HHT parameter (typically -0.3 to 0.0)
-        """
-        self.alpha = alpha
-        self.beta = 0.25 * (1.0 + alpha) ** 2
-        self.gamma = 0.5 + alpha
-
-        # Count of linear solves (LU) performed in this run
-        self.n_lu: int = 0
-
-
-    def predict(self, q: np.ndarray, qp: np.ndarray, qpp: np.ndarray,
-                qpp_new: np.ndarray, h: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Newmark-like predictor / corrector step.
-
-        Returns:
-            q_new: Predicted or corrected displacement
-            qp_new: Predicted or corrected velocity
-        """
-        q_new = (
-            q + h * qp +
-            (0.5 - self.beta) * h ** 2 * qpp +
-            self.beta * h ** 2 * qpp_new
-        )
-
-        qp_new = (
-            qp +
-            (1.0 - self.gamma) * h * qpp +
-            self.gamma * h * qpp_new
-        )
-
-        return q_new, qp_new
-
-    def compute_acceleration(
-        self,
-        M: np.ndarray,
-        R_internal: np.ndarray,
-        R_internal_old: np.ndarray,
-        R_contact: np.ndarray,
-        R_contact_old: np.ndarray,
-        R_friction: np.ndarray,
-        R_friction_old: np.ndarray,
-        R_mass_contact: np.ndarray,
-        R_mass_contact_old: np.ndarray,
-        C: np.ndarray,
-        qp: np.ndarray,
-        qp_old: np.ndarray
-    ) -> np.ndarray:
-        """
-        Compute acceleration using HHT-α method.
-
-        M * a_new = (1-α)*R_new + α*R_old - (1-α)*C*v_new - α*C*v_old
-        """
-        R_total_new = R_internal + R_contact + R_friction + R_mass_contact
-        R_total_old = R_internal_old + R_contact_old + R_friction_old + R_mass_contact_old
-
-        force = (
-            (1.0 - self.alpha) * R_total_new +
-            self.alpha * R_total_old -
-            (1.0 - self.alpha) * (C @ qp) -
-            self.alpha * (C @ qp_old)
-        )
-
-        # Count this linear solve (dense LU)
-        self.n_lu += 1
-        return np.linalg.solve(M, force)
-
-
 # ====================================================================
 # MAIN SIMULATION ENGINE
 # ====================================================================

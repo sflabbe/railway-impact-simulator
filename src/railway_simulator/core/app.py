@@ -304,7 +304,7 @@ def main():
             run_btn = safe_button(st, 
                 "▶️ **Run Simulation**",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
 
         with col2:
@@ -456,7 +456,7 @@ def main():
                                 yaxis_title=quantity,
                                 height=520,
                             )
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(fig, width="stretch")
 
                             st.markdown("#### Scenario summary (both solvers)")
                             summary_all = pd.concat(
@@ -536,7 +536,7 @@ def main():
                         yaxis_title=q,
                         height=520,
                     )
-                    st.plotly_chart(fig_speed, use_container_width=True)
+                    st.plotly_chart(fig_speed, width="stretch")
 
                     safe_download_button(
                         st,
@@ -544,7 +544,7 @@ def main():
                         data=_fig_to_html_bytes(fig_speed),
                         file_name="speed_histories_overlay.html",
                         mime="text/html",
-                        use_container_width=True,
+                        width="stretch",
                         key="env_export_speed_overlay_html",
                     )
 
@@ -685,7 +685,7 @@ def main():
                         data=bundle,
                         file_name=f"speed_envelope__{sanitize_filename(str(q))}__{utc_timestamp()}.zip",
                         mime="application/zip",
-                        use_container_width=True,
+                        width="stretch",
                         key="env_export_bundle_zip",
                     )
                 except Exception as exc:
@@ -719,7 +719,7 @@ def main():
                         yaxis_title=q,
                         height=520,
                     )
-                    st.plotly_chart(fig_env, use_container_width=True)
+                    st.plotly_chart(fig_env, width="stretch")
 
                 st.markdown("#### Scenario summary")
                 st.dataframe(summary_df)
@@ -776,7 +776,7 @@ def main():
                     "Run contact model sweep",
                     type="primary",
                     key="run_contact_sweep",
-                    use_container_width=True,
+                    width="stretch",
                     disabled=(len(models) == 0),
                 )
 
@@ -857,7 +857,7 @@ def main():
                     summary_df = pd.DataFrame(rows)
 
                     st.markdown("#### Summary")
-                    st.dataframe(summary_df, use_container_width=True)
+                    st.dataframe(summary_df, width="stretch")
 
                     if 'E_diss_friction_J_end' in summary_df.columns:
                         try:
@@ -876,7 +876,7 @@ def main():
                             lambda cfg, df, idx: scen_name(cfg, df, idx),
                             title="Impact force – time (overlay)",
                         )
-                        st.plotly_chart(figF, use_container_width=True)
+                        st.plotly_chart(figF, width="stretch")
                         safe_download_button(
                             st,
                             "Export force overlay (HTML)",
@@ -894,7 +894,7 @@ def main():
                             lambda cfg, df, idx: scen_name(cfg, df, idx),
                             title="Acceleration – time (overlay)",
                         )
-                        st.plotly_chart(figA, use_container_width=True)
+                        st.plotly_chart(figA, width="stretch")
                         safe_download_button(
                             st,
                             "Export acceleration overlay (HTML)",
@@ -912,7 +912,7 @@ def main():
                             lambda cfg, df, idx: scen_name(cfg, df, idx),
                             title="Penetration – time (overlay)",
                         )
-                        st.plotly_chart(figP, use_container_width=True)
+                        st.plotly_chart(figP, width="stretch")
                         safe_download_button(
                             st,
                             "Export penetration overlay (HTML)",
@@ -928,7 +928,7 @@ def main():
                         j = scen_opts.index(pick)
                         cfg_j, df_j = captured[j]
                         figFD = _force_penetration_time_gradient(df_j, title=f"Force–penetration (time gradient) – {pick}")
-                        st.plotly_chart(figFD, use_container_width=True)
+                        st.plotly_chart(figFD, width="stretch")
                         safe_download_button(
                             st,
                             "Export force–penetration (HTML)",
@@ -1155,7 +1155,7 @@ def main():
                     "Run friction/restitution sweep",
                     type="primary",
                     key="run_fric_sweep",
-                    use_container_width=True,
+                    width="stretch",
                     disabled=disable_run,
                 )
 
@@ -1287,7 +1287,7 @@ def main():
                     summary_df = pd.DataFrame(rows)
 
                     st.markdown("#### Summary")
-                    st.dataframe(summary_df, use_container_width=True)
+                    st.dataframe(summary_df, width="stretch")
 
                     if 'E_diss_friction_J_end' in summary_df.columns:
                         try:
@@ -1305,7 +1305,7 @@ def main():
                             lambda cfg, df, idx: scen_name(cfg, df, idx),
                             title="Impact force – time (overlay)",
                         )
-                        st.plotly_chart(figF, use_container_width=True)
+                        st.plotly_chart(figF, width="stretch")
                         safe_download_button(
                             st,
                             "Export force overlay (HTML)",
@@ -1323,7 +1323,7 @@ def main():
                             lambda cfg, df, idx: scen_name(cfg, df, idx),
                             title="Acceleration – time (overlay)",
                         )
-                        st.plotly_chart(figA, use_container_width=True)
+                        st.plotly_chart(figA, width="stretch")
                         safe_download_button(
                             st,
                             "Export acceleration overlay (HTML)",
@@ -1341,7 +1341,7 @@ def main():
                             lambda cfg, df, idx: scen_name(cfg, df, idx),
                             title="Penetration – time (overlay)",
                         )
-                        st.plotly_chart(figP, use_container_width=True)
+                        st.plotly_chart(figP, width="stretch")
                         safe_download_button(
                             st,
                             "Export penetration overlay (HTML)",
@@ -1357,7 +1357,7 @@ def main():
                         j = scen_opts.index(pick)
                         cfg_j, df_j = captured[j]
                         figFD = _force_penetration_time_gradient(df_j, title=f"Force–penetration (time gradient) – {pick}")
-                        st.plotly_chart(figFD, use_container_width=True)
+                        st.plotly_chart(figFD, width="stretch")
                         safe_download_button(
                             st,
                             "Export force–penetration (HTML)",
@@ -1691,7 +1691,7 @@ def main():
                             tickformat=".0e",
                             exponentformat="e",
                         )
-                        st.plotly_chart(fig_peak, use_container_width=True)
+                        st.plotly_chart(fig_peak, width="stretch")
                         st.session_state["dif_fig_peak_html"] = _fig_to_html_bytes(fig_peak)
                         st.session_state["sens_fig_peak_html"] = _fig_to_html_bytes(fig_peak)
                     except Exception as e:
@@ -1708,7 +1708,7 @@ def main():
                             return f"dt={dt:.1e}s, α={a:+.2f}, tol={tol:.1e}"
 
                         fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
                         st.session_state["dif_fig_overlay_html"] = _fig_to_html_bytes(fig)
                         st.session_state["sens_fig_overlay_html"] = _fig_to_html_bytes(fig)
 
@@ -1876,7 +1876,7 @@ def main():
                             yaxis_title="Peak force (MN)",
                             height=350,
                         )
-                        st.plotly_chart(fig_peak, use_container_width=True)
+                        st.plotly_chart(fig_peak, width="stretch")
                         st.session_state["dif_fig_peak_html"] = _fig_to_html_bytes(fig_peak)
                     except (KeyError, ValueError, IndexError) as e:
                         st.info(f"Peak vs DIF plot not available: {e}")
@@ -1891,7 +1891,7 @@ def main():
                             return f"DIF={dif_val:.3f}"
 
                         fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
                         st.session_state["dif_fig_overlay_html"] = _fig_to_html_bytes(fig)
 
   
@@ -2120,7 +2120,7 @@ def main():
                             yaxis_title=q_label,
                             height=450,
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
 
 

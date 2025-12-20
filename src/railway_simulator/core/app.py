@@ -2038,7 +2038,9 @@ def main():
                                 y = df[q_label].to_numpy() if q_label in df.columns else np.array([])
 
                                 peak = float(np.nanmax(y)) if y.size else float("nan")
-                                impulse = float(getattr(np, "trapezoid", np.trapz)(y, t)) if y.size else float("nan")
+                                # Use trapezoid (NumPy 2.0+) or trapz (NumPy 1.x)
+                                trapz_func = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
+                                impulse = float(trapz_func(y, t)) if y.size else float("nan")
 
                                 rows.append(
                                     {

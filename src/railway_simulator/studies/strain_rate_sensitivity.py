@@ -68,7 +68,9 @@ def run_fixed_dif_sensitivity(
         t = df["Time_s"].to_numpy()
         f = df[quantity].to_numpy()
         peak = float(np.nanmax(f))
-        impulse = float(getattr(np, "trapezoid", np.trapz)(f, t))
+        # Use trapezoid (NumPy 2.0+) or trapz (NumPy 1.x)
+        trapz_func = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
+        impulse = float(trapz_func(f, t))
         max_pen = float(np.nanmax(df.get("Penetration_mm", pd.Series([np.nan])).to_numpy()))
         max_acc = float(np.nanmax(df.get("Acceleration_g", pd.Series([np.nan])).to_numpy()))
         e_final = float(df.get("E_balance_error_J", pd.Series([np.nan])).iloc[-1]) if len(df) else float("nan")

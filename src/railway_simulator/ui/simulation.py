@@ -653,7 +653,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                     key="ui_nodal_lock_scale",
                 )
             with row3[3]:
-                if st.button("Reset scale", use_container_width=True, key="ui_nodal_reset_scale"):
+                if st.button("Reset scale", width="stretch", key="ui_nodal_reset_scale"):
                     # Clear all stored scales
                     for k in list(st.session_state.keys()):
                         if str(k).startswith("ui_nodal_scale::"):

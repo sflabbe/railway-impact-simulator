@@ -585,12 +585,26 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                     key="ui_nodal_max_t",
                 )
             with c7:
+                # Sanitize persisted widget state when the number of masses changes.
+                # Otherwise Streamlit can crash if the stored/default value is outside
+                # the [min_value, max_value] bounds (e.g. n_masses < 10).
+                max_nodes_cap = min(200, max(1, int(n_masses)))
+                default_nodes = min(40, max_nodes_cap)
+
+                prev_nodes = st.session_state.get("ui_nodal_max_nodes", default_nodes)
+                try:
+                    prev_nodes = int(prev_nodes)
+                except Exception:
+                    prev_nodes = default_nodes
+                prev_nodes = max(1, min(prev_nodes, max_nodes_cap))
+                st.session_state["ui_nodal_max_nodes"] = prev_nodes
+
                 max_nodes = st.number_input(
                     "Max nodes",
-                    min_value=10,
-                    max_value=200,
-                    value=min(40, n_masses),
-                    step=5,
+                    min_value=1,
+                    max_value=max_nodes_cap,
+                    value=prev_nodes,
+                    step=1,
                     key="ui_nodal_max_nodes",
                 )
 

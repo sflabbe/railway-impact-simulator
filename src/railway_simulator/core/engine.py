@@ -232,6 +232,10 @@ class SimulationParams:
     # Optional metadata / consistency check: linear stiffness between masses
     k_train: np.ndarray | None = None
 
+    # LuGre (optional "paper-grade" calibration)
+    lugre_paper_grade: bool = True
+    lugre_bristle_deflection_m: float = 1.0e-4  # target steady bristle deflection (m)
+
     # Strain-rate analysis
     L_ref_m: float = 1.0  # Characteristic length for strain-rate computation (m)
 
@@ -883,9 +887,15 @@ class ImpactSimulator:
         # If the user selected LuGre/Dahl with mu != 0 but forgot sigma_0, pick a sensible default
         # so parametric sweeps actually show an effect without extra UI knobs.
         if self.friction_enabled and fm in ("lugre", "dahl") and abs(p.sigma_0) < SimulationConstants.ZERO_TOL and not mu_zero:
-            p.sigma_0 = 1.0e6
-            if fm == "lugre" and abs(p.sigma_1) < SimulationConstants.ZERO_TOL:
-                p.sigma_1 = 1.0e3
+            # If using LuGre in "paper-grade" mode, σ₀ is auto-computed per node
+            # from the chosen bristle deflection target, so σ₀==0 is acceptable here.
+            if fm == "lugre" and bool(getattr(p, "lugre_paper_grade", False)):
+                if abs(p.sigma_1) < SimulationConstants.ZERO_TOL:
+                    p.sigma_1 = 316.0
+            else:
+                p.sigma_0 = 1.0e6
+                if fm == "lugre" and abs(p.sigma_1) < SimulationConstants.ZERO_TOL:
+                    p.sigma_1 = 1.0e3
 
 
 
@@ -929,6 +939,20 @@ class ImpactSimulator:
         # Normal forces for friction (per node)
         FN_node = GRAVITY * p.masses
         vs = SimulationConstants.STRIBECK_VELOCITY
+
+        # LuGre (paper-grade) σ₀ calibration per node (optional)
+        sigma0_node = np.full(n, float(p.sigma_0))
+        if (
+            self.friction_enabled
+            and (p.friction_model or "").strip().lower() == "lugre"
+            and bool(getattr(p, "lugre_paper_grade", False))
+        ):
+            z_ss = float(getattr(p, "lugre_bristle_deflection_m", 1.0e-4) or 1.0e-4)
+            z_ss = max(z_ss, 1.0e-12)
+            Fs_ref = np.maximum(abs(p.mu_s), abs(p.mu_k)) * np.abs(FN_node)
+            base = max(1.0e6, float(p.sigma_0) if abs(float(p.sigma_0)) > 0.0 else 1.0e6)
+            sigma0_node = np.where(Fs_ref > 0.0, Fs_ref / z_ss, base)
+            sigma0_node = np.clip(sigma0_node, 1.0e6, 1.0e12)
 
         # --------------------------------------------------------------
         # Initial forces & acceleration (t0 consistency)
@@ -1149,7 +1173,7 @@ class ImpactSimulator:
                                 elif p.friction_model == "lugre":
                                     F_tmp, z_i = FrictionModels.lugre(
                                         z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                                        p.sigma_0, p.sigma_1, p.sigma_2, h
+                                        float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
                                     )
                                 elif p.friction_model == "coulomb":
                                     F_tmp = FrictionModels.coulomb_stribeck(
@@ -1162,7 +1186,7 @@ class ImpactSimulator:
                                 else:
                                     F_tmp, z_i = FrictionModels.lugre(
                                         z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                                        p.sigma_0, p.sigma_1, p.sigma_2, h
+                                        float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
                                     )
 
                                 F_mag = abs(F_tmp)
@@ -1868,6 +1892,18 @@ class ImpactSimulator:
             v_t = np.hypot(vx, vz)
 
             z_prev = z_friction[i, step_idx]
+            # LuGre paper-grade: auto σ₀ from target bristle deflection
+            sigma0_i = float(p.sigma_0)
+            if (p.friction_model == "lugre" and bool(getattr(p, "lugre_paper_grade", False))):
+                z_ss = float(getattr(p, "lugre_bristle_deflection_m", 1.0e-4) or 1.0e-4)
+                z_ss = max(z_ss, 1.0e-12)
+                Fs_ref = max(abs(p.mu_s), abs(p.mu_k)) * float(abs(FN_node[i]))
+                base = max(1.0e6, sigma0_i if abs(sigma0_i) > 0.0 else 1.0e6)
+                if Fs_ref > 0.0:
+                    sigma0_i = float(min(1.0e12, max(1.0e6, Fs_ref / z_ss)))
+                else:
+                    sigma0_i = float(base)
+
             z_new = z_prev
             fx = 0.0
             fz = 0.0
@@ -1880,7 +1916,7 @@ class ImpactSimulator:
                 elif p.friction_model == "lugre":
                     F_tmp, z_new = FrictionModels.lugre(
                         z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                        p.sigma_0, p.sigma_1, p.sigma_2, self.h
+                        sigma0_i, p.sigma_1, p.sigma_2, self.h
                     )
                 elif p.friction_model == "coulomb":
                     F_tmp = FrictionModels.coulomb_stribeck(
@@ -1894,7 +1930,7 @@ class ImpactSimulator:
                     # Fallback: LuGre
                     F_tmp, z_new = FrictionModels.lugre(
                         z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                        p.sigma_0, p.sigma_1, p.sigma_2, self.h
+                        sigma0_i, p.sigma_1, p.sigma_2, self.h
                     )
 
                 F_mag = abs(F_tmp)
@@ -2485,6 +2521,22 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
             f"(type {type(val).__name__})."
         )
 
+    def _to_bool(val, name: str):
+        if val is None:
+            return None
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(int(val))
+        if isinstance(val, str):
+            v = val.strip().lower()
+            if v in ('true','1','yes','y','on'):
+                return True
+            if v in ('false','0','no','n','off'):
+                return False
+            raise ValueError(f"Parameter '{name}' expects a bool-compatible value, got {val!r}.")
+        raise TypeError(f"Parameter '{name}' expects a bool, got {val!r} (type {type(val).__name__}).")
+
     # --- Scalars that should be floats ---------------------------------
     scalar_float_keys = [
         # geometry / kinematics
@@ -2508,6 +2560,7 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
         "sigma_0",
         "sigma_1",
         "sigma_2",
+        "lugre_bristle_deflection_m",
         # Bouc-Wen
         "bw_a",
         "bw_A",
@@ -2519,6 +2572,16 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
         "h_init",
         "T_max",
     ]
+
+    
+    # --- Scalars that should be bools ------------------------------------
+    bool_keys = [
+        'lugre_paper_grade',
+    ]
+
+    for key in bool_keys:
+        if key in data and data[key] is not None:
+            data[key] = _to_bool(data[key], key)
 
     for key in scalar_float_keys:
         if key in data and data[key] is not None:

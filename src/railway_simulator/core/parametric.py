@@ -162,7 +162,20 @@ def run_parametric_envelope(
         rows.append(row)
 
     summary_df = pd.DataFrame(rows)
-    meta: Dict[str, Any] = {}
+    # Meta payload (kept flexible for UI extensions)
+    # We include captured histories so the UI can plot per-speed time histories
+    # alongside the envelope, without rerunning simulations.
+    meta: Dict[str, Any] = {
+        "captured": [
+            {
+                "scenario": scen.name,
+                "weight": float(scen.weight),
+                "meta": dict(scen.meta or {}),
+                "df": df,
+            }
+            for scen, df in results
+        ]
+    }
 
     return envelope_df, summary_df, meta
 

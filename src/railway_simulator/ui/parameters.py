@@ -127,13 +127,13 @@ def _sync_time_widgets_from_yaml(cfg: Dict[str, Any]) -> None:
         except Exception:
             pass
 
-    # initial gap (cm) from d0 (m)
+    # initial gap (m) from d0 (m)
     d0 = cfg.get("d0", None)
     if d0 is not None:
         try:
-            d0_cm = float(float(d0) * 100.0)
-            d0_cm = float(np.clip(d0_cm, 0.0, 100.0))
-            _set_if_present("ui_d0_cm", d0_cm)
+            d0_m = float(float(d0))
+            d0_m = float(np.clip(d0_m, 0.0, 100.0))
+            _set_if_present("ui_d0_m", d0_m)
         except Exception:
             pass
 
@@ -263,18 +263,18 @@ def build_parameter_ui() -> Dict[str, Any]:
             params["step"] = int(T_max / params["h_init"])
             params["T_int"] = (0.0, T_max)
 
-            d0_cm = st.number_input(
-                "Initial Distance to Wall (cm)",
+            d0_m = st.number_input(
+                "Initial Distance to Wall (m)",
                 0.0,
                 100.0,
-                1.0,
-                0.1,
+                0.01,
+                0.01,
                 help="Additional initial gap between front mass and wall",
-                key="ui_d0_cm",
+                key="ui_d0_m",
                 on_change=_invalidate_sim_cache,
                 disabled=time_lock,
             )
-            params["d0"] = d0_cm / 100.0
+            params["d0"] = float(d0_m)
 
             angle_deg = st.number_input(
                 "Impact Angle (°)",
@@ -1118,11 +1118,54 @@ def build_contact_friction_ui() -> Dict[str, Any]:
             ["lugre", "dahl", "coulomb", "brown-mcphee"],
             index=0,
         )
+
         params["mu_s"] = st.slider("μs (static)", 0.0, 1.0, 0.4, 0.01)
         params["mu_k"] = st.slider("μk (kinetic)", 0.0, 1.0, 0.3, 0.01)
-        params["sigma_0"] = st.number_input("σ₀", 1e3, 1e7, 1e5, format="%.0e")
-        params["sigma_1"] = st.number_input("σ₁", 1.0, 1e5, 316.0, 1.0)
-        params["sigma_2"] = st.number_input("σ₂ (viscous)", 0.0, 2.0, 0.4, 0.1)
+
+        # --- LuGre (paper-grade) -------------------------------------------------
+        # For large initial gaps (long run-up) the LuGre internal state needs a
+        # sufficiently stiff bristle (σ₀) to behave Coulomb-like and remain stable.
+        # We provide an optional calibration: choose a *target steady bristle deflection*
+        # z_ss (m). Then σ₀ is auto-computed so that σ₀·z_ss ≈ μ·N.
+        if str(params.get("friction_model", "")).lower() == "lugre":
+            params["lugre_paper_grade"] = st.checkbox(
+                "Paper-grade LuGre (auto σ₀ from bristle deflection)",
+                value=True,
+                help=(
+                    "Calibrates σ₀ so that the steady bristle deflection z_ss is ≈ target (default 0.1 mm). "
+                    "This makes LuGre more Coulomb-like and prevents odd behaviour for long run-ups (large initial distance)."
+                ),
+                key="ui_lugre_paper_grade",
+            )
+            z_mm = st.number_input(
+                "Target bristle deflection z_ss [mm]",
+                min_value=0.001,
+                max_value=10.0,
+                value=0.1,
+                step=0.01,
+                help="Typical range: 0.05–0.5 mm. Smaller ⇒ stiffer bristles (more Coulomb-like).",
+                key="ui_lugre_zss_mm",
+            )
+            params["lugre_bristle_deflection_m"] = float(z_mm) / 1000.0
+        else:
+            # Still pass keys for robustness (ignored by non-LuGre models)
+            params["lugre_paper_grade"] = False
+            params["lugre_bristle_deflection_m"] = 1.0e-4
+
+        sigma0_disabled = bool(params.get("lugre_paper_grade", False)) and str(params.get("friction_model", "")).lower() == "lugre"
+        params["sigma_0"] = st.number_input(
+            "σ₀ [N/m]",
+            1.0e3,
+            1.0e12,
+            1.0e8,
+            format="%.0e",
+            disabled=sigma0_disabled,
+            help=(
+                "LuGre/Dahl bristle stiffness. If paper-grade LuGre is enabled, σ₀ is auto-computed per node and this field is ignored."
+            ),
+        )
+        params["sigma_1"] = st.number_input("σ₁ [N·s/m]", 0.0, 1.0e6, 316.0, 1.0)
+        params["sigma_2"] = st.number_input("σ₂ (viscous) [N·s/m]", 0.0, 2.0, 0.4, 0.1)
 
     return params
 

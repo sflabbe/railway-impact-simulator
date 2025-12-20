@@ -217,7 +217,7 @@ def main():
                 st.metric("Velocity", "—")
             st.metric("Masses", int(params.get("n_masses", 0)))
             st.metric("Time Step", f"{float(params.get('h_init', 0.0))*1000:.2f} ms")
-            st.metric("Initial Gap", f"{float(params.get('d0', 0.0))*100:.1f} cm")
+            st.metric("Initial Gap", f"{float(params.get('d0', 0.0)):.3f} m")
             if params.get("case_name"):
                 st.caption(f"case_name: **{params['case_name']}**")
             st.markdown("---")
@@ -301,6 +301,19 @@ def main():
                 value=False,
                 key="compare_solvers_env",
                 help="Runs the same speed envelope twice (solver=newton and solver=picard) and overlays the results.",
+            )
+
+            st.markdown("#### Plot options")
+            show_speed_histories = st.checkbox(
+                "Show per-speed histories (recommended)",
+                value=True,
+                key="env_show_speed_histories",
+                help="Plots one time history per speed scenario. This makes it easier to read the influence of speed than a single envelope curve alone.",
+            )
+            show_envelope_curves = st.checkbox(
+                "Show envelope + weighted mean", 
+                value=True,
+                key="env_show_envelope_curves",
             )
 
 
@@ -396,21 +409,97 @@ def main():
                                 prefix="v",
                             )
 
-                            envelope_df, summary_df, _ = run_parametric_envelope(
+                            envelope_df, summary_df, meta = run_parametric_envelope(
                                 scenarios, quantity=quantity
                             )
 
-                            fig_env = make_envelope_figure(
-                                envelope_df,
-                                quantity=quantity,
-                                title=f"{quantity_label} – envelope over defined speeds",
-                            )
-                            st.plotly_chart(fig_env, use_container_width=True)
-
-                            st.markdown("#### Scenario summary")
-                            st.dataframe(summary_df)
+                            # Persist so the user can tweak plot options without re-running
+                            st.session_state["env_last"] = {
+                                "quantity": quantity,
+                                "quantity_label": quantity_label,
+                                "envelope_df": envelope_df,
+                                "summary_df": summary_df,
+                                "captured": meta.get("captured", []),
+                                "speeds": speeds,
+                                "weights": weights,
+                                "compare_solvers": False,
+                            }
                 except Exception as exc:
                     st.error(f"Parametric study failed: {exc}")
+
+            # Render last result (if available)
+            last = st.session_state.get("env_last", None)
+            if last and not last.get("compare_solvers", False):
+                envelope_df = last["envelope_df"]
+                summary_df = last["summary_df"]
+                captured = last.get("captured", [])
+                q = str(last.get("quantity", quantity))
+                q_label = str(last.get("quantity_label", quantity_label))
+
+                if show_speed_histories and captured:
+                    fig_speed = go.Figure()
+                    for item in captured:
+                        df_i = item.get("df", None)
+                        meta_i = item.get("meta", {}) or {}
+                        v_kmh = meta_i.get("speed_kmh", None)
+                        name = item.get("scenario", "scenario")
+                        label = f"{v_kmh:.0f} km/h" if isinstance(v_kmh, (int, float)) else name
+                        if isinstance(df_i, pd.DataFrame) and q in df_i.columns:
+                            t_ms, _ = _get_time_axis(df_i)
+                            fig_speed.add_trace(
+                                go.Scatter(x=t_ms, y=df_i[q], mode="lines", name=label)
+                            )
+
+                    fig_speed.update_layout(
+                        title=f"{q_label} – per-speed histories",
+                        xaxis_title="Time (ms)",
+                        yaxis_title=q,
+                        height=520,
+                    )
+                    st.plotly_chart(fig_speed, use_container_width=True)
+
+                    safe_download_button(
+                        st,
+                        label="Export per-speed overlay (HTML)",
+                        data=_fig_to_html_bytes(fig_speed),
+                        file_name="speed_histories_overlay.html",
+                        mime="text/html",
+                        use_container_width=True,
+                        key="env_export_speed_overlay_html",
+                    )
+
+                if show_envelope_curves:
+                    fig_env = go.Figure()
+                    env_col = f"{q}_envelope" if f"{q}_envelope" in envelope_df.columns else q
+                    mean_col = f"{q}_weighted_mean" if f"{q}_weighted_mean" in envelope_df.columns else None
+                    fig_env.add_trace(
+                        go.Scatter(
+                            x=envelope_df["Time_ms"],
+                            y=envelope_df[env_col],
+                            mode="lines",
+                            name="Envelope",
+                        )
+                    )
+                    if mean_col:
+                        fig_env.add_trace(
+                            go.Scatter(
+                                x=envelope_df["Time_ms"],
+                                y=envelope_df[mean_col],
+                                mode="lines",
+                                name="Weighted mean",
+                                line=dict(dash="dot"),
+                            )
+                        )
+                    fig_env.update_layout(
+                        title=f"{q_label} – envelope over defined speeds",
+                        xaxis_title="Time (ms)",
+                        yaxis_title=q,
+                        height=520,
+                    )
+                    st.plotly_chart(fig_env, use_container_width=True)
+
+                st.markdown("#### Scenario summary")
+                st.dataframe(summary_df)
 
         # --------------------------
         # Contact force model sweep
@@ -773,6 +862,16 @@ def main():
                             if k == "friction_model":
                                 cfg["friction_model"] = str(v)
                                 name = f"friction_model={v}"
+
+                                # If we are injecting LuGre into a categorical sweep, make sure
+                                # the default is the stable, paper-grade calibration.
+                                #
+                                # Without this, LuGre runs can inherit lugre_paper_grade=False from
+                                # the current UI state if the user selected a non-LuGre base model.
+                                if str(v).strip().lower() == "lugre":
+                                    cfg["lugre_paper_grade"] = True
+                                    if not cfg.get("lugre_bristle_deflection_m"):
+                                        cfg["lugre_bristle_deflection_m"] = 1.0e-4
                             elif k == "cr_wall":
                                 cfg["cr_wall"] = float(v)
                                 name = f"cr={float(v):.3g}"

@@ -54,14 +54,14 @@ source .venv/bin/activate
 Windows (PowerShell):
 
 ```powershell
-py -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
 Upgrade packaging tools:
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade -U pip setuptools wheel
 ```
 
 ### 1.3 Install the core package
@@ -233,15 +233,15 @@ python -m pip install ".[ui]"
 2) Start the server:
 
 ```bash
-streamlit run src/railway_simulator/core/app.py --server.address 127.0.0.1 --server.port 8501
+railway-sim ui
 ```
 
-Open `http://127.0.0.1:8501` in your browser.
+Open `http://127.0.0.1:8501` (default) in your browser.
 
 To access it from another device on your LAN:
 
 ```bash
-streamlit run src/railway_simulator/core/app.py --server.address 0.0.0.0 --server.port 8501
+railway-sim ui --host 0.0.0.0
 ```
 
 > ⚠️ Security note: binding to `0.0.0.0` exposes the server on your local network. Use this only on trusted networks.

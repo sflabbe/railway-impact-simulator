@@ -58,6 +58,8 @@ class SimulationConstants:
 
     # Numerical tolerances
     ZERO_TOL = 1e-12  # General zero tolerance for numerical comparisons
+    BW_Z_CLIP = 10.0  # Dimensionless z(t) clip for Bouc–Wen stability (only affects unstable parameter sets)
+
 
     # Newton-Raphson parameters
     FD_EPSILON = 1e-6  # Finite difference epsilon for Jacobian
@@ -286,7 +288,14 @@ class BoucWenModel:
         k3 = evolve(x0 + 0.5 * h * k2)
         k4 = evolve(x0 + h * k3)
 
-        return x0 + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        x1 = x0 + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        # Numerical safeguard: allow exploration of "wild" parameter sets (incl. negative β/γ)
+        # without NaNs/Inf breaking the solver. Stable calibrated cases are unaffected.
+        if not np.isfinite(x1):
+            x1 = x0
+        x1 = float(np.clip(x1, -SimulationConstants.BW_Z_CLIP, SimulationConstants.BW_Z_CLIP))
+        return x1
 
     @staticmethod
     def compute_forces(u: np.ndarray, du: np.ndarray, x: np.ndarray,
@@ -931,6 +940,7 @@ class ImpactSimulator:
         W_ext = np.zeros(p.step + 1)  # External work ∫ qdot^T Q_ext dt
         E_diss_rayleigh = np.zeros(p.step + 1)  # Rayleigh damping dissipation
         E_diss_bw = np.zeros(p.step + 1)  # Bouc-Wen hysteretic dissipation
+        E_diss_softening = np.zeros(p.step + 1)  # Post-yield softening (a<0) treated as non-conservative work
         E_diss_contact_damp = np.zeros(p.step + 1)  # Contact damping dissipation
         E_diss_friction = np.zeros(p.step + 1)  # Friction dissipation
         E_diss_mass_contact = np.zeros(p.step + 1)  # Mass-to-mass contact dissipation
@@ -1522,9 +1532,26 @@ class ImpactSimulator:
             # Bouc–Wen non-conservative part (2D distribution)
             Q_bw_new = np.zeros(dof)
             Q_bw_old = np.zeros(dof)
+
+            # If bw_a < 0, the linear term a*k*u represents post-yield softening (descending branch).
+            # It is not physically recoverable "elastic" energy, so we treat its work as non-conservative
+            # to keep the energy balance meaningful when experimenting with negative a.
+            Q_soft_new = np.zeros(dof)
+            Q_soft_old = np.zeros(dof)
+            u_comp_new = -u_spring[:, step_idx + 1] if (n > 1) else np.zeros(0)
+            u_comp_old = -u_spring[:, step_idx] if (n > 1) else np.zeros(0)
+
             for i in range(n - 1):
                 f_nc_new = (1.0 - p.bw_a) * p.fy[i] * X_bw[i, step_idx + 1]
                 f_nc_old = (1.0 - p.bw_a) * p.fy[i] * X_bw[i, step_idx]
+
+                # Optional softening work (a < 0): treat linear term as non-conservative
+                if p.bw_a < 0.0:
+                    f_soft_new = p.bw_a * (self.k_lin[i] * u_comp_new[i])
+                    f_soft_old = p.bw_a * (self.k_lin[i] * u_comp_old[i])
+                else:
+                    f_soft_new = 0.0
+                    f_soft_old = 0.0
 
                 r1n = q[[i, n + i], step_idx + 1]
                 r2n = q[[i + 1, n + i + 1], step_idx + 1]
@@ -1544,11 +1571,23 @@ class ImpactSimulator:
                 Q_bw_new[i + 1] += f_nc_new * n_vec_n[0]
                 Q_bw_new[n + i + 1] += f_nc_new * n_vec_n[1]
 
+                # new (softening term)
+                Q_soft_new[i] -= f_soft_new * n_vec_n[0]
+                Q_soft_new[n + i] -= f_soft_new * n_vec_n[1]
+                Q_soft_new[i + 1] += f_soft_new * n_vec_n[0]
+                Q_soft_new[n + i + 1] += f_soft_new * n_vec_n[1]
+
                 # old
                 Q_bw_old[i] -= f_nc_old * n_vec_o[0]
                 Q_bw_old[n + i] -= f_nc_old * n_vec_o[1]
                 Q_bw_old[i + 1] += f_nc_old * n_vec_o[0]
                 Q_bw_old[n + i + 1] += f_nc_old * n_vec_o[1]
+
+                # old (softening term)
+                Q_soft_old[i] -= f_soft_old * n_vec_o[0]
+                Q_soft_old[n + i] -= f_soft_old * n_vec_o[1]
+                Q_soft_old[i + 1] += f_soft_old * n_vec_o[0]
+                Q_soft_old[n + i + 1] += f_soft_old * n_vec_o[1]
 
             # Contact damping split at n and n+1 (elastic potential handled in V_contact)
             delta_old = np.maximum(-u_contact[:n, step_idx], 0.0)
@@ -1581,11 +1620,12 @@ class ImpactSimulator:
             # Trapezoidal midpoint for energy/work (inside the step)
             Q_ray_mid = 0.5 * (Q_ray_new + Q_ray_old)
             Q_bw_mid = 0.5 * (Q_bw_new + Q_bw_old)
+            Q_soft_mid = 0.5 * (Q_soft_new + Q_soft_old)
             Q_cd_mid = 0.5 * (Q_cd_new + Q_cd_old)
             Q_fric_mid = 0.5 * (Q_fric_new + Q_fric_old)
             Q_mc_mid = 0.5 * (Q_mc_new + Q_mc_old)
 
-            Q_nc_mid = Q_ray_mid + Q_bw_mid + Q_cd_mid + Q_fric_mid + Q_mc_mid
+            Q_nc_mid = Q_ray_mid + Q_bw_mid + Q_soft_mid + Q_cd_mid + Q_fric_mid + Q_mc_mid
 
             # External forces (excluding rigid wall): currently none
             Q_ext_mid = np.zeros(dof)
@@ -1605,12 +1645,14 @@ class ImpactSimulator:
             # Integrate dissipation (component-wise, consistent with t_{n+α})
             dE_rayleigh = -float(v_pow.T @ Q_ray_mid) * self.h
             dE_bw = -float(v_pow.T @ Q_bw_mid) * self.h
+            dE_softening = -float(v_pow.T @ Q_soft_mid) * self.h
             dE_contact_damp = -float(v_pow.T @ Q_cd_mid) * self.h
             dE_friction = -float(v_pow.T @ Q_fric_mid) * self.h
             dE_mass_contact = -float(v_pow.T @ Q_mc_mid) * self.h
 
             E_diss_rayleigh[step_idx + 1] = E_diss_rayleigh[step_idx] + dE_rayleigh
             E_diss_bw[step_idx + 1] = E_diss_bw[step_idx] + dE_bw
+            E_diss_softening[step_idx + 1] = E_diss_softening[step_idx] + dE_softening
             E_diss_contact_damp[step_idx + 1] = E_diss_contact_damp[step_idx] + dE_contact_damp
             E_diss_friction[step_idx + 1] = E_diss_friction[step_idx] + dE_friction
             E_diss_mass_contact[step_idx + 1] = E_diss_mass_contact[step_idx] + dE_mass_contact
@@ -1618,6 +1660,7 @@ class ImpactSimulator:
             E_diss_total[step_idx + 1] = (
                 E_diss_rayleigh[step_idx + 1]
                 + E_diss_bw[step_idx + 1]
+                + E_diss_softening[step_idx + 1]
                 + E_diss_contact_damp[step_idx + 1]
                 + E_diss_friction[step_idx + 1]
                 + E_diss_mass_contact[step_idx + 1]
@@ -1694,6 +1737,7 @@ class ImpactSimulator:
             "W_ext": W_ext,  # External work
             "E_diss_rayleigh": E_diss_rayleigh,  # Rayleigh damping dissipation
             "E_diss_bw": E_diss_bw,  # Bouc-Wen hysteretic dissipation
+            "E_diss_softening": E_diss_softening,  # Softening work (bw_a<0) treated as dissipation
             "E_diss_contact_damp": E_diss_contact_damp,  # Contact damping dissipation
             "E_diss_friction": E_diss_friction,  # Friction dissipation
             "E_diss_mass_contact": E_diss_mass_contact,  # Mass contact dissipation
@@ -1705,7 +1749,17 @@ class ImpactSimulator:
         }
 
         return self._build_results_dataframe(
-            q, qp, qpp, R_contact, u_contact, u_spring, X_bw, energies
+            q=q,
+            qp=qp,
+            qpp=qpp,
+            R_internal=R_internal,
+            R_contact=R_contact,
+            R_friction=R_friction,
+            R_mass_contact=R_mass_contact,
+            u_contact=u_contact,
+            u_spring=u_spring,
+            X_bw=X_bw,
+            energies=energies,
         )
 
     # ----------------------------------------------------------------
@@ -1948,7 +2002,10 @@ class ImpactSimulator:
         q: np.ndarray,
         qp: np.ndarray,
         qpp: np.ndarray,
+        R_internal: np.ndarray,
         R_contact: np.ndarray,
+        R_friction: np.ndarray,
+        R_mass_contact: np.ndarray,
         u_contact: np.ndarray,
         u_spring: np.ndarray,
         X_bw: np.ndarray,
@@ -1986,6 +2043,7 @@ class ImpactSimulator:
         W_ext = energies["W_ext"]
         E_diss_rayleigh = energies["E_diss_rayleigh"]
         E_diss_bw = energies["E_diss_bw"]
+        E_diss_softening = energies.get("E_diss_softening", np.zeros_like(E_diss_bw))
         E_diss_contact_damp = energies["E_diss_contact_damp"]
         E_diss_friction = energies["E_diss_friction"]
         E_diss_mass_contact = energies["E_diss_mass_contact"]
@@ -2015,6 +2073,7 @@ class ImpactSimulator:
                 "W_ext_J": W_ext,
                 "E_diss_rayleigh_J": E_diss_rayleigh,
                 "E_diss_bw_J": E_diss_bw,
+                "E_diss_softening_J": E_diss_softening,
                 "E_diss_contact_damp_J": E_diss_contact_damp,
                 "E_diss_friction_J": E_diss_friction,
                 "E_diss_mass_contact_J": E_diss_mass_contact,
@@ -2034,6 +2093,32 @@ class ImpactSimulator:
             df[f"Mass{idx}_Velocity_y_m_s"] = qp[n_masses + i, :]
             df[f"Mass{idx}_Acceleration_x_m_s2"] = qpp[i, :]
             df[f"Mass{idx}_Acceleration_y_m_s2"] = qpp[n_masses + i, :]
+
+
+        # Per-mass nodal forces (exported for debugging and F–u loops)
+        # These are the *applied* generalized forces in global DOFs (x/y) for each mass.
+        for i in range(n_masses):
+            idx = i + 1
+            fx_int = R_internal[i, :]
+            fy_int = R_internal[n_masses + i, :]
+            fx_wall = R_contact[i, :]
+            fy_wall = R_contact[n_masses + i, :]
+            fx_fric = R_friction[i, :]
+            fy_fric = R_friction[n_masses + i, :]
+            fx_mc = R_mass_contact[i, :]
+            fy_mc = R_mass_contact[n_masses + i, :]
+
+            df[f"Mass{idx}_Force_internal_x_N"] = fx_int
+            df[f"Mass{idx}_Force_internal_y_N"] = fy_int
+            df[f"Mass{idx}_Force_wall_x_N"] = fx_wall
+            df[f"Mass{idx}_Force_wall_y_N"] = fy_wall
+            df[f"Mass{idx}_Force_friction_x_N"] = fx_fric
+            df[f"Mass{idx}_Force_friction_y_N"] = fy_fric
+            df[f"Mass{idx}_Force_mass_contact_x_N"] = fx_mc
+            df[f"Mass{idx}_Force_mass_contact_y_N"] = fy_mc
+
+            df[f"Mass{idx}_Force_total_x_N"] = fx_int + fx_wall + fx_fric + fx_mc
+            df[f"Mass{idx}_Force_total_y_N"] = fy_int + fy_wall + fy_fric + fy_mc
 
         if n_masses > 1:
             u_comp = -u_spring

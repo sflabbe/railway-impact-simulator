@@ -496,21 +496,58 @@ def create_spring_plots(df: pd.DataFrame, spring_index: int) -> go.Figure | None
     )
     return fig
 
+<<<<<<< HEAD
 def create_mass_force_displacement_plots(
     df: pd.DataFrame,
     mass_index: int,
     mode: str = "net",  # "net" | "left" | "right"
 ) -> go.Figure | None:
+=======
+
+def create_mass_force_displacement_plots(
+    df: pd.DataFrame,
+    mass_index: int,
+    mode: str = "auto",  # "auto" | "total" | "internal" | "net" | "left" | "right"
+) -> go.Figure | None:
+    """Create force–displacement plots for a selected mass.
+
+    Preferred source (if available):
+      - Core-exported nodal forces: ``Mass{i}_Force_total_x_N`` (includes wall, friction, mass-contact)
+
+    Fallback source:
+      - Reconstruct from neighboring spring forces (chain model):
+          F_net = F_left - F_right
+
+    Args:
+        df: Simulation results DataFrame.
+        mass_index: Zero-based index of the mass.
+        mode:
+            - "auto": use core total force if available, else "net"
+            - "total": force = core total x-force
+            - "internal": force = core internal x-force (springs only)
+            - "net": force = left spring - right spring
+            - "left": force = left spring only
+            - "right": force = - right spring only
+
+    Returns:
+        Plotly figure with 3 subplots (F–u, u(t), F(t)) or None if data is missing.
+    """
+>>>>>>> f005b12 (mass forces output fixed)
     time_col = "Time_ms" if "Time_ms" in df.columns else ("Time_s" if "Time_s" in df.columns else None)
     if time_col is None:
         return None
 
+<<<<<<< HEAD
     # Columnas de la masa (1-based en el df)
     idx = mass_index + 1
+=======
+    idx = mass_index + 1  # DataFrame uses 1-based naming
+>>>>>>> f005b12 (mass forces output fixed)
     pos_col = f"Mass{idx}_Position_x_m"
     if pos_col not in df.columns:
         return None
 
+<<<<<<< HEAD
     # Desplazamiento relativo
     u = df[pos_col] - float(df[pos_col].iloc[0])
 
@@ -554,6 +591,74 @@ def create_mass_force_displacement_plots(
             return None
         F = (left_force if left_force is not None else 0.0) - (right_force if right_force is not None else 0.0)
         label = "Net internal force (left - right)"
+=======
+    import re
+
+    # Infer number of masses from available position columns
+    mass_ids = []
+    for c in df.columns:
+        mm = re.match(r"Mass(\d+)_Position_x_m$", c)
+        if mm:
+            mass_ids.append(int(mm.group(1)))
+    n_masses = max(mass_ids) if mass_ids else int(df.attrs.get("n_masses", 0) or 0)
+    if n_masses <= 0:
+        return None
+
+    u = df[pos_col] - float(df[pos_col].iloc[0])
+
+    # -------------------------------
+    # Select force source
+    # -------------------------------
+    col_total = f"Mass{idx}_Force_total_x_N"
+    col_internal = f"Mass{idx}_Force_internal_x_N"
+
+    F = None
+    label = ""
+
+    if mode in ("auto", "total") and col_total in df.columns:
+        F = df[col_total]
+        label = "Total nodal force in x (core)"
+    elif mode == "internal" and col_internal in df.columns:
+        F = df[col_internal]
+        label = "Internal nodal force in x (core)"
+    else:
+        # Fallback: neighbor springs (1-based spring naming: Spring1 between Mass1-Mass2)
+        left_force = None
+        right_force = None
+
+        if mass_index > 0:
+            col_left = f"Spring{mass_index}_Force_N"
+            if col_left in df.columns:
+                left_force = df[col_left]
+
+        if mass_index < n_masses - 1:
+            col_right = f"Spring{mass_index + 1}_Force_N"
+            if col_right in df.columns:
+                right_force = df[col_right]
+
+        if mode == "left":
+            if left_force is None:
+                return None
+            F = left_force
+            label = "Left spring force on mass"
+        elif mode == "right":
+            if right_force is None:
+                return None
+            F = -right_force
+            label = "Right spring force on mass"
+        else:
+            # default fallback
+            if mode not in ("auto", "net"):
+                # unknown mode
+                return None
+            if left_force is None and right_force is None:
+                return None
+            F = (left_force if left_force is not None else 0.0) - (right_force if right_force is not None else 0.0)
+            label = "Net internal force (left - right)"
+
+    if F is None:
+        return None
+>>>>>>> f005b12 (mass forces output fixed)
 
     F_mn = F / 1e6
 
@@ -564,7 +669,11 @@ def create_mass_force_displacement_plots(
         vertical_spacing=0.08,
     )
 
+<<<<<<< HEAD
     # Loop F–u
+=======
+    # Hysteresis
+>>>>>>> f005b12 (mass forces output fixed)
     fig.add_trace(
         go.Scatter(
             x=u,
@@ -573,10 +682,18 @@ def create_mass_force_displacement_plots(
             name=label,
             showlegend=False,
         ),
+<<<<<<< HEAD
         row=1, col=1,
     )
 
     # Colorbar por tiempo (igual que en spring)
+=======
+        row=1,
+        col=1,
+    )
+
+    # Time colorbar (as invisible markers)
+>>>>>>> f005b12 (mass forces output fixed)
     y0, y1 = fig.layout.yaxis.domain
     cb_y = 0.5 * (y0 + y1)
     cb_len = 0.9 * (y1 - y0)
@@ -601,13 +718,19 @@ def create_mass_force_displacement_plots(
             hoverinfo="skip",
             showlegend=False,
         ),
+<<<<<<< HEAD
         row=1, col=1,
+=======
+        row=1,
+        col=1,
+>>>>>>> f005b12 (mass forces output fixed)
     )
 
     fig.update_xaxes(title_text="Displacement of mass (m)", row=1, col=1)
     fig.update_yaxes(title_text="Force on mass (MN)", row=1, col=1)
 
     # u(t)
+<<<<<<< HEAD
     fig.add_trace(
         go.Scatter(x=df[time_col], y=u, name="u(t)", showlegend=False),
         row=2, col=1,
@@ -619,6 +742,13 @@ def create_mass_force_displacement_plots(
         go.Scatter(x=df[time_col], y=F_mn, name="F(t)", showlegend=False),
         row=3, col=1,
     )
+=======
+    fig.add_trace(go.Scatter(x=df[time_col], y=u, showlegend=False), row=2, col=1)
+    fig.update_yaxes(title_text="Displacement (m)", row=2, col=1)
+
+    # F(t)
+    fig.add_trace(go.Scatter(x=df[time_col], y=F_mn, showlegend=False), row=3, col=1)
+>>>>>>> f005b12 (mass forces output fixed)
     fig.update_yaxes(title_text="Force (MN)", row=3, col=1)
     fig.update_xaxes(title_text="Time (ms)" if time_col == "Time_ms" else "Time (s)", row=3, col=1)
 

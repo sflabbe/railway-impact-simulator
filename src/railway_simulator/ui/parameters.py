@@ -462,9 +462,14 @@ def build_train_geometry_ui() -> Dict[str, Any]:
             on_change=_invalidate_sim_cache,
         )
 
-        # Clear YAML selection when leaving YAML mode (avoid stale overrides).
-        if config_mode != "YAML example configs":
-            # Clear YAML selection when leaving YAML mode (avoid stale overrides).
+        # Clear YAML selection *only* when the user actually leaves YAML mode.
+        #
+        # IMPORTANT:
+        # Previously this block ran on *every* rerun whenever config_mode was not YAML.
+        # That wiped st.session_state["sim_results"] even when the user just changed a
+        # selectbox in the results tabs (Mass/Spring index), forcing a full re-run.
+        prev_mode = st.session_state.get("_train_config_mode_prev", None)
+        if prev_mode == "YAML example configs" and config_mode != "YAML example configs":
             for k in (
                 "yaml_example_cfg",
                 "yaml_apply_full",
@@ -476,7 +481,13 @@ def build_train_geometry_ui() -> Dict[str, Any]:
                 "_yaml_fp",
             ):
                 st.session_state.pop(k, None)
+
+            # The radio already has on_change=_invalidate_sim_cache, so this is mostly
+            # defensive (covers rare edge cases where the callback might not fire).
             _invalidate_sim_cache()
+
+        # Persist current mode for next rerun.
+        st.session_state["_train_config_mode_prev"] = config_mode
 
         if config_mode == "Research locomotive model":
             n_masses = st.slider("Number of Masses", 2, 20, 7)
@@ -782,10 +793,10 @@ def build_material_ui(n_masses: int) -> Dict[str, Any]:
         return {
             "fy": fy,
             "uy": uy,
-            "bw_a": st.slider("Elastic ratio (a)", 0.0, 1.0, 0.0, 0.05),
-            "bw_A": st.number_input("A", 0.1, 10.0, 1.0, 0.1),
-            "bw_beta": st.number_input("β", 0.0, 5.0, 0.1, 0.05),
-            "bw_gamma": st.number_input("γ", 0.0, 5.0, 0.9, 0.05),
+            "bw_a": st.slider("Elastic ratio (a)", -1.0, 1.0, 0.0, 0.05, help="Post-yield stiffness ratio a. Allow negative for softening experiments."),
+            "bw_A": st.number_input("A", -10.0, 10.0, 1.0, 0.1, help="Bouc–Wen A constant. Allow negative for experimentation."),
+            "bw_beta": st.number_input("β", -5.0, 5.0, 0.1, 0.05, help="Bouc–Wen β shape/size factor. Allow negative for experimentation."),
+            "bw_gamma": st.number_input("γ", -5.0, 5.0, 0.9, 0.05, help="Bouc–Wen γ shape/size factor. Allow negative for experimentation."),
             "bw_n": int(st.number_input("n", 1, 20, 8, 1)),
         }
 

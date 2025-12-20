@@ -16,6 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from railway_simulator.ui.st_compat import safe_button
 from railway_simulator.core.engine import run_simulation
 from railway_simulator.core.parametric import (
     build_speed_scenarios,
@@ -130,10 +131,10 @@ def main():
             if params.get("case_name"):
                 st.caption(f"case_name: **{params['case_name']}**")
             st.markdown("---")
-            run_btn = st.button(
+            run_btn = safe_button(st, 
                 "▶️ **Run Simulation**",
                 type="primary",
-                width='stretch',
+                use_container_width=True,
             )
 
         with col2:
@@ -265,7 +266,7 @@ def main():
                                 yaxis_title=quantity,
                                 height=520,
                             )
-                            st.plotly_chart(fig, width='stretch')
+                            st.plotly_chart(fig, use_container_width=True)
 
                             st.markdown("#### Scenario summary (both solvers)")
                             summary_all = pd.concat(
@@ -307,7 +308,7 @@ def main():
                                 quantity=quantity,
                                 title=f"{quantity_label} – envelope over defined speeds",
                             )
-                            st.plotly_chart(fig_env, width='stretch')
+                            st.plotly_chart(fig_env, use_container_width=True)
 
                             st.markdown("#### Scenario summary")
                             st.dataframe(summary_df)
@@ -489,7 +490,7 @@ def main():
                             tickformat=".0e",
                             exponentformat="e",
                         )
-                        st.plotly_chart(fig_peak, width='stretch')
+                        st.plotly_chart(fig_peak, use_container_width=True)
                     except Exception as e:
                         st.warning(f"Could not generate peak plot: {e}")
 
@@ -504,7 +505,7 @@ def main():
                             return f"dt={dt:.1e}s, α={a:+.2f}, tol={tol:.1e}"
 
                         fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
-                        st.plotly_chart(fig, width='stretch')
+                        st.plotly_chart(fig, use_container_width=True)
 
         # --------------------------
         # Strain-rate proxy (Fixed DIF)
@@ -601,7 +602,7 @@ def main():
                             yaxis_title="Peak force (MN)",
                             height=350,
                         )
-                        st.plotly_chart(fig_peak, width='stretch')
+                        st.plotly_chart(fig_peak, use_container_width=True)
                     except (KeyError, ValueError, IndexError) as e:
                         st.info(f"Peak vs DIF plot not available: {e}")
 
@@ -615,7 +616,7 @@ def main():
                             return f"DIF={dif_val:.3f}"
 
                         fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
-                        st.plotly_chart(fig, width='stretch')
+                        st.plotly_chart(fig, use_container_width=True)
 
   
         # --------------------------
@@ -773,7 +774,7 @@ def main():
                             yaxis_title=q_label,
                             height=450,
                         )
-                        st.plotly_chart(fig, width='stretch')
+                        st.plotly_chart(fig, use_container_width=True)
 
 
 # ABOUT / DOCUMENTATION TAB

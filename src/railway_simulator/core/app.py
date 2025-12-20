@@ -33,7 +33,79 @@ from railway_simulator.ui import (
     execute_simulation,
 )
 
-from railway_simulator.ui.export import to_excel
+from railway_simulator.ui.export import (
+    make_bundle_zip,
+    sanitize_filename,
+    replot_matplotlib_script,
+    to_excel,
+    utc_timestamp,
+)
+
+
+def _cfg_speed_kmh(cfg: Dict[str, Any]) -> float | None:
+    """Try to recover impact speed in km/h from a config dict."""
+    try:
+        v0 = float(cfg.get("v0_init"))
+        return abs(v0) * 3.6
+    except Exception:
+        return None
+
+
+def _compute_envelope_from_captured(
+    captured_items: list[dict[str, Any]],
+    *,
+    quantity: str,
+) -> pd.DataFrame | None:
+    """Compute envelope + weighted mean directly from already captured runs."""
+    if not captured_items:
+        return None
+
+    # Time axis (ms)
+    first_df = captured_items[0].get("df")
+    if not isinstance(first_df, pd.DataFrame):
+        return None
+
+    if "Time_ms" in first_df.columns:
+        t_ms = first_df["Time_ms"].to_numpy()
+    elif "Time_s" in first_df.columns:
+        t_ms = first_df["Time_s"].to_numpy() * 1000.0
+    else:
+        t_ms = np.arange(len(first_df), dtype=float)
+
+    values: list[np.ndarray] = []
+    weights: list[float] = []
+    for item in captured_items:
+        df = item.get("df")
+        if not isinstance(df, pd.DataFrame) or quantity not in df.columns:
+            continue
+        values.append(df[quantity].to_numpy())
+        try:
+            weights.append(float(item.get("weight", 1.0)))
+        except Exception:
+            weights.append(1.0)
+
+    if not values:
+        return None
+
+    vals = np.vstack(values)
+    w = np.asarray(weights, dtype=float)
+    if np.any(w < 0):
+        w = np.maximum(w, 0.0)
+    if w.sum() > 0:
+        w = w / w.sum()
+    else:
+        w[:] = 1.0 / len(w)
+
+    env = np.nanmax(vals, axis=0)
+    mean = np.average(vals, axis=0, weights=w)
+
+    return pd.DataFrame(
+        {
+            "Time_ms": t_ms,
+            f"{quantity}_envelope": env,
+            f"{quantity}_weighted_mean": mean,
+        }
+    )
 
 
 def _get_time_axis(df: pd.DataFrame) -> tuple[np.ndarray, str]:
@@ -142,7 +214,15 @@ def _zip_parametric_runs(
             scen = str(scenario_name_fn(cfg, df, idx))
             fname = f"{prefix}__{scen}.csv".replace(" ", "_")
             zf.writestr(fname, df.to_csv(index=False))
-            manifest_rows.append({"scenario": scen, **{k: cfg.get(k) for k in ("contact_model", "friction_model", "cr_wall", "mu_s", "mu_k")}})
+            manifest_rows.append(
+                {
+                    "scenario": scen,
+                    "speed_kmh": _cfg_speed_kmh(cfg),
+                    "dt_s": cfg.get("h_init"),
+                    "d0_m": cfg.get("d0"),
+                    **{k: cfg.get(k) for k in ("contact_model", "friction_model", "cr_wall", "mu_s", "mu_k")},
+                }
+            )
 
         if manifest_rows:
             man = pd.DataFrame(manifest_rows)
@@ -468,6 +548,149 @@ def main():
                         key="env_export_speed_overlay_html",
                     )
 
+                # ---------
+                # Export bundle (ZIP)
+                # ---------
+                st.markdown("#### Export study bundle")
+                st.caption(
+                    "Exports raw runs, summary tables and plots (HTML) in a single ZIP. "
+                    "Files are named by speed to make it easy to replace dissertation figures."
+                )
+
+                try:
+                    # Build derived envelopes for the three canonical quantities
+                    env_force = _compute_envelope_from_captured(captured, quantity="Impact_Force_MN")
+                    env_acc = _compute_envelope_from_captured(captured, quantity="Acceleration_g")
+                    env_pen = _compute_envelope_from_captured(captured, quantity="Penetration_mm")
+
+                    def _per_speed_overlay(qcol: str, title: str, ylab: str) -> go.Figure | None:
+                        fig = go.Figure()
+                        shown = 0
+                        for item in captured:
+                            df_i = item.get("df")
+                            meta_i = item.get("meta", {}) or {}
+                            if not isinstance(df_i, pd.DataFrame) or qcol not in df_i.columns:
+                                continue
+                            v_kmh = meta_i.get("speed_kmh", None)
+                            label = f"{float(v_kmh):.0f} km/h" if isinstance(v_kmh, (int, float)) else str(item.get("scenario", "scenario"))
+                            t_ms, _ = _get_time_axis(df_i)
+                            fig.add_trace(go.Scatter(x=t_ms, y=df_i[qcol], mode="lines", name=label))
+                            shown += 1
+                        if shown == 0:
+                            return None
+                        fig.update_layout(title=title, xaxis_title="Time (ms)", yaxis_title=ylab, height=520)
+                        return fig
+
+                    figs: dict[str, bytes] = {}
+                    for qcol, title, ylab in (
+                        ("Impact_Force_MN", "Impact force – per-speed histories", "Impact force (MN)"),
+                        ("Acceleration_g", "Acceleration – per-speed histories", "Acceleration (g)"),
+                        ("Penetration_mm", "Penetration – per-speed histories", "Penetration (mm)"),
+                    ):
+                        fig_i = _per_speed_overlay(qcol, title, ylab)
+                        if fig_i is not None:
+                            figs[f"per_speed__{qcol}"] = _fig_to_html_bytes(fig_i)
+
+                    # Envelopes plots (if available)
+                    def _env_fig(env_df: pd.DataFrame | None, qcol: str, title: str, ylab: str) -> go.Figure | None:
+                        if env_df is None or env_df.empty:
+                            return None
+                        env_col = f"{qcol}_envelope"
+                        mean_col = f"{qcol}_weighted_mean"
+                        if env_col not in env_df.columns:
+                            return None
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=env_df["Time_ms"], y=env_df[env_col], mode="lines", name="Envelope"))
+                        if mean_col in env_df.columns:
+                            fig.add_trace(go.Scatter(x=env_df["Time_ms"], y=env_df[mean_col], mode="lines", name="Weighted mean", line=dict(dash="dot")))
+                        fig.update_layout(title=title, xaxis_title="Time (ms)", yaxis_title=ylab, height=520)
+                        return fig
+
+                    for env_df, qcol, title, ylab in (
+                        (env_force, "Impact_Force_MN", "Impact force – envelope + weighted mean", "Impact force (MN)"),
+                        (env_acc, "Acceleration_g", "Acceleration – envelope + weighted mean", "Acceleration (g)"),
+                        (env_pen, "Penetration_mm", "Penetration – envelope + weighted mean", "Penetration (mm)"),
+                    ):
+                        fig_env_i = _env_fig(env_df, qcol, title, ylab)
+                        if fig_env_i is not None:
+                            figs[f"envelope__{qcol}"] = _fig_to_html_bytes(fig_env_i)
+
+                    # Runs map: name files by speed for clarity
+                    runs: dict[str, pd.DataFrame] = {}
+                    for item in captured:
+                        df_i = item.get("df")
+                        meta_i = item.get("meta", {}) or {}
+                        scen = str(item.get("scenario", "run"))
+                        v_kmh = meta_i.get("speed_kmh", None)
+                        if isinstance(v_kmh, (int, float)):
+                            scen_name = f"{scen}__{float(v_kmh):.0f}kmh"
+                        else:
+                            scen_name = scen
+                        runs[sanitize_filename(scen_name)] = df_i
+
+                    # Stacked histories
+                    # (scenario, speed_kmh, time, key quantities)
+                    long_rows: list[pd.DataFrame] = []
+                    for item in captured:
+                        df_i = item.get("df")
+                        meta_i = item.get("meta", {}) or {}
+                        if not isinstance(df_i, pd.DataFrame):
+                            continue
+                        keep = [c for c in ("Time_ms", "Time_s", "Impact_Force_MN", "Acceleration_g", "Penetration_mm") if c in df_i.columns]
+                        if not keep:
+                            continue
+                        out = df_i[keep].copy()
+                        out.insert(0, "speed_kmh", meta_i.get("speed_kmh", np.nan))
+                        out.insert(0, "scenario", str(item.get("scenario", "scenario")))
+                        long_rows.append(out)
+                    long_df = pd.concat(long_rows, ignore_index=True) if long_rows else pd.DataFrame()
+
+                    metadata = {
+                        "study": "speed_envelope",
+                        "speeds_kmh": last.get("speeds"),
+                        "weights": last.get("weights"),
+                        "base_quantity": q,
+                        "base_quantity_label": q_label,
+                        "base_speed_kmh": _cfg_speed_kmh(params),
+                        "params": {k: v for k, v in params.items() if k not in ("train", "materials")},
+                    }
+                    bundle = make_bundle_zip(
+                        study="speed_envelope",
+                        metadata=metadata,
+                        dataframes={
+                            "summary": summary_df,
+                            "histories_long": long_df,
+                            "envelope_force": env_force if env_force is not None else pd.DataFrame(),
+                            "envelope_acc": env_acc if env_acc is not None else pd.DataFrame(),
+                            "envelope_pen": env_pen if env_pen is not None else pd.DataFrame(),
+                        },
+                        plots_html=figs,
+                        runs=runs,
+                        extra_files={
+                            "replot_matplotlib.py": replot_matplotlib_script(),
+                            "README.txt": (
+                                "Speed envelope (Umhüllende) export bundle\n"
+                                "\n"
+                                "Contents:\n"
+                                "- data/: summary, stacked histories, envelopes\n"
+                                "- runs/: one CSV per speed scenario\n"
+                                "- plots/: Plotly HTML overlays/envelopes\n"
+                            )
+                        },
+                    )
+
+                    safe_download_button(
+                        st,
+                        label="📦 Export speed-envelope bundle (ZIP)",
+                        data=bundle,
+                        file_name=f"speed_envelope__{sanitize_filename(str(q))}__{utc_timestamp()}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                        key="env_export_bundle_zip",
+                    )
+                except Exception as exc:
+                    st.warning(f"Bundle export not available: {exc}")
+
                 if show_envelope_curves:
                     fig_env = go.Figure()
                     env_col = f"{q}_envelope" if f"{q}_envelope" in envelope_df.columns else q
@@ -768,6 +991,105 @@ def main():
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             width="stretch",
                         )
+
+                    # One-click bundle: raw runs + tables + plots (HTML)
+                    st.markdown("#### Export bundle (paper-friendly)")
+                    st.caption(
+                        "Creates a single ZIP containing: raw runs, summary tables, stacked histories, "
+                        "and the key overlay plots. Filenames include the current speed for traceability."
+                    )
+                    try:
+                        plots: dict[str, bytes] = {}
+
+                        # Always include the canonical overlays if data exists
+                        if any("Impact_Force_MN" in d.columns for _, d in captured):
+                            figF2 = _plot_time_history_overlay(
+                                captured,
+                                "Impact_Force_MN",
+                                int(max_runs),
+                                lambda cfg, df, idx: scen_name(cfg, df, idx),
+                                title="Impact force – time (overlay)",
+                            )
+                            plots["overlay__Impact_Force_MN"] = _fig_to_html_bytes(figF2)
+
+                        if any("Acceleration_g" in d.columns for _, d in captured):
+                            figA2 = _plot_time_history_overlay(
+                                captured,
+                                "Acceleration_g",
+                                int(max_runs),
+                                lambda cfg, df, idx: scen_name(cfg, df, idx),
+                                title="Acceleration – time (overlay)",
+                            )
+                            plots["overlay__Acceleration_g"] = _fig_to_html_bytes(figA2)
+
+                        if any("Penetration_mm" in d.columns for _, d in captured):
+                            figP2 = _plot_time_history_overlay(
+                                captured,
+                                "Penetration_mm",
+                                int(max_runs),
+                                lambda cfg, df, idx: scen_name(cfg, df, idx),
+                                title="Penetration – time (overlay)",
+                            )
+                            plots["overlay__Penetration_mm"] = _fig_to_html_bytes(figP2)
+
+                        # Force–penetration plots for each scenario (time gradient)
+                        for i, (cfg_i, df_i) in enumerate(captured[: int(max_runs)]):
+                            if not (
+                                isinstance(df_i, pd.DataFrame)
+                                and "Impact_Force_MN" in df_i.columns
+                                and "Penetration_mm" in df_i.columns
+                            ):
+                                continue
+                            name_i = sanitize_filename(scen_name(cfg_i, df_i, i))
+                            plots[f"force_penetration__{name_i}"] = _fig_to_html_bytes(
+                                _force_penetration_time_gradient(
+                                    df_i, title=f"Force–penetration (time gradient) – {name_i}"
+                                )
+                            )
+
+                        runs_map: dict[str, pd.DataFrame] = {}
+                        for i, (cfg_i, df_i) in enumerate(captured):
+                            name_i = sanitize_filename(scen_name(cfg_i, df_i, i))
+                            sp = _cfg_speed_kmh(cfg_i)
+                            if isinstance(sp, (int, float)):
+                                name_i = f"v{float(sp):.0f}kmh__{name_i}"
+                            runs_map[name_i] = df_i
+
+                        meta = {
+                            "study": "contact_force_models",
+                            "base_speed_kmh": _cfg_speed_kmh(params),
+                            "params": {k: v for k, v in params.items() if k not in ("train", "materials")},
+                        }
+
+                        bundle = make_bundle_zip(
+                            study="contact_force_models",
+                            metadata=meta,
+                            dataframes={
+                                "summary": summary_df,
+                                "histories_long": long_df,
+                            },
+                            plots_html=plots,
+                            runs=runs_map,
+                            extra_files={
+                                "replot_matplotlib.py": replot_matplotlib_script(),
+                                "README.txt": (
+                                    "Contact force model sweep export bundle\n\n"
+                                    "- data/: summary + stacked histories\n"
+                                    "- runs/: raw time histories (one CSV per model)\n"
+                                    "- plots/: overlay plots + force-penetration (time gradient)\n"
+                                )
+                            },
+                        )
+                        safe_download_button(
+                            st,
+                            "📦 Export contact-model bundle (ZIP)",
+                            bundle,
+                            f"contact_models__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
+                            "application/zip",
+                            width="stretch",
+                        )
+                    except Exception as exc:
+                        st.warning(f"Bundle export not available: {exc}")
 
         # --------------------------
         # Friction / restitution sweep
@@ -1096,6 +1418,104 @@ def main():
                             width="stretch",
                         )
 
+                    # One-click bundle: raw runs + tables + plots (HTML)
+                    st.markdown("#### Export bundle (paper-friendly)")
+                    st.caption(
+                        "Creates a single ZIP containing: raw runs, summary tables, stacked histories, "
+                        "and the key overlay plots. Filenames include the current speed for traceability."
+                    )
+                    try:
+                        plots: dict[str, bytes] = {}
+
+                        if any("Impact_Force_MN" in d.columns for _, d in captured):
+                            figF2 = _plot_time_history_overlay(
+                                captured,
+                                "Impact_Force_MN",
+                                int(max_runs),
+                                lambda cfg, df, idx: scen_name(cfg, df, idx),
+                                title="Impact force – time (overlay)",
+                            )
+                            plots["overlay__Impact_Force_MN"] = _fig_to_html_bytes(figF2)
+
+                        if any("Acceleration_g" in d.columns for _, d in captured):
+                            figA2 = _plot_time_history_overlay(
+                                captured,
+                                "Acceleration_g",
+                                int(max_runs),
+                                lambda cfg, df, idx: scen_name(cfg, df, idx),
+                                title="Acceleration – time (overlay)",
+                            )
+                            plots["overlay__Acceleration_g"] = _fig_to_html_bytes(figA2)
+
+                        if any("Penetration_mm" in d.columns for _, d in captured):
+                            figP2 = _plot_time_history_overlay(
+                                captured,
+                                "Penetration_mm",
+                                int(max_runs),
+                                lambda cfg, df, idx: scen_name(cfg, df, idx),
+                                title="Penetration – time (overlay)",
+                            )
+                            plots["overlay__Penetration_mm"] = _fig_to_html_bytes(figP2)
+
+                        for i, (cfg_i, df_i) in enumerate(captured[: int(max_runs)]):
+                            if not (
+                                isinstance(df_i, pd.DataFrame)
+                                and "Impact_Force_MN" in df_i.columns
+                                and "Penetration_mm" in df_i.columns
+                            ):
+                                continue
+                            name_i = sanitize_filename(scen_name(cfg_i, df_i, i))
+                            plots[f"force_penetration__{name_i}"] = _fig_to_html_bytes(
+                                _force_penetration_time_gradient(
+                                    df_i, title=f"Force–penetration (time gradient) – {name_i}"
+                                )
+                            )
+
+                        runs_map: dict[str, pd.DataFrame] = {}
+                        for i, (cfg_i, df_i) in enumerate(captured):
+                            name_i = sanitize_filename(scen_name(cfg_i, df_i, i))
+                            sp = _cfg_speed_kmh(cfg_i)
+                            if isinstance(sp, (int, float)):
+                                name_i = f"v{float(sp):.0f}kmh__{name_i}"
+                            runs_map[name_i] = df_i
+
+                        meta = {
+                            "study": "friction_restitution_sweep",
+                            "sweep_kind": sweep_kind,
+                            "base_speed_kmh": _cfg_speed_kmh(params),
+                            "params": {k: v for k, v in params.items() if k not in ("train", "materials")},
+                        }
+
+                        bundle = make_bundle_zip(
+                            study="friction_restitution_sweep",
+                            metadata=meta,
+                            dataframes={
+                                "summary": summary_df,
+                                "histories_long": long_df,
+                            },
+                            plots_html=plots,
+                            runs=runs_map,
+                            extra_files={
+                                "replot_matplotlib.py": replot_matplotlib_script(),
+                                "README.txt": (
+                                    "Friction/restitution sweep export bundle\n\n"
+                                    "- data/: summary + stacked histories\n"
+                                    "- runs/: raw time histories (one CSV per sweep value)\n"
+                                    "- plots/: overlay plots + force-penetration (time gradient)\n"
+                                )
+                            },
+                        )
+                        safe_download_button(
+                            st,
+                            "📦 Export friction/restitution bundle (ZIP)",
+                            bundle,
+                            f"friction_sweep__{sanitize_filename(str(sweep_kind))}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
+                            "application/zip",
+                            width="stretch",
+                        )
+                    except Exception as exc:
+                        st.warning(f"Bundle export not available: {exc}")
+
         # --------------------------
         # Numerics sensitivity
         # --------------------------
@@ -1272,6 +1692,8 @@ def main():
                             exponentformat="e",
                         )
                         st.plotly_chart(fig_peak, use_container_width=True)
+                        st.session_state["dif_fig_peak_html"] = _fig_to_html_bytes(fig_peak)
+                        st.session_state["sens_fig_peak_html"] = _fig_to_html_bytes(fig_peak)
                     except Exception as e:
                         st.warning(f"Could not generate peak plot: {e}")
 
@@ -1287,6 +1709,77 @@ def main():
 
                         fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
                         st.plotly_chart(fig, use_container_width=True)
+                        st.session_state["dif_fig_overlay_html"] = _fig_to_html_bytes(fig)
+                        st.session_state["sens_fig_overlay_html"] = _fig_to_html_bytes(fig)
+
+                    # Export bundle
+                    st.markdown("#### Export bundle")
+                    try:
+                        long_df = _stack_parametric_histories(
+                            captured,
+                            scenario_name_fn=lambda cfg, df, idx: label_fn(cfg, df, idx),
+                            columns=["Impact_Force_MN", "Acceleration_g", "Penetration_mm"],
+                        )
+
+                        plots: dict[str, bytes] = {}
+                        fig_peak_html = st.session_state.get("sens_fig_peak_html", None)
+                        fig_overlay_html = st.session_state.get("sens_fig_overlay_html", None)
+                        if isinstance(fig_peak_html, (bytes, bytearray)):
+                            plots["peak_vs_dt"] = bytes(fig_peak_html)
+                        if isinstance(fig_overlay_html, (bytes, bytearray)):
+                            plots[f"overlay__{q_label}"] = bytes(fig_overlay_html)
+
+                        def _run_name(cfg, df, idx):
+                            dt = float(cfg.get("h_init", np.nan))
+                            a = float(cfg.get("alpha_hht", np.nan))
+                            tol = float(cfg.get("newton_tol", np.nan))
+                            return sanitize_filename(f"dt{dt:.2e}__a{a:+.2f}__tol{tol:.1e}")
+
+                        runs_map: dict[str, pd.DataFrame] = { _run_name(cfg, df, i): df for i, (cfg, df) in enumerate(captured) }
+
+                        meta = {
+                            "study": "numerics_sensitivity",
+                            "base_speed_kmh": _cfg_speed_kmh(params),
+                            "quantity": q_label,
+                            "criteria": {
+                                "peak_tol_pct": float(peak_tol),
+                                "impulse_tol_pct": float(impulse_tol),
+                                "penetration_tol_pct": float(pen_tol),
+                            },
+                            "params": {k: v for k, v in params.items() if k not in ("train", "materials")},
+                        }
+
+                        bundle = make_bundle_zip(
+                            study="numerics_sensitivity",
+                            metadata=meta,
+                            dataframes={
+                                "summary": summary_df,
+                                "histories_long": long_df,
+                            },
+                            plots_html=plots,
+                            runs=runs_map,
+                            extra_files={
+                                "replot_matplotlib.py": replot_matplotlib_script(),
+                                "README.txt": (
+                                    "Numerics sensitivity export bundle\n\n"
+                                    "- data/: summary + stacked histories\n"
+                                    "- runs/: raw time histories (one CSV per (dt, alpha, tol))\n"
+                                    "- plots/: overlay and peak-vs-dt (HTML)\n"
+                                )
+                            },
+                        )
+                        safe_download_button(
+                            st,
+                            "📦 Export numerics-sensitivity bundle (ZIP)",
+                            bundle,
+                            f"numerics_sensitivity__{sanitize_filename(str(q_label))}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
+                            "application/zip",
+                            width="stretch",
+                        )
+                    except Exception as exc:
+                        st.warning(f"Bundle export not available: {exc}")
+                        st.session_state["sens_fig_overlay_html"] = _fig_to_html_bytes(fig)
+
 
         # --------------------------
         # Strain-rate proxy (Fixed DIF)
@@ -1384,6 +1877,7 @@ def main():
                             height=350,
                         )
                         st.plotly_chart(fig_peak, use_container_width=True)
+                        st.session_state["dif_fig_peak_html"] = _fig_to_html_bytes(fig_peak)
                     except (KeyError, ValueError, IndexError) as e:
                         st.info(f"Peak vs DIF plot not available: {e}")
 
@@ -1398,8 +1892,79 @@ def main():
 
                         fig = _plot_time_history_overlay(captured, q_label, max_runs, label_fn)
                         st.plotly_chart(fig, use_container_width=True)
+                        st.session_state["dif_fig_overlay_html"] = _fig_to_html_bytes(fig)
 
   
+
+                    # Export bundle
+                    st.markdown("#### Export bundle")
+                    if captured:
+                        try:
+                            long_df = _stack_parametric_histories(
+                                captured,
+                                scenario_name_fn=lambda cfg, df, idx: label_fn(cfg, df, idx),
+                                columns=["Impact_Force_MN", "Acceleration_g", "Penetration_mm"],
+                            )
+
+                            plots: dict[str, bytes] = {}
+                            fig_peak_html = st.session_state.get("dif_fig_peak_html", None)
+                            fig_overlay_html = st.session_state.get("dif_fig_overlay_html", None)
+                            if isinstance(fig_peak_html, (bytes, bytearray)):
+                                plots["peak_vs_dif"] = bytes(fig_peak_html)
+                            if isinstance(fig_overlay_html, (bytes, bytearray)):
+                                plots[f"overlay__{q_label}"] = bytes(fig_overlay_html)
+
+                            runs_map: dict[str, pd.DataFrame] = {}
+                            for i, (cfg_i, df_i) in enumerate(captured):
+                                dif_val = float(summary_df["dif"].iloc[i]) if ("dif" in summary_df.columns and i < len(summary_df)) else float("nan")
+                                name_i = sanitize_filename(f"dif{dif_val:.3f}")
+                                sp = _cfg_speed_kmh(cfg_i)
+                                if isinstance(sp, (int, float)):
+                                    name_i = f"v{float(sp):.0f}kmh__{name_i}"
+                                runs_map[name_i] = df_i
+
+                            meta = {
+                                "study": "strain_rate_fixed_dif",
+                                "base_speed_kmh": _cfg_speed_kmh(params),
+                                "quantity": q_label,
+                                "difs": [float(x) for x in summary_df["dif"].tolist()] if "dif" in summary_df.columns else [],
+                                "k_path": k_path.strip(),
+                                "L_ref_m": float(L_ref_m),
+                                "params": {k: v for k, v in params.items() if k not in ("train", "materials")},
+                            }
+
+                            bundle = make_bundle_zip(
+                                study="strain_rate_fixed_dif",
+                                metadata=meta,
+                                dataframes={
+                                    "summary": summary_df,
+                                    "histories_long": long_df,
+                                },
+                                plots_html=plots,
+                                runs=runs_map,
+                                extra_files={
+                                    "replot_matplotlib.py": replot_matplotlib_script(),
+                                    "README.txt": (
+                                        "Fixed-DIF strain-rate proxy export bundle\n\n"
+                                        "- data/: summary + stacked histories\n"
+                                        "- runs/: raw time histories (one CSV per DIF)\n"
+                                        "- plots/: peak-vs-dif and overlay plot (HTML)\n"
+                                        "- extra/replot_matplotlib.py: optional Matplotlib replot helper (PNG/SVG)\n"
+                                    )
+                                },
+                            )
+                            safe_download_button(
+                                st,
+                                "📦 Export DIF bundle (ZIP)",
+                                bundle,
+                                f"dif_study__{sanitize_filename(k_path.strip())}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
+                                "application/zip",
+                                width="stretch",
+                            )
+                        except Exception as exc:
+                            st.warning(f"Bundle export not available: {exc}")
+
+
         # --------------------------
         # Solver comparison (Newton vs Picard)
         # --------------------------
@@ -1556,6 +2121,120 @@ def main():
                             height=450,
                         )
                         st.plotly_chart(fig, use_container_width=True)
+
+
+
+                # Export bundle
+                st.markdown("#### Export bundle")
+                if isinstance(series, dict) and len(series) > 0:
+                    try:
+                        runs_map: dict[str, pd.DataFrame] = {}
+                        long_rows: list[pd.DataFrame] = []
+
+                        for (solver, sp), df in series.items():
+                            name = sanitize_filename(f"v{float(sp):.0f}kmh__{solver}")
+                            runs_map[name] = df
+
+                            keep_cols = [c for c in ("Time_s", "Time_ms") if c in df.columns]
+                            keep_cols += [c for c in ("Impact_Force_MN", "Acceleration_g", "Penetration_mm") if c in df.columns]
+                            if keep_cols:
+                                tmp = df[keep_cols].copy()
+                                tmp.insert(0, "solver", str(solver))
+                                tmp.insert(0, "speed_kmh", float(sp))
+                                tmp.insert(0, "scenario", f"{solver}@{float(sp):.0f}kmh")
+                                long_rows.append(tmp)
+
+                        long_df = pd.concat(long_rows, ignore_index=True) if long_rows else pd.DataFrame()
+
+                        plots: dict[str, bytes] = {}
+
+                        # Peak vs speed
+                        try:
+                            fig_peak = go.Figure()
+                            for solver in ["newton", "picard"]:
+                                sub = summary[summary["solver"] == solver].sort_values("speed_kmh")
+                                if len(sub):
+                                    fig_peak.add_trace(go.Scatter(x=sub["speed_kmh"], y=sub["peak"], mode="lines+markers", name=f"peak_{solver}"))
+                            fig_peak.update_layout(title=f"Peak vs speed – {q_label}", xaxis_title="Speed (km/h)", yaxis_title="Peak", height=350)
+                            plots["peak_vs_speed"] = _fig_to_html_bytes(fig_peak)
+                        except Exception:
+                            pass
+
+                        # Runtime vs speed
+                        try:
+                            fig_rt = go.Figure()
+                            for solver in ["newton", "picard"]:
+                                sub = summary[summary["solver"] == solver].sort_values("speed_kmh")
+                                if len(sub):
+                                    fig_rt.add_trace(go.Scatter(x=sub["speed_kmh"], y=sub["runtime_s"], mode="lines+markers", name=f"runtime_{solver}"))
+                            fig_rt.update_layout(title="Runtime vs speed", xaxis_title="Speed (km/h)", yaxis_title="Runtime (s)", height=350)
+                            plots["runtime_vs_speed"] = _fig_to_html_bytes(fig_rt)
+                        except Exception:
+                            pass
+
+                        # Per-speed overlays
+                        try:
+                            for sp in sorted({float(v) for v in summary["speed_kmh"].unique()}):
+                                fig_ov = go.Figure()
+                                for solver in ["newton", "picard"]:
+                                    df = series.get((solver, float(sp)))
+                                    if df is None or q_label not in df.columns:
+                                        continue
+                                    t_ms, _ = _get_time_axis(df)
+                                    fig_ov.add_trace(go.Scatter(x=t_ms, y=df[q_label], mode="lines", name=f"{solver}"))
+                                fig_ov.update_layout(
+                                    title=f"{q_label} – Newton vs Picard @ {sp:.0f} km/h",
+                                    xaxis_title="Time (ms)",
+                                    yaxis_title=q_label,
+                                    height=450,
+                                )
+                                plots[f"overlay__{sanitize_filename(str(q_label))}__v{sp:.0f}kmh"] = _fig_to_html_bytes(fig_ov)
+                        except Exception:
+                            pass
+
+                        meta = {
+                            "study": "solver_comparison",
+                            "quantity": q_label,
+                            "speeds_kmh": [float(v) for v in sorted({float(v) for v in summary["speed_kmh"].unique()})],
+                            "base_speed_kmh": _cfg_speed_kmh(params),
+                            "params": {k: v for k, v in params.items() if k not in ("train", "materials")},
+                        }
+
+                        bundle = make_bundle_zip(
+                            study="solver_comparison",
+                            metadata=meta,
+                            dataframes={
+                                "summary": summary,
+                                "histories_long": long_df,
+                            },
+                            plots_html=plots,
+                            runs=runs_map,
+                            extra_files={
+                                "replot_matplotlib.py": replot_matplotlib_script(),
+                                "README.txt": (
+                                    "Solver comparison export bundle (Newton vs Picard)\n\n"
+                                    "- data/: summary + stacked histories\n"
+                                    "- runs/: raw time histories (one CSV per (speed, solver))\n"
+                                    "- plots/: peak/runtime vs speed + per-speed overlays (HTML)\n"
+                                    "- extra/replot_matplotlib.py: optional Matplotlib replot helper (PNG/SVG)\n"
+                                )
+                            },
+                        )
+
+                        speeds = meta.get("speeds_kmh", [])
+                        vmin = min(speeds) if speeds else 0.0
+                        vmax = max(speeds) if speeds else 0.0
+
+                        safe_download_button(
+                            st,
+                            "📦 Export solver-comparison bundle (ZIP)",
+                            bundle,
+                            f"solver_comparison__{sanitize_filename(str(q_label))}__{vmin:.0f}-{vmax:.0f}kmh__{utc_timestamp()}.zip",
+                            "application/zip",
+                            width="stretch",
+                        )
+                    except Exception as exc:
+                        st.warning(f"Bundle export not available: {exc}")
 
 
 # ABOUT / DOCUMENTATION TAB

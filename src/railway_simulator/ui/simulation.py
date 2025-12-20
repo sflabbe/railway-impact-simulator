@@ -35,6 +35,7 @@ from .plotting import (
     create_mass_force_displacement_plots,
     create_results_plots,
     create_spring_plots,
+    create_nodal_field_surface,
 )
 from .sdof import (
     compute_building_sdof_response,
@@ -156,12 +157,13 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
     # ------------------------------------------------------
     # 3) Tabs de resultados
     # ------------------------------------------------------
-    tab_global, tab_building, tab_train, tab_springs = st.tabs(
+    tab_global, tab_building, tab_train, tab_springs, tab_nodal = st.tabs(
         [
             "📈 Global Results",
             "🏢 Building Response (SDOF)",
             "🚃 Train Configuration",
             "🧷 Springs & Masses",
+            "🧊 Nodal Fields",
         ]
     )
 
@@ -435,21 +437,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
             )
 
             mass_fig = create_mass_kinematics_plots(df, mass_index)
-            st.markdown("#### Mass force–displacement")
-
-            mode_label = st.selectbox(
-                "Force used for mass loop",
-                ["Net (left - right)", "Left spring", "Right spring"],
-                key="ui_mass_force_mode",
-            )
-
-            mode = {"Net (left - right)": "net", "Left spring": "left", "Right spring": "right"}[mode_label]
-
-            mfd_fig = create_mass_force_displacement_plots(df, mass_index, mode=mode)
-            if mfd_fig is None:
-                st.info("No spring-force data available for this mass (or not enough masses/springs in this run).")
-            else:
-                safe_plotly_chart(st, mfd_fig, width="stretch")
+            
 
             if mass_fig is None:
                 st.info("Mass kinematics columns are not available in these results.")
@@ -536,3 +524,87 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                                 )
                             else:
                                 safe_plotly_chart(st, neighbor_fig, width="stretch")
+
+
+    with tab_nodal:
+        st.markdown("### Nodal fields (node vs time)")
+
+        import re
+
+        mass_ids = []
+        for c in df.columns:
+            mm = re.match(r"Mass(\d+)_Position_x_m$", str(c))
+            if mm:
+                mass_ids.append(int(mm.group(1)))
+        n_masses_cols = max(mass_ids) if mass_ids else 0
+        n_masses = int(
+            n_masses_cols
+            or df.attrs.get("n_masses", 0)
+            or params.get("n_masses", len(params.get("masses", [])))
+            or 0
+        )
+
+        if n_masses <= 0:
+            st.info("No nodal (per-mass) histories available in these results.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                quantity = st.selectbox(
+                    "Quantity",
+                    ["acceleration", "velocity", "position"],
+                    format_func=lambda s: s.title(),
+                    key="ui_nodal_quantity",
+                )
+            with c2:
+                component = st.selectbox(
+                    "Component",
+                    ["magnitude", "x", "y"],
+                    format_func=lambda s: s.title(),
+                    key="ui_nodal_component",
+                )
+            with c3:
+                plot_type = st.selectbox(
+                    "Plot type",
+                    ["surface", "heatmap"],
+                    format_func=lambda s: "3D surface" if s == "surface" else "2D heatmap",
+                    key="ui_nodal_plot_type",
+                )
+
+            c4, c5, c6, c7 = st.columns(4)
+            with c4:
+                log_color = st.checkbox("Log color (log10|·|)", value=True, key="ui_nodal_log")
+            with c5:
+                to_g = st.checkbox("Acceleration in g", value=True, key="ui_nodal_to_g")
+            with c6:
+                max_time_points = st.number_input(
+                    "Max time points",
+                    min_value=200,
+                    max_value=5000,
+                    value=800,
+                    step=100,
+                    key="ui_nodal_max_t",
+                )
+            with c7:
+                max_nodes = st.number_input(
+                    "Max nodes",
+                    min_value=10,
+                    max_value=200,
+                    value=min(40, n_masses),
+                    step=5,
+                    key="ui_nodal_max_nodes",
+                )
+
+            fig = create_nodal_field_surface(
+                df,
+                quantity=quantity,
+                component=component,
+                plot_type=plot_type,
+                log_color=log_color,
+                to_g=to_g,
+                max_time_points=int(max_time_points),
+                max_nodes=int(max_nodes),
+            )
+            if fig is None:
+                st.info("Required nodal columns were not found (need per-mass position/velocity/acceleration exports).")
+            else:
+                safe_plotly_chart(st, fig, width="stretch")

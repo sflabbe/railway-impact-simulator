@@ -2085,15 +2085,19 @@ class ImpactSimulator:
             }
         )
 
+
+        # Add per-mass/spring columns in one batch to avoid DataFrame fragmentation
+        extra_cols: dict[str, object] = {}
+
+        # Per-mass kinematics
         for i in range(n_masses):
             idx = i + 1
-            df[f"Mass{idx}_Position_x_m"] = q[i, :]
-            df[f"Mass{idx}_Position_y_m"] = q[n_masses + i, :]
-            df[f"Mass{idx}_Velocity_x_m_s"] = qp[i, :]
-            df[f"Mass{idx}_Velocity_y_m_s"] = qp[n_masses + i, :]
-            df[f"Mass{idx}_Acceleration_x_m_s2"] = qpp[i, :]
-            df[f"Mass{idx}_Acceleration_y_m_s2"] = qpp[n_masses + i, :]
-
+            extra_cols[f"Mass{idx}_Position_x_m"] = q[i, :]
+            extra_cols[f"Mass{idx}_Position_y_m"] = q[n_masses + i, :]
+            extra_cols[f"Mass{idx}_Velocity_x_m_s"] = qp[i, :]
+            extra_cols[f"Mass{idx}_Velocity_y_m_s"] = qp[n_masses + i, :]
+            extra_cols[f"Mass{idx}_Acceleration_x_m_s2"] = qpp[i, :]
+            extra_cols[f"Mass{idx}_Acceleration_y_m_s2"] = qpp[n_masses + i, :]
 
         # Per-mass nodal forces (exported for debugging and F–u loops)
         # These are the *applied* generalized forces in global DOFs (x/y) for each mass.
@@ -2108,18 +2112,19 @@ class ImpactSimulator:
             fx_mc = R_mass_contact[i, :]
             fy_mc = R_mass_contact[n_masses + i, :]
 
-            df[f"Mass{idx}_Force_internal_x_N"] = fx_int
-            df[f"Mass{idx}_Force_internal_y_N"] = fy_int
-            df[f"Mass{idx}_Force_wall_x_N"] = fx_wall
-            df[f"Mass{idx}_Force_wall_y_N"] = fy_wall
-            df[f"Mass{idx}_Force_friction_x_N"] = fx_fric
-            df[f"Mass{idx}_Force_friction_y_N"] = fy_fric
-            df[f"Mass{idx}_Force_mass_contact_x_N"] = fx_mc
-            df[f"Mass{idx}_Force_mass_contact_y_N"] = fy_mc
+            extra_cols[f"Mass{idx}_Force_internal_x_N"] = fx_int
+            extra_cols[f"Mass{idx}_Force_internal_y_N"] = fy_int
+            extra_cols[f"Mass{idx}_Force_wall_x_N"] = fx_wall
+            extra_cols[f"Mass{idx}_Force_wall_y_N"] = fy_wall
+            extra_cols[f"Mass{idx}_Force_friction_x_N"] = fx_fric
+            extra_cols[f"Mass{idx}_Force_friction_y_N"] = fy_fric
+            extra_cols[f"Mass{idx}_Force_mass_contact_x_N"] = fx_mc
+            extra_cols[f"Mass{idx}_Force_mass_contact_y_N"] = fy_mc
 
-            df[f"Mass{idx}_Force_total_x_N"] = fx_int + fx_wall + fx_fric + fx_mc
-            df[f"Mass{idx}_Force_total_y_N"] = fy_int + fy_wall + fy_fric + fy_mc
+            extra_cols[f"Mass{idx}_Force_total_x_N"] = fx_int + fx_wall + fx_fric + fx_mc
+            extra_cols[f"Mass{idx}_Force_total_y_N"] = fy_int + fy_wall + fy_fric + fy_mc
 
+        # Per-spring response (disp/force)
         if n_masses > 1:
             u_comp = -u_spring
             f_spring = (
@@ -2128,8 +2133,11 @@ class ImpactSimulator:
             )
             for i in range(n_masses - 1):
                 idx = i + 1
-                df[f"Spring{idx}_Disp_m"] = u_spring[i, :]
-                df[f"Spring{idx}_Force_N"] = f_spring[i, :]
+                extra_cols[f"Spring{idx}_Disp_m"] = u_spring[i, :]
+                extra_cols[f"Spring{idx}_Force_N"] = f_spring[i, :]
+
+        if extra_cols:
+            df = pd.concat([df, pd.DataFrame(extra_cols)], axis=1)
 
         # Attach some solver statistics as DataFrame metadata
         try:

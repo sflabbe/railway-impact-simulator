@@ -666,3 +666,154 @@ def create_mass_force_displacement_plots(
 
     fig.update_layout(height=900, showlegend=False, margin=dict(t=60, b=80, l=60, r=80))
     return fig
+
+
+def create_nodal_field_surface(
+    df: pd.DataFrame,
+    quantity: str = "acceleration",  # "acceleration"|"velocity"|"position"
+    component: str = "magnitude",    # "magnitude"|"x"|"y"
+    plot_type: str = "surface",      # "surface"|"heatmap"
+    log_color: bool = True,
+    to_g: bool = True,
+    max_time_points: int = 800,
+    max_nodes: int = 40,
+) -> go.Figure | None:
+    """Create a node-vs-time field plot (3D surface or 2D heatmap).
+
+    The function uses the exported per-mass kinematics columns:
+        Mass{i}_Position_x_m, Mass{i}_Velocity_x_m_s, Mass{i}_Acceleration_x_m_s2 (and _y_*)
+
+    Args:
+        df: simulation DataFrame.
+        quantity: which kinematic field to plot.
+        component: component selection (x/y/magnitude).
+        plot_type: "surface" (3D) or "heatmap" (2D).
+        log_color: if True, color scale is log10(|field|).
+        to_g: if True and quantity=="acceleration", convert to g.
+        max_time_points: downsample along time axis for performance.
+        max_nodes: downsample number of nodes for performance.
+
+    Returns:
+        Plotly figure or None if required columns are not present.
+    """
+    import re
+
+    time_col = "Time_s" if "Time_s" in df.columns else ("Time_ms" if "Time_ms" in df.columns else None)
+    if time_col is None:
+        return None
+
+    # Infer available mass ids
+    mass_ids = []
+    for c in df.columns:
+        mm = re.match(r"Mass(\d+)_Position_x_m$", str(c))
+        if mm:
+            mass_ids.append(int(mm.group(1)))
+    n_masses = max(mass_ids) if mass_ids else int(df.attrs.get("n_masses", 0) or 0)
+    if n_masses <= 0:
+        return None
+
+    # Select base column name
+    if quantity == "acceleration":
+        cx = "Acceleration_x_m_s2"
+        cy = "Acceleration_y_m_s2"
+        unit = "g" if to_g else "m/s²"
+    elif quantity == "velocity":
+        cx = "Velocity_x_m_s"
+        cy = "Velocity_y_m_s"
+        unit = "m/s"
+    elif quantity == "position":
+        cx = "Position_x_m"
+        cy = "Position_y_m"
+        unit = "m"
+    else:
+        return None
+
+    # Build full matrices (nodes x time)
+    cols_x = [f"Mass{i}_{cx}" for i in range(1, n_masses + 1)]
+    cols_y = [f"Mass{i}_{cy}" for i in range(1, n_masses + 1)]
+    if not all(c in df.columns for c in cols_x):
+        return None
+
+    X = df[cols_x].to_numpy().T  # (nodes, time)
+    Y = df[cols_y].to_numpy().T if all(c in df.columns for c in cols_y) else None
+
+    if component == "x":
+        field = X
+    elif component == "y":
+        if Y is None:
+            return None
+        field = Y
+    else:
+        # magnitude
+        field = (X if Y is None else (X**2 + Y**2) ** 0.5)
+
+    if quantity == "acceleration" and to_g:
+        field = field / 9.80665
+
+    t = df[time_col].to_numpy()
+    # Normalize time to seconds for axes
+    if time_col == "Time_ms":
+        t = t / 1000.0
+
+    # Downsample for performance
+    import numpy as np
+
+    n_nodes, n_t = field.shape
+
+    def _pick(n: int, nmax: int):
+        if n <= nmax:
+            return np.arange(n)
+        return np.linspace(0, n - 1, nmax).astype(int)
+
+    ti = _pick(n_t, max_time_points)
+    ni = _pick(n_nodes, max_nodes)
+
+    field_ds = field[np.ix_(ni, ti)]
+    t_ds = t[ti]
+    nodes = (ni + 1).astype(int)
+
+    eps = 1e-12
+    if log_color:
+        cval = np.log10(np.maximum(np.abs(field_ds), eps))
+        ctitle = f"log10(|{quantity}|)"
+    else:
+        cval = field_ds
+        ctitle = f"{quantity}"
+
+    if plot_type == "heatmap":
+        fig = go.Figure(
+            data=go.Heatmap(
+                x=t_ds,
+                y=nodes,
+                z=cval,
+                colorbar=dict(title=ctitle),
+            )
+        )
+        fig.update_layout(
+            height=520,
+            margin=dict(l=40, r=20, t=40, b=40),
+            xaxis_title="Time (s)",
+            yaxis_title="Node / mass index",
+        )
+        return fig
+
+    # surface
+    fig = go.Figure(
+        data=go.Surface(
+            x=t_ds,
+            y=nodes,
+            z=np.abs(field_ds),
+            surfacecolor=cval,
+            colorbar=dict(title=ctitle),
+        )
+    )
+    fig.update_layout(
+        height=620,
+        margin=dict(l=40, r=20, t=40, b=40),
+        scene=dict(
+            xaxis_title="Time (s)",
+            yaxis_title="Node / mass index",
+            zaxis_title=f"|{quantity}| ({unit})",
+        ),
+    )
+    return fig

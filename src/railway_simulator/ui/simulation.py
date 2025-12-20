@@ -36,6 +36,8 @@ from .plotting import (
     create_results_plots,
     create_spring_plots,
     create_nodal_field_surface,
+    estimate_nodal_field_color_range,
+    export_nodal_field_heatmap_bytes,
 )
 from .sdof import (
     compute_building_sdof_response,
@@ -525,9 +527,11 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                             else:
                                 safe_plotly_chart(st, neighbor_fig, width="stretch")
 
-
     with tab_nodal:
         st.markdown("### Nodal fields (node vs time)")
+
+        # --------- Paper default ---------
+        # heatmap + contours + log_color + to_g
 
         import re
 
@@ -547,49 +551,84 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
         if n_masses <= 0:
             st.info("No nodal (per-mass) histories available in these results.")
         else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
+            row1 = st.columns(4)
+            with row1[0]:
                 quantity = st.selectbox(
                     "Quantity",
                     ["acceleration", "velocity", "position"],
+                    index=0,
                     format_func=lambda s: s.title(),
                     key="ui_nodal_quantity",
                 )
-            with c2:
+            with row1[1]:
                 component = st.selectbox(
                     "Component",
                     ["magnitude", "x", "y"],
+                    index=0,
                     format_func=lambda s: s.title(),
                     key="ui_nodal_component",
                 )
-            with c3:
+            with row1[2]:
                 plot_type = st.selectbox(
                     "Plot type",
-                    ["surface", "heatmap"],
-                    format_func=lambda s: "3D surface" if s == "surface" else "2D heatmap",
+                    ["heatmap", "surface"],
+                    index=0,  # paper default
+                    format_func=lambda s: "2D heatmap (paper)" if s == "heatmap" else "3D surface (wow)",
                     key="ui_nodal_plot_type",
                 )
+            with row1[3]:
+                time_unit = st.selectbox(
+                    "Time axis",
+                    ["ms", "s"],
+                    index=0,  # paper default
+                    format_func=lambda s: "ms" if s == "ms" else "s",
+                    key="ui_nodal_time_unit",
+                )
 
-            c4, c5, c6, c7 = st.columns(4)
-            with c4:
+            row2 = st.columns(5)
+            with row2[0]:
                 log_color = st.checkbox("Log color (log10|·|)", value=True, key="ui_nodal_log")
-            with c5:
+            with row2[1]:
                 to_g = st.checkbox("Acceleration in g", value=True, key="ui_nodal_to_g")
-            with c6:
+            with row2[2]:
+                add_contours = st.checkbox(
+                    "Contours",
+                    value=True,  # paper default
+                    disabled=(plot_type != "heatmap"),
+                    key="ui_nodal_contours",
+                )
+            with row2[3]:
+                downsample_mode = st.selectbox(
+                    "Downsampling",
+                    ["impact", "uniform"],
+                    index=0,  # paper default
+                    format_func=lambda s: "Impact-focused" if s == "impact" else "Uniform",
+                    key="ui_nodal_downsample_mode",
+                )
+            with row2[4]:
+                impact_window_ms = st.number_input(
+                    "Impact window (ms)",
+                    min_value=1.0,
+                    max_value=300.0,
+                    value=30.0,
+                    step=5.0,
+                    disabled=(downsample_mode != "impact"),
+                    key="ui_nodal_impact_window_ms",
+                )
+
+            row3 = st.columns(4)
+            with row3[0]:
                 max_time_points = st.number_input(
                     "Max time points",
                     min_value=200,
                     max_value=5000,
-                    value=800,
+                    value=1400 if plot_type == "heatmap" else 800,
                     step=100,
                     key="ui_nodal_max_t",
                 )
-            with c7:
-                # Sanitize persisted widget state when the number of masses changes.
-                # Otherwise Streamlit can crash if the stored/default value is outside
-                # the [min_value, max_value] bounds (e.g. n_masses < 10).
-                max_nodes_cap = min(200, max(1, int(n_masses)))
-                default_nodes = min(40, max_nodes_cap)
+            with row3[1]:
+                max_nodes_cap = min(400, max(1, int(n_masses)))
+                default_nodes = min(120, max_nodes_cap)
 
                 prev_nodes = st.session_state.get("ui_nodal_max_nodes", default_nodes)
                 try:
@@ -607,6 +646,54 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                     step=1,
                     key="ui_nodal_max_nodes",
                 )
+            with row3[2]:
+                lock_scale = st.checkbox(
+                    "Fixed color scale",
+                    value=True,  # paper default
+                    key="ui_nodal_lock_scale",
+                )
+            with row3[3]:
+                if st.button("Reset scale", use_container_width=True, key="ui_nodal_reset_scale"):
+                    # Clear all stored scales
+                    for k in list(st.session_state.keys()):
+                        if str(k).startswith("ui_nodal_scale::"):
+                            del st.session_state[k]
+
+            # Fixed color scale (robust quantile-based)
+            cmin = None
+            cmax = None
+            if lock_scale:
+                scale_key = f"ui_nodal_scale::{quantity}::{component}::{int(log_color)}::{int(to_g)}"
+                if scale_key not in st.session_state:
+                    est = estimate_nodal_field_color_range(
+                        df,
+                        quantity=quantity,
+                        component=component,
+                        log_color=log_color,
+                        to_g=to_g,
+                    )
+                    if est is not None:
+                        st.session_state[scale_key] = tuple(est)
+
+                est = st.session_state.get(scale_key, None)
+                if est is not None:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        cmin = st.number_input(
+                            "cmin",
+                            value=float(est[0]),
+                            key=f"{scale_key}::cmin",
+                            format="%.6f",
+                        )
+                    with c2:
+                        cmax = st.number_input(
+                            "cmax",
+                            value=float(est[1]),
+                            key=f"{scale_key}::cmax",
+                            format="%.6f",
+                        )
+                    # Persist edits
+                    st.session_state[scale_key] = (float(cmin), float(cmax))
 
             fig = create_nodal_field_surface(
                 df,
@@ -615,10 +702,87 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 plot_type=plot_type,
                 log_color=log_color,
                 to_g=to_g,
+                time_unit=time_unit,
+                add_contours=bool(add_contours),
+                cmin=cmin,
+                cmax=cmax,
+                downsample_mode=downsample_mode,
+                impact_window_ms=float(impact_window_ms),
                 max_time_points=int(max_time_points),
                 max_nodes=int(max_nodes),
             )
+
             if fig is None:
-                st.info("Required nodal columns were not found (need per-mass position/velocity/acceleration exports).")
+                st.info(
+                    "Required nodal columns were not found (need per-mass position/velocity/acceleration exports)."
+                )
             else:
                 safe_plotly_chart(st, fig, width="stretch")
+
+            st.markdown("#### Export figure")
+            if plot_type != "heatmap":
+                st.caption("Export is currently enabled for the 2D heatmap (paper view). Switch plot type to heatmap.")
+            else:
+                export_col1, export_col2 = st.columns(2)
+                base = f"nodal_{quantity}_{component}_{time_unit}"
+
+                png_bytes = export_nodal_field_heatmap_bytes(
+                    df,
+                    quantity=quantity,
+                    component=component,
+                    log_color=log_color,
+                    to_g=to_g,
+                    time_unit=time_unit,
+                    add_contours=bool(add_contours),
+                    cmin=cmin,
+                    cmax=cmax,
+                    max_time_points=int(max_time_points),
+                    max_nodes=int(max_nodes),
+                    downsample_mode=downsample_mode,
+                    impact_window_ms=float(impact_window_ms),
+                    fmt="png",
+                    dpi=300,
+                )
+
+                svg_bytes = export_nodal_field_heatmap_bytes(
+                    df,
+                    quantity=quantity,
+                    component=component,
+                    log_color=log_color,
+                    to_g=to_g,
+                    time_unit=time_unit,
+                    add_contours=bool(add_contours),
+                    cmin=cmin,
+                    cmax=cmax,
+                    max_time_points=int(max_time_points),
+                    max_nodes=int(max_nodes),
+                    downsample_mode=downsample_mode,
+                    impact_window_ms=float(impact_window_ms),
+                    fmt="svg",
+                    dpi=300,
+                )
+
+                if png_bytes is not None:
+                    safe_download_button(
+                        export_col1,
+                        "🖼️ Export PNG (300 dpi)",
+                        png_bytes,
+                        f"{base}.png",
+                        "image/png",
+                        width="stretch",
+                    )
+                else:
+                    export_col1.info("PNG export not available (missing nodal data).")
+
+                if svg_bytes is not None:
+                    safe_download_button(
+                        export_col2,
+                        "🧾 Export SVG",
+                        svg_bytes,
+                        f"{base}.svg",
+                        "image/svg+xml",
+                        width="stretch",
+                    )
+                else:
+                    export_col2.info("SVG export not available (missing nodal data).")
+

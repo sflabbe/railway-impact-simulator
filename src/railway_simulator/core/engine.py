@@ -352,27 +352,68 @@ class FrictionModels:
     def lugre(z_prev: float, v: float, F_coulomb: float, F_static: float,
               v_stribeck: float, sigma_0: float, sigma_1: float,
               sigma_2: float, h: float) -> Tuple[float, float]:
-        """LuGre friction model."""
+        """LuGre friction model.
+
+        Notes
+        -----
+        The internal bristle state ODE
+
+            z_dot = v - |v| * z / g(v)
+
+        can become stiff when g(v) is small and/or when the time step is large.
+        A naive explicit Euler update makes friction sweeps artificially sensitive
+        to Δt and may create non-physical outliers (e.g. one μ case behaving very
+        differently).
+
+        Here we use the closed-form solution for constant (v, g) over one step,
+        which is unconditionally stable:
+
+            z_{n+1} = z_n e^{-k h} + g sign(v) (1 - e^{-k h}),   k = |v| / g
+
+        and then evaluate z_dot at the end of the step for the damping term.
+        """
         v_stribeck = max(abs(v_stribeck), 1e-10)
-        g = (F_coulomb + (F_static - F_coulomb) *
-             np.exp(-(v / v_stribeck) ** 2)) / sigma_0
+        # g(v) is the steady-state bristle deflection (units of length)
+        g = (F_coulomb + (F_static - F_coulomb) * np.exp(-(v / v_stribeck) ** 2)) / max(abs(sigma_0), 1e-12)
+        g = max(abs(g), 1e-12)
 
-        z_dot = v - np.abs(v) * z_prev / g
-        z = z_prev + z_dot * h
-        F = sigma_0 * z + sigma_1 * z_dot + sigma_2 * v
+        v_abs = float(np.abs(v))
+        if v_abs < 1e-12:
+            # No slip: keep bristle state, no velocity-dependent terms
+            z = z_prev
+            z_dot = 0.0
+        else:
+            k = v_abs / g
+            # Stable closed-form update for the linear ODE
+            exp_kh = float(np.exp(-k * h))
+            z = float(z_prev) * exp_kh + float(np.sign(v)) * g * (1.0 - exp_kh)
+            # Evaluate z_dot at the end of the step for sigma_1 term
+            z_dot = float(v) - v_abs * z / g
 
+        F = float(sigma_0) * z + float(sigma_1) * z_dot + float(sigma_2) * float(v)
         return F, z
 
     @staticmethod
     def dahl(z_prev: float, v: float, F_coulomb: float,
              sigma_0: float, h: float) -> Tuple[float, float]:
-        """Dahl friction model."""
-        Fc = max(abs(F_coulomb), SimulationConstants.ZERO_TOL)
-        z_dot = (1.0 - sigma_0 / Fc * z_prev * np.sign(v)) * v
-        z = z_prev + z_dot * h
-        F = sigma_0 * z
+        """Dahl friction model.
 
-        return F, z
+        Uses a stable closed-form update of the internal state for constant
+        velocity sign over one time step (same motivation as LuGre).
+        """
+        Fc = max(abs(F_coulomb), SimulationConstants.ZERO_TOL)
+        v_abs = float(np.abs(v))
+        if v_abs < 1e-12:
+            z = z_prev
+        else:
+            # z_dot = v - (sigma_0 * |v| / Fc) * z
+            k = float(sigma_0) * v_abs / float(Fc)
+            exp_kh = float(np.exp(-k * h))
+            z_ss = float(Fc) / max(float(sigma_0), 1e-12) * float(np.sign(v))
+            z = float(z_prev) * exp_kh + z_ss * (1.0 - exp_kh)
+
+        F = float(sigma_0) * float(z)
+        return F, float(z)
 
     @staticmethod
     def coulomb_stribeck(v: float, Fc: float, Fs: float,
@@ -821,15 +862,31 @@ class ImpactSimulator:
         self.integrator = HHTAlphaIntegrator(p.alpha_hht)
 
         # Pre-compute friction enablement (optimization)
-        self.friction_enabled = not (
-            p.friction_model in ("none", "off", "", None)
-            or (abs(p.mu_s) < SimulationConstants.ZERO_TOL and abs(p.mu_k) < SimulationConstants.ZERO_TOL)
-            or (
-                abs(p.sigma_0) < SimulationConstants.ZERO_TOL
-                and abs(p.sigma_1) < SimulationConstants.ZERO_TOL
-                and abs(p.sigma_2) < SimulationConstants.ZERO_TOL
-            )
+        #
+        # NOTE: In earlier versions we disabled friction when (sigma_0,sigma_1,sigma_2)==0.
+        # That unintentionally disables *Coulomb/Stribeck* friction sweeps, because those
+        # models do not require LuGre bristle parameters.
+        #
+        # Here we enable friction whenever:
+        # - friction_model is not off/none
+        # - and either mu is non-zero OR any sigma term is non-zero
+        fm = (p.friction_model or "none").strip().lower()
+        mu_zero = (abs(p.mu_s) < SimulationConstants.ZERO_TOL and abs(p.mu_k) < SimulationConstants.ZERO_TOL)
+        sigma_all_zero = (
+            abs(p.sigma_0) < SimulationConstants.ZERO_TOL
+            and abs(p.sigma_1) < SimulationConstants.ZERO_TOL
+            and abs(p.sigma_2) < SimulationConstants.ZERO_TOL
         )
+        self.friction_enabled = not (fm in ("none", "off", "") or (mu_zero and sigma_all_zero))
+
+        # Guard LuGre/Dahl against sigma_0 == 0 (division by zero / extremely slow convergence).
+        # If the user selected LuGre/Dahl with mu != 0 but forgot sigma_0, pick a sensible default
+        # so parametric sweeps actually show an effect without extra UI knobs.
+        if self.friction_enabled and fm in ("lugre", "dahl") and abs(p.sigma_0) < SimulationConstants.ZERO_TOL and not mu_zero:
+            p.sigma_0 = 1.0e6
+            if fm == "lugre" and abs(p.sigma_1) < SimulationConstants.ZERO_TOL:
+                p.sigma_1 = 1.0e3
+
 
 
     # ----------------------------------------------------------------

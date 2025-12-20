@@ -668,47 +668,267 @@ def create_mass_force_displacement_plots(
     return fig
 
 
-def create_nodal_field_surface(
-    df: pd.DataFrame,
-    quantity: str = "acceleration",  # "acceleration"|"velocity"|"position"
-    component: str = "magnitude",    # "magnitude"|"x"|"y"
-    plot_type: str = "surface",      # "surface"|"heatmap"
-    log_color: bool = True,
-    to_g: bool = True,
-    max_time_points: int = 800,
-    max_nodes: int = 40,
-) -> go.Figure | None:
-    """Create a node-vs-time field plot (3D surface or 2D heatmap).
 
-    The function uses the exported per-mass kinematics columns:
-        Mass{i}_Position_x_m, Mass{i}_Velocity_x_m_s, Mass{i}_Acceleration_x_m_s2 (and _y_*)
 
-    Args:
-        df: simulation DataFrame.
-        quantity: which kinematic field to plot.
-        component: component selection (x/y/magnitude).
-        plot_type: "surface" (3D) or "heatmap" (2D).
-        log_color: if True, color scale is log10(|field|).
-        to_g: if True and quantity=="acceleration", convert to g.
-        max_time_points: downsample along time axis for performance.
-        max_nodes: downsample number of nodes for performance.
-
-    Returns:
-        Plotly figure or None if required columns are not present.
-    """
+def _infer_n_masses_from_df(df: pd.DataFrame) -> int:
+    """Infer number of masses from exported column names."""
     import re
 
-    time_col = "Time_s" if "Time_s" in df.columns else ("Time_ms" if "Time_ms" in df.columns else None)
-    if time_col is None:
-        return None
-
-    # Infer available mass ids
     mass_ids = []
     for c in df.columns:
         mm = re.match(r"Mass(\d+)_Position_x_m$", str(c))
         if mm:
             mass_ids.append(int(mm.group(1)))
-    n_masses = max(mass_ids) if mass_ids else int(df.attrs.get("n_masses", 0) or 0)
+    return int(max(mass_ids) if mass_ids else int(df.attrs.get("n_masses", 0) or 0))
+
+
+def estimate_nodal_field_color_range(
+    df: pd.DataFrame,
+    *,
+    quantity: str = "acceleration",
+    component: str = "magnitude",
+    log_color: bool = True,
+    to_g: bool = True,
+    q_low: float = 0.02,
+    q_high: float = 0.98,
+) -> tuple[float, float] | None:
+    """Estimate robust (cmin, cmax) for nodal-field plots.
+
+    The returned range is in the *same space as the color values*:
+    - if log_color=True: log10(|field|)
+    - else: field
+
+    Uses quantiles to avoid a single spike dominating the scale.
+    """
+    import numpy as np
+
+    n_masses = _infer_n_masses_from_df(df)
+    if n_masses <= 0:
+        return None
+
+    # Select base column name
+    if quantity == "acceleration":
+        cx = "Acceleration_x_m_s2"
+        cy = "Acceleration_y_m_s2"
+    elif quantity == "velocity":
+        cx = "Velocity_x_m_s"
+        cy = "Velocity_y_m_s"
+    elif quantity == "position":
+        cx = "Position_x_m"
+        cy = "Position_y_m"
+    else:
+        return None
+
+    cols_x = [f"Mass{i}_{cx}" for i in range(1, n_masses + 1)]
+    cols_y = [f"Mass{i}_{cy}" for i in range(1, n_masses + 1)]
+    if not all(c in df.columns for c in cols_x):
+        return None
+
+    X = df[cols_x].to_numpy().T
+    Y = df[cols_y].to_numpy().T if all(c in df.columns for c in cols_y) else None
+
+    if component == "x":
+        field = X
+    elif component == "y":
+        if Y is None:
+            return None
+        field = Y
+    else:
+        field = (X if Y is None else (X**2 + Y**2) ** 0.5)
+
+    if quantity == "acceleration" and to_g:
+        field = field / 9.80665
+
+    eps = 1e-12
+    if log_color:
+        vals = np.log10(np.maximum(np.abs(field).ravel(), eps))
+    else:
+        vals = field.ravel()
+
+    # Guard against NaNs
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None
+
+    lo = float(np.quantile(vals, q_low))
+    hi = float(np.quantile(vals, q_high))
+    if lo == hi:
+        # fallback: small symmetric pad
+        hi = lo + 1e-9
+    return (lo, hi)
+
+
+def _downsample_time_indices(
+    field: "np.ndarray",
+    t_ms: "np.ndarray",
+    *,
+    max_time_points: int,
+    mode: str = "uniform",  # "uniform" | "impact"
+    impact_window_ms: float = 30.0,
+) -> "np.ndarray":
+    """Pick time indices with either uniform sampling or impact-focused sampling."""
+    import numpy as np
+
+    n_t = field.shape[1]
+    if n_t <= max_time_points:
+        return np.arange(n_t, dtype=int)
+
+    if mode not in {"uniform", "impact"}:
+        mode = "uniform"
+
+    if mode == "uniform":
+        return np.linspace(0, n_t - 1, max_time_points).astype(int)
+
+    # Impact-focused: detect peak of envelope over nodes
+    env = np.max(np.abs(field), axis=0)
+    peak_i = int(np.argmax(env))
+    t_peak = float(t_ms[peak_i])
+
+    half = 0.5 * float(impact_window_ms)
+    lo_t = t_peak - half
+    hi_t = t_peak + half
+
+    in_win = np.where((t_ms >= lo_t) & (t_ms <= hi_t))[0]
+    out_win = np.where((t_ms < lo_t) | (t_ms > hi_t))[0]
+
+    # Allocate more points to the impact window
+    n_dense = int(max_time_points * 0.7)
+    n_sparse = max_time_points - n_dense
+
+    def pick(arr: "np.ndarray", k: int) -> "np.ndarray":
+        if arr.size == 0 or k <= 0:
+            return np.array([], dtype=int)
+        if arr.size <= k:
+            return arr.astype(int)
+        return arr[np.linspace(0, arr.size - 1, k).astype(int)].astype(int)
+
+    sel = np.unique(np.concatenate([pick(in_win, n_dense), pick(out_win, n_sparse)]))
+    sel.sort()
+
+    # Ensure we always include endpoints (nice for axes)
+    sel = np.unique(np.concatenate([[0, n_t - 1], sel]))
+    sel.sort()
+
+    # If we went slightly over budget, thin uniformly
+    if sel.size > max_time_points:
+        sel = sel[np.linspace(0, sel.size - 1, max_time_points).astype(int)]
+    return sel.astype(int)
+
+
+def export_nodal_field_heatmap_bytes(
+    df: pd.DataFrame,
+    *,
+    quantity: str = "acceleration",
+    component: str = "magnitude",
+    log_color: bool = True,
+    to_g: bool = True,
+    time_unit: str = "ms",  # "ms"|"s"
+    add_contours: bool = True,
+    cmin: float | None = None,
+    cmax: float | None = None,
+    max_time_points: int = 2000,
+    max_nodes: int = 200,
+    downsample_mode: str = "impact",
+    impact_window_ms: float = 30.0,
+    fmt: str = "png",  # "png"|"svg"
+    dpi: int = 300,
+) -> bytes | None:
+    """Export the nodal field heatmap (paper-style) as PNG/SVG bytes.
+
+    Uses Matplotlib (no kaleido dependency).
+    """
+    import io
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    data = _compute_nodal_field_matrix(
+        df,
+        quantity=quantity,
+        component=component,
+        log_color=log_color,
+        to_g=to_g,
+        time_unit=time_unit,
+        max_time_points=max_time_points,
+        max_nodes=max_nodes,
+        downsample_mode=downsample_mode,
+        impact_window_ms=impact_window_ms,
+        cmin=cmin,
+        cmax=cmax,
+        for_export=True,
+    )
+    if data is None:
+        return None
+
+    t, nodes, z, meta = data
+
+    fig, ax = plt.subplots(figsize=(7.2, 3.6), constrained_layout=True)
+
+    extent = [float(t[0]), float(t[-1]), float(nodes[0]), float(nodes[-1])]
+    im = ax.imshow(
+        z,
+        origin='lower',
+        aspect='auto',
+        extent=extent,
+        vmin=meta.get('cmin', None),
+        vmax=meta.get('cmax', None),
+    )
+
+    if add_contours:
+        # Reasonable number of levels; fall back if range is tiny
+        zmin = float(np.nanmin(z))
+        zmax = float(np.nanmax(z))
+        if np.isfinite(zmin) and np.isfinite(zmax) and (zmax - zmin) > 1e-12:
+            levels = np.linspace(zmin, zmax, 18)
+            # Build grid for contour
+            tt = np.linspace(float(t[0]), float(t[-1]), z.shape[1])
+            nn = np.linspace(float(nodes[0]), float(nodes[-1]), z.shape[0])
+            TT, NN = np.meshgrid(tt, nn)
+            ax.contour(TT, NN, z, levels=levels, linewidths=0.35, alpha=0.55)
+
+    ax.set_xlabel(meta['x_label'])
+    ax.set_ylabel('Node number')
+
+    cbar = fig.colorbar(im, ax=ax, pad=0.02)
+    cbar.set_label(meta['cbar_title'])
+
+    buf = io.BytesIO()
+    fmt = fmt.lower().strip()
+    if fmt == 'svg':
+        fig.savefig(buf, format='svg')
+    else:
+        fig.savefig(buf, format='png', dpi=int(dpi))
+    plt.close(fig)
+
+    return buf.getvalue()
+
+
+def _compute_nodal_field_matrix(
+    df: pd.DataFrame,
+    *,
+    quantity: str,
+    component: str,
+    plot_type: str | None = None,
+    log_color: bool,
+    to_g: bool,
+    time_unit: str,
+    max_time_points: int,
+    max_nodes: int,
+    downsample_mode: str,
+    impact_window_ms: float,
+    cmin: float | None,
+    cmax: float | None,
+    for_export: bool = False,
+):
+    """Shared computation: returns (t_axis, nodes, color_matrix, meta)."""
+    import numpy as np
+
+    time_col = "Time_s" if "Time_s" in df.columns else ("Time_ms" if "Time_ms" in df.columns else None)
+    if time_col is None:
+        return None
+
+    n_masses = _infer_n_masses_from_df(df)
     if n_masses <= 0:
         return None
 
@@ -728,13 +948,12 @@ def create_nodal_field_surface(
     else:
         return None
 
-    # Build full matrices (nodes x time)
     cols_x = [f"Mass{i}_{cx}" for i in range(1, n_masses + 1)]
     cols_y = [f"Mass{i}_{cy}" for i in range(1, n_masses + 1)]
     if not all(c in df.columns for c in cols_x):
         return None
 
-    X = df[cols_x].to_numpy().T  # (nodes, time)
+    X = df[cols_x].to_numpy().T
     Y = df[cols_y].to_numpy().T if all(c in df.columns for c in cols_y) else None
 
     if component == "x":
@@ -744,76 +963,210 @@ def create_nodal_field_surface(
             return None
         field = Y
     else:
-        # magnitude
         field = (X if Y is None else (X**2 + Y**2) ** 0.5)
 
     if quantity == "acceleration" and to_g:
         field = field / 9.80665
 
-    t = df[time_col].to_numpy()
-    # Normalize time to seconds for axes
+    # Time arrays
     if time_col == "Time_ms":
-        t = t / 1000.0
+        t_ms = df[time_col].to_numpy().astype(float)
+        t_s = t_ms / 1000.0
+    else:
+        t_s = df[time_col].to_numpy().astype(float)
+        t_ms = t_s * 1000.0
 
-    # Downsample for performance
-    import numpy as np
-
+    # Node downsample (uniform)
     n_nodes, n_t = field.shape
 
-    def _pick(n: int, nmax: int):
+    def pick_nodes(n: int, nmax: int):
         if n <= nmax:
-            return np.arange(n)
+            return np.arange(n, dtype=int)
         return np.linspace(0, n - 1, nmax).astype(int)
 
-    ti = _pick(n_t, max_time_points)
-    ni = _pick(n_nodes, max_nodes)
+    ni = pick_nodes(n_nodes, int(max_nodes))
+
+    # Time downsample
+    ti = _downsample_time_indices(
+        field,
+        t_ms,
+        max_time_points=int(max_time_points),
+        mode=downsample_mode,
+        impact_window_ms=float(impact_window_ms),
+    )
 
     field_ds = field[np.ix_(ni, ti)]
-    t_ds = t[ti]
+
+    # Axis selection
+    time_unit = (time_unit or "ms").lower().strip()
+    if time_unit not in {"ms", "s"}:
+        time_unit = "ms"
+
+    if time_unit == "ms":
+        t_axis = t_ms[ti]
+        x_label = "Time (ms)"
+    else:
+        t_axis = t_s[ti]
+        x_label = "Time (s)"
+
     nodes = (ni + 1).astype(int)
 
     eps = 1e-12
     if log_color:
-        cval = np.log10(np.maximum(np.abs(field_ds), eps))
-        ctitle = f"log10(|{quantity}|)"
+        z = np.log10(np.maximum(np.abs(field_ds), eps))
+        cbar_title = f"log10(|a| [{unit}])" if quantity == "acceleration" else f"log10(|{quantity}| [{unit}])"
     else:
-        cval = field_ds
-        ctitle = f"{quantity}"
+        z = field_ds
+        cbar_title = f"a [{unit}]" if quantity == "acceleration" else f"{quantity} [{unit}]"
+
+    meta = {
+        "unit": unit,
+        "x_label": x_label,
+        "cbar_title": cbar_title,
+        "cmin": cmin,
+        "cmax": cmax,
+    }
+
+    return t_axis, nodes, z, meta
+
+
+def create_nodal_field_surface(
+    df: pd.DataFrame,
+    quantity: str = "acceleration",  # "acceleration"|"velocity"|"position"
+    component: str = "magnitude",    # "magnitude"|"x"|"y"
+    plot_type: str = "surface",      # "surface"|"heatmap"
+    log_color: bool = True,
+    to_g: bool = True,
+    time_unit: str = "ms",           # "ms"|"s"
+    add_contours: bool = True,
+    cmin: float | None = None,
+    cmax: float | None = None,
+    downsample_mode: str = "uniform",   # "uniform"|"impact"
+    impact_window_ms: float = 30.0,
+    max_time_points: int = 800,
+    max_nodes: int = 40,
+) -> go.Figure | None:
+    """Create a node-vs-time field plot.
+
+    - Paper default (recommended): plot_type="heatmap", add_contours=True, log_color=True, to_g=True.
+    - Keeps the 3D surface option for "wow".
+
+    Notes
+    -----
+    * Color scaling can be fixed across runs using (cmin, cmax). If log_color=True,
+      these should be provided in log10 space.
+    * Time axis can be shown in ms or s via time_unit.
+    * downsample_mode="impact" concentrates time samples around the global impact peak.
+    """
+    data = _compute_nodal_field_matrix(
+        df,
+        quantity=quantity,
+        component=component,
+        plot_type=plot_type,
+        log_color=log_color,
+        to_g=to_g,
+        time_unit=time_unit,
+        max_time_points=int(max_time_points),
+        max_nodes=int(max_nodes),
+        downsample_mode=downsample_mode,
+        impact_window_ms=float(impact_window_ms),
+        cmin=cmin,
+        cmax=cmax,
+        for_export=False,
+    )
+    if data is None:
+        return None
+
+    import numpy as np
+
+    t_axis, nodes, z, meta = data
+
+    plot_type = (plot_type or "heatmap").lower().strip()
+    if plot_type not in {"surface", "heatmap"}:
+        plot_type = "heatmap"
+
+    # If cmin/cmax not provided, keep Plotly autoscale
+    zmin = meta.get("cmin", None)
+    zmax = meta.get("cmax", None)
 
     if plot_type == "heatmap":
-        fig = go.Figure(
-            data=go.Heatmap(
-                x=t_ds,
+        fig = go.Figure()
+        fig.add_trace(
+            go.Heatmap(
+                x=t_axis,
                 y=nodes,
-                z=cval,
-                colorbar=dict(title=ctitle),
+                z=z,
+                zmin=zmin,
+                zmax=zmax,
+                colorbar=dict(title=meta["cbar_title"]),
             )
         )
+
+        if add_contours:
+            # Overlay fine contour lines for readability
+            z_flat = z[np.isfinite(z)]
+            if z_flat.size > 0:
+                zz_min = float(np.min(z_flat))
+                zz_max = float(np.max(z_flat))
+                if (zz_max - zz_min) > 1e-12:
+                    n_levels = 18
+                    step = (zz_max - zz_min) / n_levels
+                    fig.add_trace(
+                        go.Contour(
+                            x=t_axis,
+                            y=nodes,
+                            z=z,
+                            showscale=False,
+                            contours=dict(
+                                coloring="none",
+                                showlines=True,
+                                start=zz_min,
+                                end=zz_max,
+                                size=step,
+                            ),
+                            line=dict(width=0.6),
+                            hoverinfo="skip",
+                        )
+                    )
+
         fig.update_layout(
-            height=520,
-            margin=dict(l=40, r=20, t=40, b=40),
-            xaxis_title="Time (s)",
-            yaxis_title="Node / mass index",
+            height=560,
+            margin=dict(l=50, r=30, t=40, b=45),
+            xaxis_title=meta["x_label"],
+            yaxis_title="Node number",
         )
         return fig
 
-    # surface
+
+    # NOTE: For surface, use |field| as height, and color as z (already log or linear).
+    # We rebuild a consistent surface trace here.
+    # To keep memory low, reuse z for coloring and derive height from original scale:
+    # If log_color=True: use 10**z for height; else |z|.
+    if log_color:
+        height = 10 ** z
+    else:
+        height = np.abs(z)
+
     fig = go.Figure(
         data=go.Surface(
-            x=t_ds,
+            x=t_axis,
             y=nodes,
-            z=np.abs(field_ds),
-            surfacecolor=cval,
-            colorbar=dict(title=ctitle),
+            z=height,
+            surfacecolor=z,
+            cmin=zmin,
+            cmax=zmax,
+            colorbar=dict(title=meta["cbar_title"]),
         )
     )
+
+    ztitle = f"|{quantity}| ({meta['unit']})"
     fig.update_layout(
-        height=620,
+        height=640,
         margin=dict(l=40, r=20, t=40, b=40),
         scene=dict(
-            xaxis_title="Time (s)",
-            yaxis_title="Node / mass index",
-            zaxis_title=f"|{quantity}| ({unit})",
+            xaxis_title=meta["x_label"],
+            yaxis_title="Node number",
+            zaxis_title=ztitle,
         ),
     )
     return fig

@@ -16,7 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from railway_simulator.ui.st_compat import safe_button
+from railway_simulator.ui.st_compat import safe_button, safe_download_button
 from railway_simulator.core.engine import run_simulation
 from railway_simulator.core.parametric import (
     build_speed_scenarios,
@@ -32,6 +32,8 @@ from railway_simulator.ui import (
     display_header,
     execute_simulation,
 )
+
+from railway_simulator.ui.export import to_excel
 
 
 def _get_time_axis(df: pd.DataFrame) -> tuple[np.ndarray, str]:
@@ -91,6 +93,94 @@ def _plot_time_history_overlay(
         xaxis_title=xlab,
         yaxis_title=q_label,
         height=450,
+    )
+    return fig
+
+
+def _stack_parametric_histories(
+    captured: list[tuple[dict, pd.DataFrame]],
+    *,
+    scenario_name_fn,
+    columns: list[str],
+) -> pd.DataFrame:
+    """Stack time histories from captured runs into a long-format table.
+
+    Output columns:
+      - scenario
+      - Time_s, Time_ms (when available)
+      - requested data columns
+    """
+    rows: list[pd.DataFrame] = []
+    for idx, (cfg, df) in enumerate(captured):
+        scen = str(scenario_name_fn(cfg, df, idx))
+        keep_cols = [c for c in ("Time_s", "Time_ms") if c in df.columns]
+        keep_cols += [c for c in columns if c in df.columns]
+        if not keep_cols:
+            continue
+        out = df[keep_cols].copy()
+        out.insert(0, "scenario", scen)
+        rows.append(out)
+    if not rows:
+        return pd.DataFrame()
+    return pd.concat(rows, ignore_index=True)
+
+
+def _zip_parametric_runs(
+    captured: list[tuple[dict, pd.DataFrame]],
+    *,
+    scenario_name_fn,
+    prefix: str = "parametric",
+) -> bytes:
+    """Create a ZIP with one CSV per run + a small manifest."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        manifest_rows: list[dict[str, Any]] = []
+        for idx, (cfg, df) in enumerate(captured):
+            scen = str(scenario_name_fn(cfg, df, idx))
+            fname = f"{prefix}__{scen}.csv".replace(" ", "_")
+            zf.writestr(fname, df.to_csv(index=False))
+            manifest_rows.append({"scenario": scen, **{k: cfg.get(k) for k in ("contact_model", "friction_model", "cr_wall", "mu_s", "mu_k")}})
+
+        if manifest_rows:
+            man = pd.DataFrame(manifest_rows)
+            zf.writestr(f"{prefix}__manifest.csv", man.to_csv(index=False))
+    return buf.getvalue()
+
+
+def _fig_to_html_bytes(fig: go.Figure) -> bytes:
+    """Export Plotly figure as standalone HTML bytes (no kaleido required)."""
+    return fig.to_html(include_plotlyjs="inline", full_html=True).encode("utf-8")
+
+
+def _force_penetration_time_gradient(df: pd.DataFrame, *, title: str) -> go.Figure:
+    """Force–penetration curve colored by time."""
+    t, xlab = _get_time_axis(df)
+    if "Penetration_mm" not in df.columns or "Impact_Force_MN" not in df.columns:
+        return go.Figure()
+    fig = go.Figure(
+        data=[
+            go.Scatter(
+                x=df["Penetration_mm"],
+                y=df["Impact_Force_MN"],
+                mode="markers",
+                marker=dict(
+                    size=5,
+                    color=t,
+                    showscale=True,
+                    colorbar=dict(title=xlab),
+                ),
+                name="F-δ",
+            )
+        ]
+    )
+    fig.update_layout(
+        title=title,
+        xaxis_title="Penetration δ [mm]",
+        yaxis_title="Impact force F [MN]",
+        height=520,
     )
     return fig
 
@@ -158,8 +248,15 @@ def main():
             "Run reproducible sweeps using the same configuration as the Simulator tab."
         )
 
-        sub_env, sub_sens, sub_dif, sub_solver = st.tabs(
-            ["🚄 Speed envelope", "🧮 Numerics sensitivity", "⚡ Strain-rate (DIF)", "🔁 Solver comparison"]
+        sub_env, sub_contact, sub_friction, sub_sens, sub_dif, sub_solver = st.tabs(
+            [
+                "🚄 Speed envelope",
+                "💥 Contact force models",
+                "🛞 Friction / restitution",
+                "🧮 Numerics sensitivity",
+                "⚡ Strain-rate (DIF)",
+                "🔁 Solver comparison",
+            ]
         )
 
         # --------------------------
@@ -314,6 +411,591 @@ def main():
                             st.dataframe(summary_df)
                 except Exception as exc:
                     st.error(f"Parametric study failed: {exc}")
+
+        # --------------------------
+        # Contact force model sweep
+        # --------------------------
+        with sub_contact:
+            st.markdown("### Contact force model sweep")
+            st.write(
+                "Compare different **contact force laws** (e.g. Anagnostopoulos / Flores / Ye) "
+                "with the same base configuration. The tool overlays key time histories and "
+                "lets you export the results."
+            )
+
+            left, right = st.columns([1, 2])
+
+            with left:
+                default_models = ["anagnostopoulos", "flores", "ye"]
+                all_models = [
+                    "anagnostopoulos",
+                    "ye",
+                    "hooke",
+                    "hertz",
+                    "hunt-crossley",
+                    "lankarani-nikravesh",
+                    "flores",
+                    "gonthier",
+                    "pant-wijeyewickrema",
+                ]
+                models = st.multiselect(
+                    "Contact models",
+                    options=all_models,
+                    default=[m for m in default_models if m in all_models],
+                    help="Runs one simulation per selected contact model.",
+                    key="contact_sweep_models",
+                )
+
+                max_runs = st.number_input(
+                    "Max runs to plot (overlay)",
+                    min_value=1,
+                    max_value=50,
+                    value=10,
+                    step=1,
+                    key="contact_sweep_max_runs",
+                )
+
+                show_force = st.checkbox("Show force–time", value=True, key="contact_sweep_show_force")
+                show_acc = st.checkbox("Show acceleration–time", value=True, key="contact_sweep_show_acc")
+                show_pen = st.checkbox("Show penetration–time", value=True, key="contact_sweep_show_pen")
+                show_fd = st.checkbox("Show force–penetration (time gradient)", value=True, key="contact_sweep_show_fd")
+
+                run_contact = st.button(
+                    "Run contact model sweep",
+                    type="primary",
+                    key="run_contact_sweep",
+                    use_container_width=True,
+                    disabled=(len(models) == 0),
+                )
+
+            with right:
+                if run_contact:
+                    try:
+                        captured: list[tuple[dict, pd.DataFrame]] = []
+
+                        prog = st.progress(0.0)
+                        total = max(1, len(models))
+
+                        for i, model in enumerate(models, start=1):
+                            cfg = dict(params)
+                            cfg["contact_model"] = model
+                            # make it easier to identify in exports
+                            cfg["case_name"] = f"contact_model={model}"
+                            df_i = run_simulation(cfg)
+                            captured.append((cfg, df_i))
+                            prog.progress(i / total)
+
+                        st.session_state["contact_sweep_captured"] = captured
+
+                    except Exception as exc:
+                        st.error(f"Contact model sweep failed: {exc}")
+
+                captured = st.session_state.get("contact_sweep_captured", None)
+                if not captured:
+                    st.info("Select contact models and run the sweep to see results.")
+                else:
+                    def scen_name(cfg, df, idx):
+                        return str(cfg.get("contact_model", f"run{idx+1}"))
+
+                    # Summary
+                    rows = []
+                    for idx, (cfg, df_i) in enumerate(captured):
+                        name = scen_name(cfg, df_i, idx)
+                        row = {"scenario": name}
+                        if "Impact_Force_MN" in df_i.columns:
+                            q = df_i["Impact_Force_MN"].to_numpy()
+                            row["peak_force_MN"] = float(np.nanmax(q))
+                            k = int(np.nanargmax(q))
+                            if "Time_ms" in df_i.columns:
+                                row["t_peak_ms"] = float(df_i["Time_ms"].iloc[k])
+                            elif "Time_s" in df_i.columns:
+                                row["t_peak_ms"] = 1000.0 * float(df_i["Time_s"].iloc[k])
+                        if "Acceleration_g" in df_i.columns:
+                            row["max_acc_g"] = float(np.nanmax(df_i["Acceleration_g"]))
+                        if "Penetration_mm" in df_i.columns:
+                            row["max_pen_mm"] = float(np.nanmax(df_i["Penetration_mm"]))
+                        # Friction diagnostics (helps verify μ is actually being used)
+                        if "E_diss_friction_J" in df_i.columns:
+                            try:
+                                row["E_diss_friction_J_end"] = float(df_i["E_diss_friction_J"].iloc[-1])
+                            except Exception:
+                                pass
+
+                        # Max friction force magnitude over all masses/time
+                        try:
+                            n_m = int(getattr(df_i, 'attrs', {}).get('n_masses', cfg.get('n_masses', 0)) or 0)
+                            max_f = 0.0
+                            for mi in range(1, max(n_m, 1) + 1):
+                                fx_col = f"Mass{mi}_Force_friction_x_N"
+                                fy_col = f"Mass{mi}_Force_friction_y_N"
+                                if fx_col in df_i.columns and fy_col in df_i.columns:
+                                    fx = df_i[fx_col].to_numpy()
+                                    fy = df_i[fy_col].to_numpy()
+                                    mag = (fx*fx + fy*fy) ** 0.5
+                                    mmax = float(np.nanmax(mag))
+                                    if mmax > max_f:
+                                        max_f = mmax
+                            if max_f > 0.0:
+                                row["max_fric_kN"] = max_f / 1e3
+                        except Exception:
+                            pass
+                        if "E_balance_error_J" in df_i.columns:
+                            row["max_EB_error_J"] = float(np.nanmax(np.abs(df_i["E_balance_error_J"])))
+                        rows.append(row)
+                    summary_df = pd.DataFrame(rows)
+
+                    st.markdown("#### Summary")
+                    st.dataframe(summary_df, use_container_width=True)
+
+                    if 'E_diss_friction_J_end' in summary_df.columns:
+                        try:
+                            if float(summary_df['E_diss_friction_J_end'].max()) < 1e-6:
+                                st.warning("Friction appears inactive (E_diss_friction_J ~ 0). If you selected LuGre/Dahl, ensure sigma_0>0; also note that with impact angle=0° wall-friction may have little influence on normal force.")
+                        except Exception:
+                            pass
+
+                    # Overlays
+                    st.markdown("#### Overlays")
+                    if show_force and any("Impact_Force_MN" in d.columns for _, d in captured):
+                        figF = _plot_time_history_overlay(
+                            captured,
+                            "Impact_Force_MN",
+                            int(max_runs),
+                            lambda cfg, df, idx: scen_name(cfg, df, idx),
+                            title="Impact force – time (overlay)",
+                        )
+                        st.plotly_chart(figF, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export force overlay (HTML)",
+                            _fig_to_html_bytes(figF),
+                            "contact_sweep_force_overlay.html",
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    if show_acc and any("Acceleration_g" in d.columns for _, d in captured):
+                        figA = _plot_time_history_overlay(
+                            captured,
+                            "Acceleration_g",
+                            int(max_runs),
+                            lambda cfg, df, idx: scen_name(cfg, df, idx),
+                            title="Acceleration – time (overlay)",
+                        )
+                        st.plotly_chart(figA, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export acceleration overlay (HTML)",
+                            _fig_to_html_bytes(figA),
+                            "contact_sweep_acc_overlay.html",
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    if show_pen and any("Penetration_mm" in d.columns for _, d in captured):
+                        figP = _plot_time_history_overlay(
+                            captured,
+                            "Penetration_mm",
+                            int(max_runs),
+                            lambda cfg, df, idx: scen_name(cfg, df, idx),
+                            title="Penetration – time (overlay)",
+                        )
+                        st.plotly_chart(figP, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export penetration overlay (HTML)",
+                            _fig_to_html_bytes(figP),
+                            "contact_sweep_pen_overlay.html",
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    if show_fd and any(("Penetration_mm" in d.columns and "Impact_Force_MN" in d.columns) for _, d in captured):
+                        scen_opts = [scen_name(c, d, i) for i, (c, d) in enumerate(captured)]
+                        pick = st.selectbox("Force–penetration view", scen_opts, index=0, key="contact_sweep_fd_pick")
+                        j = scen_opts.index(pick)
+                        cfg_j, df_j = captured[j]
+                        figFD = _force_penetration_time_gradient(df_j, title=f"Force–penetration (time gradient) – {pick}")
+                        st.plotly_chart(figFD, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export force–penetration (HTML)",
+                            _fig_to_html_bytes(figFD),
+                            f"contact_sweep_force_penetration__{pick}.html".replace(" ", "_"),
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    # Exports (data)
+                    st.markdown("#### Export data")
+                    c1, c2, c3 = st.columns(3)
+
+                    safe_download_button(
+                        c1,
+                        "CSV summary",
+                        summary_df.to_csv(index=False).encode(),
+                        "contact_sweep_summary.csv",
+                        "text/csv",
+                        width="stretch",
+                    )
+                    safe_download_button(
+                        c2,
+                        "XLSX summary",
+                        to_excel(summary_df),
+                        "contact_sweep_summary.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        width="stretch",
+                    )
+
+                    long_df = _stack_parametric_histories(
+                        captured,
+                        scenario_name_fn=scen_name,
+                        columns=["Impact_Force_MN", "Acceleration_g", "Penetration_mm"],
+                    )
+                    safe_download_button(
+                        c3,
+                        "ZIP raw runs (CSV)",
+                        _zip_parametric_runs(captured, scenario_name_fn=scen_name, prefix="contact_sweep"),
+                        "contact_sweep_runs.zip",
+                        "application/zip",
+                        width="stretch",
+                    )
+
+                    if not long_df.empty:
+                        d1, d2 = st.columns(2)
+                        safe_download_button(
+                            d1,
+                            "CSV stacked histories",
+                            long_df.to_csv(index=False).encode(),
+                            "contact_sweep_histories_long.csv",
+                            "text/csv",
+                            width="stretch",
+                        )
+                        safe_download_button(
+                            d2,
+                            "XLSX stacked histories",
+                            to_excel(long_df),
+                            "contact_sweep_histories_long.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            width="stretch",
+                        )
+
+        # --------------------------
+        # Friction / restitution sweep
+        # --------------------------
+        with sub_friction:
+            st.markdown("### Friction / restitution sweep")
+            st.write(
+                "Vary **cr** (coefficient of restitution) or friction parameters (μ, model) "
+                "and compare impact force/acceleration/penetration histories."
+            )
+
+            left, right = st.columns([1, 2])
+            with left:
+                sweep_kind = st.selectbox(
+                    "Sweep parameter",
+                    [
+                        "cr_wall (restitution)",
+                        "mu (set mu_s = mu_k)",
+                        "mu_s (static)",
+                        "mu_k (kinetic)",
+                        "friction_model (categorical)",
+                    ],
+                    index=0,
+                    key="fric_sweep_kind",
+                )
+
+                if sweep_kind == "friction_model (categorical)":
+                    fr_models = st.multiselect(
+                        "Friction models",
+                        options=["lugre", "dahl", "coulomb", "brown-mcphee"],
+                        default=["lugre", "coulomb"],
+                        key="fric_sweep_models",
+                    )
+                    values_str = ""
+                else:
+                    if sweep_kind.startswith("cr_wall"):
+                        values_str = st.text_input("Values", value="0.6,0.8,0.9", key="fric_sweep_values")
+                    else:
+                        values_str = st.text_input("Values", value="0.2,0.4,0.6", key="fric_sweep_values")
+                    fr_models = []
+
+                max_runs = st.number_input(
+                    "Max runs to plot (overlay)",
+                    min_value=1,
+                    max_value=60,
+                    value=12,
+                    step=1,
+                    key="fric_sweep_max_runs",
+                )
+
+                show_force = st.checkbox("Show force–time", value=True, key="fric_sweep_show_force")
+                show_acc = st.checkbox("Show acceleration–time", value=True, key="fric_sweep_show_acc")
+                show_pen = st.checkbox("Show penetration–time", value=True, key="fric_sweep_show_pen")
+                show_fd = st.checkbox("Show force–penetration (time gradient)", value=False, key="fric_sweep_show_fd")
+
+                disable_run = False
+                if sweep_kind == "friction_model (categorical)" and not fr_models:
+                    disable_run = True
+                if sweep_kind != "friction_model (categorical)" and not values_str.strip():
+                    disable_run = True
+
+                run_fric = st.button(
+                    "Run friction/restitution sweep",
+                    type="primary",
+                    key="run_fric_sweep",
+                    use_container_width=True,
+                    disabled=disable_run,
+                )
+
+            with right:
+                if run_fric:
+                    try:
+                        captured: list[tuple[dict, pd.DataFrame]] = []
+
+                        if sweep_kind == "friction_model (categorical)":
+                            scenarios = [("friction_model", m) for m in fr_models]
+                        else:
+                            vals = parse_floats_csv(values_str)
+                            if sweep_kind.startswith("cr_wall"):
+                                scenarios = [("cr_wall", float(v)) for v in vals]
+                            elif sweep_kind.startswith("mu (set"):
+                                scenarios = [("mu", float(v)) for v in vals]
+                            elif sweep_kind.startswith("mu_s"):
+                                scenarios = [("mu_s", float(v)) for v in vals]
+                            else:
+                                scenarios = [("mu_k", float(v)) for v in vals]
+
+                        prog = st.progress(0.0)
+                        total = max(1, len(scenarios))
+                        for i, (k, v) in enumerate(scenarios, start=1):
+                            cfg = dict(params)
+                            if k == "friction_model":
+                                cfg["friction_model"] = str(v)
+                                name = f"friction_model={v}"
+                            elif k == "cr_wall":
+                                cfg["cr_wall"] = float(v)
+                                name = f"cr={float(v):.3g}"
+                            elif k == "mu":
+                                cfg["mu_s"] = float(v)
+                                cfg["mu_k"] = float(v)
+                                name = f"mu={float(v):.3g}"
+                            else:
+                                cfg[k] = float(v)
+                                name = f"{k}={float(v):.3g}"
+
+                            cfg["case_name"] = name
+
+                            # --- Ensure friction model parameters are actually active ---
+                            # LuGre/Dahl require sigma_0 > 0 (and sigma_1 for LuGre) to build up
+                            # friction within the short impact time window. If the base UI params
+                            # left them at zero, the sweep will appear to have "no effect".
+                            fm = str(cfg.get("friction_model", "none")).lower()
+                            mu_s = float(cfg.get("mu_s", 0.0) or 0.0)
+                            mu_k = float(cfg.get("mu_k", 0.0) or 0.0)
+                            if fm in ("lugre", "dahl") and (abs(mu_s) > 1e-12 or abs(mu_k) > 1e-12):
+                                if abs(float(cfg.get("sigma_0", 0.0) or 0.0)) < 1e-12:
+                                    cfg["sigma_0"] = 1.0e6  # N/m (fast bristle build-up)
+                                if fm == "lugre" and abs(float(cfg.get("sigma_1", 0.0) or 0.0)) < 1e-12:
+                                    cfg["sigma_1"] = 1.0e3  # N·s/m (damping)
+
+                            df_i = run_simulation(cfg)
+                            captured.append((cfg, df_i))
+                            prog.progress(i / total)
+
+                        st.session_state["fric_sweep_captured"] = captured
+                        st.session_state["fric_sweep_kind_last"] = sweep_kind
+
+                    except Exception as exc:
+                        st.error(f"Friction/restitution sweep failed: {exc}")
+
+                captured = st.session_state.get("fric_sweep_captured", None)
+                if not captured:
+                    st.info("Configure a sweep and run it to see results.")
+                else:
+                    def scen_name(cfg, df, idx):
+                        # Prefer case_name if we set it
+                        return str(cfg.get("case_name", f"run{idx+1}"))
+
+                    # Summary
+                    rows = []
+                    for idx, (cfg, df_i) in enumerate(captured):
+                        name = scen_name(cfg, df_i, idx)
+                        row = {"scenario": name}
+                        for k in ("cr_wall", "mu_s", "mu_k", "friction_model", "sigma_0", "sigma_1", "sigma_2"):
+                            if k in cfg:
+                                row[k] = cfg.get(k)
+                        if "Impact_Force_MN" in df_i.columns:
+                            q = df_i["Impact_Force_MN"].to_numpy()
+                            row["peak_force_MN"] = float(np.nanmax(q))
+                            kpk = int(np.nanargmax(q))
+                            if "Time_ms" in df_i.columns:
+                                row["t_peak_ms"] = float(df_i["Time_ms"].iloc[kpk])
+                            elif "Time_s" in df_i.columns:
+                                row["t_peak_ms"] = 1000.0 * float(df_i["Time_s"].iloc[kpk])
+                        if "Acceleration_g" in df_i.columns:
+                            row["max_acc_g"] = float(np.nanmax(df_i["Acceleration_g"]))
+                        if "Penetration_mm" in df_i.columns:
+                            row["max_pen_mm"] = float(np.nanmax(df_i["Penetration_mm"]))
+                        # Friction diagnostics (helps verify μ is actually being used)
+                        if "E_diss_friction_J" in df_i.columns:
+                            try:
+                                row["E_diss_friction_J_end"] = float(df_i["E_diss_friction_J"].iloc[-1])
+                            except Exception:
+                                pass
+
+                        # Max friction force magnitude over all masses/time
+                        try:
+                            n_m = int(getattr(df_i, 'attrs', {}).get('n_masses', cfg.get('n_masses', 0)) or 0)
+                            max_f = 0.0
+                            for mi in range(1, max(n_m, 1) + 1):
+                                fx_col = f"Mass{mi}_Force_friction_x_N"
+                                fy_col = f"Mass{mi}_Force_friction_y_N"
+                                if fx_col in df_i.columns and fy_col in df_i.columns:
+                                    fx = df_i[fx_col].to_numpy()
+                                    fy = df_i[fy_col].to_numpy()
+                                    mag = (fx*fx + fy*fy) ** 0.5
+                                    mmax = float(np.nanmax(mag))
+                                    if mmax > max_f:
+                                        max_f = mmax
+                            if max_f > 0.0:
+                                row["max_fric_kN"] = max_f / 1e3
+                        except Exception:
+                            pass
+                        rows.append(row)
+                    summary_df = pd.DataFrame(rows)
+
+                    st.markdown("#### Summary")
+                    st.dataframe(summary_df, use_container_width=True)
+
+                    if 'E_diss_friction_J_end' in summary_df.columns:
+                        try:
+                            if float(summary_df['E_diss_friction_J_end'].max()) < 1e-6:
+                                st.warning("Friction appears inactive (E_diss_friction_J ~ 0). If you selected LuGre/Dahl, ensure sigma_0>0; also note that with impact angle=0° wall-friction may have little influence on normal force.")
+                        except Exception:
+                            pass
+
+                    st.markdown("#### Overlays")
+                    if show_force and any("Impact_Force_MN" in d.columns for _, d in captured):
+                        figF = _plot_time_history_overlay(
+                            captured,
+                            "Impact_Force_MN",
+                            int(max_runs),
+                            lambda cfg, df, idx: scen_name(cfg, df, idx),
+                            title="Impact force – time (overlay)",
+                        )
+                        st.plotly_chart(figF, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export force overlay (HTML)",
+                            _fig_to_html_bytes(figF),
+                            "fric_sweep_force_overlay.html",
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    if show_acc and any("Acceleration_g" in d.columns for _, d in captured):
+                        figA = _plot_time_history_overlay(
+                            captured,
+                            "Acceleration_g",
+                            int(max_runs),
+                            lambda cfg, df, idx: scen_name(cfg, df, idx),
+                            title="Acceleration – time (overlay)",
+                        )
+                        st.plotly_chart(figA, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export acceleration overlay (HTML)",
+                            _fig_to_html_bytes(figA),
+                            "fric_sweep_acc_overlay.html",
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    if show_pen and any("Penetration_mm" in d.columns for _, d in captured):
+                        figP = _plot_time_history_overlay(
+                            captured,
+                            "Penetration_mm",
+                            int(max_runs),
+                            lambda cfg, df, idx: scen_name(cfg, df, idx),
+                            title="Penetration – time (overlay)",
+                        )
+                        st.plotly_chart(figP, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export penetration overlay (HTML)",
+                            _fig_to_html_bytes(figP),
+                            "fric_sweep_pen_overlay.html",
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    if show_fd and any(("Penetration_mm" in d.columns and "Impact_Force_MN" in d.columns) for _, d in captured):
+                        scen_opts = [scen_name(c, d, i) for i, (c, d) in enumerate(captured)]
+                        pick = st.selectbox("Force–penetration view", scen_opts, index=0, key="fric_sweep_fd_pick")
+                        j = scen_opts.index(pick)
+                        cfg_j, df_j = captured[j]
+                        figFD = _force_penetration_time_gradient(df_j, title=f"Force–penetration (time gradient) – {pick}")
+                        st.plotly_chart(figFD, use_container_width=True)
+                        safe_download_button(
+                            st,
+                            "Export force–penetration (HTML)",
+                            _fig_to_html_bytes(figFD),
+                            f"fric_sweep_force_penetration__{pick}.html".replace(" ", "_"),
+                            "text/html",
+                            width="stretch",
+                        )
+
+                    st.markdown("#### Export data")
+                    c1, c2, c3 = st.columns(3)
+                    safe_download_button(
+                        c1,
+                        "CSV summary",
+                        summary_df.to_csv(index=False).encode(),
+                        "fric_sweep_summary.csv",
+                        "text/csv",
+                        width="stretch",
+                    )
+                    safe_download_button(
+                        c2,
+                        "XLSX summary",
+                        to_excel(summary_df),
+                        "fric_sweep_summary.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        width="stretch",
+                    )
+                    safe_download_button(
+                        c3,
+                        "ZIP raw runs (CSV)",
+                        _zip_parametric_runs(captured, scenario_name_fn=scen_name, prefix="fric_sweep"),
+                        "fric_sweep_runs.zip",
+                        "application/zip",
+                        width="stretch",
+                    )
+
+                    long_df = _stack_parametric_histories(
+                        captured,
+                        scenario_name_fn=scen_name,
+                        columns=["Impact_Force_MN", "Acceleration_g", "Penetration_mm"],
+                    )
+                    if not long_df.empty:
+                        d1, d2 = st.columns(2)
+                        safe_download_button(
+                            d1,
+                            "CSV stacked histories",
+                            long_df.to_csv(index=False).encode(),
+                            "fric_sweep_histories_long.csv",
+                            "text/csv",
+                            width="stretch",
+                        )
+                        safe_download_button(
+                            d2,
+                            "XLSX stacked histories",
+                            to_excel(long_df),
+                            "fric_sweep_histories_long.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            width="stretch",
+                        )
 
         # --------------------------
         # Numerics sensitivity

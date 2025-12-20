@@ -32,15 +32,9 @@ from railway_simulator.studies.strain_rate_sensitivity import run_fixed_dif_sens
 from .export import to_excel
 from .plotting import (
     create_mass_kinematics_plots,
-<<<<<<< HEAD
-    create_results_plots,
-    create_spring_plots,
-    create_mass_force_displacement_plots,
-=======
     create_mass_force_displacement_plots,
     create_results_plots,
     create_spring_plots,
->>>>>>> f005b12 (mass forces output fixed)
 )
 from .sdof import (
     compute_building_sdof_response,

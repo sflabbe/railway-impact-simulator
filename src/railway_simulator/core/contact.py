@@ -6,7 +6,12 @@ and dissipative models from the literature.
 """
 
 from __future__ import annotations
-from typing import Dict, Callable
+from typing import Dict, Callable, Optional
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from railway_simulator.config.laws import ForceDisplacementLaw
 import numpy as np
 
 
@@ -109,6 +114,7 @@ class ContactModels:
         k_wall: float,
         cr_wall: float,
         model: str,
+        contact_law: Optional["ForceDisplacementLaw"] = None,
     ) -> np.ndarray:
         """Compute normal contact forces with unilateral constraint.
 
@@ -190,9 +196,19 @@ class ContactModels:
             v0m,
         )
 
+        model_lower = model.lower()
+
+        if contact_law is not None or model_lower == "tabulated":
+            if contact_law is None:
+                raise ValueError("contact_law must be provided when using model 'tabulated'")
+            R_tab = np.zeros_like(u)
+            for idx, dval in zip(np.where(mask)[0], d):
+                R_tab[idx] = -contact_law.evaluate(float(dval))
+            return R_tab
+
         # Get model function (default to anagnostopoulos if not found)
         model_func = ContactModels.MODELS.get(
-            model.lower(),
+            model_lower,
             ContactModels.MODELS["anagnostopoulos"],
         )
 
@@ -215,7 +231,7 @@ class ContactModels:
             Sorted list of contact model names that can be passed to
             the 'model' parameter of compute_force().
         """
-        return sorted(ContactModels.MODELS.keys())
+        return sorted(list(ContactModels.MODELS.keys()) + ["tabulated"])
 
     @staticmethod
     def get_model_info(model: str) -> str:
@@ -232,6 +248,8 @@ class ContactModels:
             Description of the model including its mathematical form
         """
         model_lower = model.lower()
+        if model_lower == "tabulated":
+            return "Tabulated force-displacement law (requires contact_law input)"
         if model_lower not in ContactModels.MODELS:
             return f"Unknown model: {model}"
 

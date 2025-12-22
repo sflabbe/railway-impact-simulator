@@ -1,0 +1,13 @@
+partners:
+  EN15227_2011_C1_wagon_80t:
+    type: reference_mass_1d
+    mass_kg: 80000
+    dofs: [x]
+  EN15227_2011_C2_regional_129t:
+    type: reference_mass_1d
+    mass_kg: 129000
+    dofs: [x]
+  EN15227_2011_C3_deformable_obstacle_15t:
+    type: reference_mass_1d
+    mass_kg: 15000
+    dofs: [x]

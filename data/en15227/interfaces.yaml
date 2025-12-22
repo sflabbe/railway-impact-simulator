@@ -1,0 +1,24 @@
+interfaces:
+  EN15227_2011_C1_side_buffers_pair:
+    type: piecewise_linear
+    points:
+      - [0.0, 0.0]
+      - [0.105, 1.18e6]
+  EN15227_2011_C2_central_coupler:
+    type: piecewise_linear
+    points:
+      - [0.0, 0.0]
+      - [0.05, 5.0e5]
+      - [0.245, 1.05e6]
+      - [0.475, 1.35e6]
+    metadata:
+      expected_energy_J: 5.3e5
+  EN15227_2011_C3_min_curve:
+    type: piecewise_linear
+    points:
+      - [0.0, 0.0]
+      - [0.7, 4.5e6]
+      - [1.5, 3.0e6]
+    metadata:
+      mu: 0.2
+      note: "coupler omitted"

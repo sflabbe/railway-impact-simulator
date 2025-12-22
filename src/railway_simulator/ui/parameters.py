@@ -65,19 +65,53 @@ def _get_cfg_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "configs"
 
 
+def _list_yaml_configs(cfg_dir: Path) -> list[Path]:
+    """List YAML configs recursively under cfg_dir.
+
+    We use rglob so users can keep organised folders like:
+      configs/en15227/*.yml
+      configs/dev/*.yml
+    """
+    if not cfg_dir.is_dir():
+        return []
+
+    yml = list(cfg_dir.rglob("*.yml"))
+    yaml_ = list(cfg_dir.rglob("*.yaml"))
+
+    # Stable ordering by relative path (case-insensitive)
+    def _key(p: Path) -> str:
+        try:
+            return str(p.relative_to(cfg_dir)).lower()
+        except Exception:
+            return str(p).lower()
+
+    files = sorted(set(yml + yaml_), key=_key)
+    return files
+
+
 def _load_active_yaml_cfg() -> Dict[str, Any] | None:
     """If YAML mode is active, load the selected YAML and store it in session_state."""
     if st.session_state.get("train_config_mode") != "YAML example configs":
         return None
 
     cfg_dir = _get_cfg_dir()
-    yaml_files = sorted(cfg_dir.glob("*.yml"))
+    yaml_files = _list_yaml_configs(cfg_dir)
     if not yaml_files:
         return None
 
-    idx = int(st.session_state.get("yaml_config_idx", 0) or 0)
-    idx = max(0, min(idx, len(yaml_files) - 1))
-    yaml_path = yaml_files[idx]
+    # Prefer a stored path selection (more robust than an index when the list is filtered)
+    sel_path = st.session_state.get("yaml_config_path_sel", None)
+    yaml_path = None
+    if isinstance(sel_path, str) and sel_path:
+        for p in yaml_files:
+            if str(p) == sel_path:
+                yaml_path = p
+                break
+
+    if yaml_path is None:
+        idx = int(st.session_state.get("yaml_config_idx", 0) or 0)
+        idx = max(0, min(idx, len(yaml_files) - 1))
+        yaml_path = yaml_files[idx]
 
     try:
         d = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
@@ -89,6 +123,7 @@ def _load_active_yaml_cfg() -> Dict[str, Any] | None:
     d = _normalize_yaml_cfg(d)
     st.session_state["yaml_example_cfg"] = d
     st.session_state["yaml_config_path"] = str(yaml_path)
+    st.session_state["yaml_config_path_sel"] = str(yaml_path)
     return d
 
 
@@ -477,6 +512,7 @@ def build_train_geometry_ui() -> Dict[str, Any]:
                 "yaml_use_material",
                 "yaml_use_contact",
                 "yaml_config_path",
+                "yaml_config_path_sel",
                 "yaml_config_idx",
                 "_yaml_fp",
             ):
@@ -533,18 +569,12 @@ def build_train_geometry_ui() -> Dict[str, Any]:
         # ------------------------------
         # YAML example configs
         # ------------------------------
-        cfg_dir = Path.cwd() / "configs"
-        if not cfg_dir.is_dir():
-            # Fallback: repo layout when running from source tree
-            try:
-                cfg_dir = Path(__file__).resolve().parents[3] / "configs"
-            except Exception:
-                cfg_dir = Path.cwd() / "configs"
+        cfg_dir = _get_cfg_dir()
 
-        yaml_files = sorted(list(cfg_dir.glob("*.yml")) + list(cfg_dir.glob("*.yaml")))
+        yaml_files = _list_yaml_configs(cfg_dir)
         if not yaml_files:
             st.warning(
-                "No YAML configs found. Expected ./configs/*.yml in the repository. "
+                "No YAML configs found. Expected ./configs/**/*.yml in the repository. "
                 "Falling back to 'Example trains'."
             )
             train_config = build_example_train_ui()
@@ -556,9 +586,63 @@ def build_train_geometry_ui() -> Dict[str, Any]:
                 "y_init": y_init,
             }
 
+
+        # Quick filters (useful when configs are organised in subfolders like configs/en15227/)
+        filter_only_en15227 = st.checkbox(
+            "Show only EN15227 configs",
+            value=bool(st.session_state.get("yaml_filter_only_en15227", False)),
+            key="yaml_filter_only_en15227",
+            help="Filters to configs whose path contains 'en15227' or filename contains '__EN15227_'.",
+            on_change=_invalidate_sim_cache,
+        )
+        # Streamlit selectbox stores the selected *value* in session_state, not the index.
+        # Older builds mistakenly stored this under a key that implied it was an index.
+        # Be robust to legacy values ("All"/"C1"/...) to avoid ValueError on int().
+        case_options = ["All", "C1", "C2", "C3"]
+        legacy_val = st.session_state.get("yaml_en15227_case_idx")
+        if isinstance(legacy_val, str) and legacy_val in case_options:
+            saved_case = legacy_val
+        elif isinstance(legacy_val, int) and 0 <= legacy_val < len(case_options):
+            saved_case = case_options[legacy_val]
+        else:
+            saved_case = st.session_state.get("yaml_en15227_case", "All")
+            if saved_case not in case_options:
+                saved_case = "All"
+
+        case_filter = st.selectbox(
+            "EN15227 case filter",
+            options=case_options,
+            index=case_options.index(saved_case),
+            key="yaml_en15227_case",
+            help="Further restricts EN15227 configs by filename (e.g., __EN15227_C2).",
+            disabled=not filter_only_en15227,
+            on_change=_invalidate_sim_cache,
+        )
+        name_query = st.text_input(
+            "Search",
+            value=str(st.session_state.get("yaml_search_query", "")),
+            key="yaml_search_query",
+            help="Substring match against relative path and case_name.",
+            on_change=_invalidate_sim_cache,
+        ).strip().lower()
+
+        def _is_en15227(p: Path) -> bool:
+            s = str(p).lower()
+            return ("en15227" in s) or ("__en15227_" in p.name.lower())
+
+        def _match_case(p: Path) -> bool:
+            if case_filter == "All":
+                return True
+            return f"__en15227_{case_filter.lower()}" in p.name.lower()
+
+        filtered_files = list(yaml_files)
+        if filter_only_en15227:
+            filtered_files = [p for p in filtered_files if _is_en15227(p) and _match_case(p)]
+
         labels: list[str] = []
         parsed: list[dict] = []
-        for p in yaml_files:
+        matched_files: list[Path] = []
+        for p in filtered_files:
             try:
                 d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
                 if not isinstance(d, dict):
@@ -566,27 +650,56 @@ def build_train_geometry_ui() -> Dict[str, Any]:
             except Exception:
                 d = {}
             case = d.get("case_name", p.stem)
-            labels.append(f"{p.name} — {case}")
+
+            # Use relative paths so subfolders are visible (e.g., en15227/...).
+            try:
+                rel = str(p.relative_to(cfg_dir))
+            except Exception:
+                rel = p.name
+
+            label = f"{rel} — {case}"
+            if name_query:
+                if (name_query not in rel.lower()) and (name_query not in str(case).lower()):
+                    continue
+            labels.append(label)
             parsed.append(_normalize_yaml_cfg(d))
+            matched_files.append(p)
+
+        if not labels:
+            st.info("No configs matched the current filters.")
+            return {}
 
         idx = st.selectbox(
             "YAML config",
-            options=list(range(len(yaml_files))),
+            options=list(range(len(labels))),
             format_func=lambda i: labels[i],
             index=0,
             key="yaml_config_idx",
             on_change=_invalidate_sim_cache,
         )
 
-        yaml_path = yaml_files[idx]
+        # NOTE: parsed/labels are already filtered; map index back to the matching file.
+        yaml_path = matched_files[idx]
         yaml_cfg = parsed[idx] if isinstance(parsed[idx], dict) else {}
 
         st.session_state["yaml_example_cfg"] = yaml_cfg
         st.session_state["yaml_config_path"] = str(yaml_path)
+        # Robust selection for the early YAML pre-pass loader
+        st.session_state["yaml_config_path_sel"] = str(yaml_path)
 
         case_name = yaml_cfg.get("case_name", yaml_path.stem)
 
-        st.caption(f"Selected YAML: **{yaml_path.name}**  ·  case_name: **{case_name}**")
+        try:
+            rel_path = str(yaml_path.relative_to(cfg_dir))
+        except Exception:
+            rel_path = yaml_path.name
+        st.caption(f"Selected YAML: **{rel_path}**  ·  case_name: **{case_name}**")
+
+        with st.expander("Preview YAML (read-only)", expanded=False):
+            try:
+                st.code(yaml_path.read_text(encoding="utf-8"), language="yaml")
+            except Exception:
+                st.info("Could not read YAML file for preview.")
 
         apply_full = st.checkbox(
             "Apply full YAML config (overrides all sidebar params)",

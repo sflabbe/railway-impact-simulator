@@ -1,0 +1,66 @@
+n_masses: 7
+masses:
+- 11727.272727272726
+- 26386.363636363636
+- 17590.90909090909
+- 17590.90909090909
+- 17590.90909090909
+- 26386.363636363636
+- 11727.272727272726
+x_init:
+- 0.0
+- 3.0
+- 6.5
+- 10.0
+- 13.5
+- 17.0
+- 20.0
+y_init:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+fy:
+- 29318181.818181816
+- 29318181.818181816
+- 29318181.818181816
+- 29318181.818181816
+- 29318181.818181816
+- 29318181.818181816
+uy:
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+- 0.05
+bw_a: 0.0
+bw_A: 1.0
+bw_beta: 0.1
+bw_gamma: 0.9
+bw_n: 8
+k_wall: 45000000.0
+cr_wall: 0.76
+contact_model: lankarani-nikravesh
+friction_model: lugre
+mu_s: 0.4
+mu_k: 0.3
+sigma_0: 1.0e5
+sigma_1: 3.16e2
+sigma_2: 0.4
+h_init: 0.0001
+T_max: 0.4
+alpha_hht: -0.1
+newton_tol: 0.0001
+max_iter: 50
+angle_rad: 0.0
+d0: 0.01
+collision:
+  scenario: EN15227_2011_C3_baseline
+v0_init: -30.56
+case_name: traxx_freight__EN15227_C3
+notes: '[auto] EN15227 C3: target_mass=129000 kg, scale=1.465909, v0_init=-30.5600
+  m/s, scenario=EN15227_2011_C3_baseline.'

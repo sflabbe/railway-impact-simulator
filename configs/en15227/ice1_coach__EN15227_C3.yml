@@ -1,0 +1,59 @@
+case_name: ice1_coach__EN15227_C3
+notes: 'ICE 1 coach discretized into 6 equal masses (~57.3 t total). Simplified uniform
+  stiffness/yield for all inter-mass springs.
+
+  [auto] EN15227 C3: target_mass=129000 kg, scale=2.251309, v0_init=-30.5600 m/s,
+  scenario=EN15227_2011_C3_baseline.'
+v0_init: -30.56
+T_max: 0.3
+h_init: 0.0001
+alpha_hht: -0.15
+contact_model: lankarani-nikravesh
+k_wall: 45000000.0
+cr_wall: 0.8
+n_masses: 6
+solver: picard
+newton_tol: 1.0e-06
+max_iter: 50
+masses:
+- 21500.0
+- 21500.0
+- 21500.0
+- 21500.0
+- 21500.0
+- 21500.0
+x_init:
+- 0.0
+- 4.4
+- 8.8
+- 13.2
+- 17.6
+- 22.0
+y_init:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+k_train:
+- 316590314.1361256
+- 316590314.1361256
+- 316590314.1361256
+- 316590314.1361256
+- 316590314.1361256
+fy:
+- 20261780.10471204
+- 20261780.10471204
+- 20261780.10471204
+- 20261780.10471204
+- 20261780.10471204
+uy:
+- 0.064
+- 0.064
+- 0.064
+- 0.064
+- 0.064
+d0: 0.01
+collision:
+  scenario: EN15227_2011_C3_baseline

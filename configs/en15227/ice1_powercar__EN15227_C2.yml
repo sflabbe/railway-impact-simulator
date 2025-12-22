@@ -1,0 +1,59 @@
+case_name: ice1_powercar__EN15227_C2
+notes: 'ICE 1 power car discretized into 6 equal masses (78 t total). Simplified uniform
+  stiffness/yield for all inter-mass springs.
+
+  [auto] EN15227 C2: target_mass=129000 kg, scale=1.653846, v0_init=-10.0000 m/s,
+  scenario=EN15227_2011_C2_baseline.'
+v0_init: -10.0
+T_max: 0.3
+h_init: 0.0001
+alpha_hht: -0.15
+contact_model: lankarani-nikravesh
+k_wall: 45000000.0
+cr_wall: 0.8
+n_masses: 6
+solver: picard
+newton_tol: 1.0e-06
+max_iter: 50
+masses:
+- 21500.0
+- 21500.0
+- 21500.0
+- 21500.0
+- 21500.0
+- 21500.0
+x_init:
+- 0.0
+- 3.6
+- 7.2
+- 10.8
+- 14.4
+- 18.0
+y_init:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+k_train:
+- 232572115.38461536
+- 232572115.38461536
+- 232572115.38461536
+- 232572115.38461536
+- 232572115.38461536
+fy:
+- 14884615.384615384
+- 14884615.384615384
+- 14884615.384615384
+- 14884615.384615384
+- 14884615.384615384
+uy:
+- 0.064
+- 0.064
+- 0.064
+- 0.064
+- 0.064
+d0: 0.01
+collision:
+  scenario: EN15227_2011_C2_baseline

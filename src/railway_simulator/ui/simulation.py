@@ -18,7 +18,13 @@ import pandas as pd
 import streamlit as st
 
 from railway_simulator.ui.st_compat import safe_plotly_chart, safe_download_button
-from railway_simulator.core.engine import run_simulation
+from railway_simulator.core.engine import run_simulation, GRAVITY
+from railway_simulator.config.presets import (
+    load_en15227_presets,
+    resolve_scenario_preset,
+    resolve_partner_preset,
+    resolve_interface_preset,
+)
 from railway_simulator.core.parametric import (
     build_speed_scenarios,
     make_envelope_figure,
@@ -159,9 +165,10 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
     # ------------------------------------------------------
     # 3) Tabs de resultados
     # ------------------------------------------------------
-    tab_global, tab_building, tab_train, tab_springs, tab_nodal = st.tabs(
+    tab_global, tab_batch, tab_building, tab_train, tab_springs, tab_nodal = st.tabs(
         [
             "📈 Global Results",
+            "🧪 Batch Compare",
             "🏢 Building Response (SDOF)",
             "🚃 Train Configuration",
             "🧷 Springs & Masses",
@@ -189,6 +196,265 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
 
         fig = create_results_plots(df)
         safe_plotly_chart(st, fig, width="stretch")
+
+        # Optional deeper energy / dissipation breakdown
+        with st.expander("🔬 Advanced energy breakdown", expanded=False):
+            cols = [
+                "E_kin_J",
+                "E_pot_contact_J",
+                "E_pot_spring_J",
+                "E_diss_rayleigh_J",
+                "E_diss_bw_J",
+                "E_diss_softening_J",
+                "E_diss_contact_damp_J",
+                "E_diss_friction_J",
+                "E_diss_mass_contact_J",
+                "E_diss_total_J",
+                "E_num_J",
+            ]
+            present = [c for c in cols if c in df.columns]
+            if present:
+                import plotly.graph_objects as go
+
+                fig_e = go.Figure()
+                for c in present:
+                    fig_e.add_trace(go.Scatter(x=df["Time_ms"], y=df[c] / 1e6, mode="lines", name=c.replace("_J", "")))
+                fig_e.update_layout(
+                    height=450,
+                    margin=dict(t=30, b=30, l=60, r=30),
+                    xaxis_title="Time (ms)",
+                    yaxis_title="Energy (MJ)",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                )
+                safe_plotly_chart(st, fig_e, width="stretch")
+            else:
+                st.info("Energy bookkeeping columns are not available in these results.")
+
+    # ----- Batch compare (EN15227 / multi-YAML) -----
+    with tab_batch:
+        from pathlib import Path
+        import yaml
+        import zipfile
+        import io
+        import plotly.graph_objects as go
+
+        st.markdown(
+            "Run and compare multiple YAML configs (especially **configs/en15227/**) and overlay key responses."
+        )
+
+        # Locate configs directory
+        cfg_dir = Path.cwd() / "configs"
+        if not cfg_dir.is_dir():
+            try:
+                cfg_dir = Path(__file__).resolve().parents[3] / "configs"
+            except Exception:
+                cfg_dir = Path.cwd() / "configs"
+
+        all_yaml = sorted(list(cfg_dir.rglob("*.yml")) + list(cfg_dir.rglob("*.yaml")), key=lambda p: str(p).lower())
+        if not all_yaml:
+            st.info("No YAML configs found under ./configs.")
+        else:
+            # Default: EN15227 variants
+            en_files = [p for p in all_yaml if "en15227" in str(p).lower() or "__en15227_" in p.name.lower()]
+            default_files = en_files[: min(12, len(en_files))] if en_files else all_yaml[: min(8, len(all_yaml))]
+
+            # Filters
+            case_filter = st.selectbox(
+                "Filter by EN15227 case",
+                options=["All", "C1", "C2", "C3"],
+                index=0,
+                help="Filters filenames containing __EN15227_C1/C2/C3.",
+            )
+
+            def _match_case(p: Path) -> bool:
+                if case_filter == "All":
+                    return True
+                return f"__en15227_{case_filter.lower()}" in p.name.lower()
+
+            filtered = [p for p in (en_files if en_files else all_yaml) if _match_case(p)]
+
+            # Build labels with relative path
+            def _label(p: Path) -> str:
+                try:
+                    rel = p.relative_to(cfg_dir)
+                    return str(rel)
+                except Exception:
+                    return str(p)
+
+            selected = st.multiselect(
+                "Select YAML configs",
+                options=filtered,
+                default=default_files if case_filter == "All" else [p for p in default_files if _match_case(p)],
+                format_func=_label,
+            )
+
+            col_run, col_clear, col_dl = st.columns([1, 1, 1])
+            run_batch = col_run.button("▶️ Run batch", use_container_width=True)
+            if col_clear.button("🧹 Clear batch cache", use_container_width=True):
+                st.session_state.pop("batch_results", None)
+                st.session_state.pop("batch_meta", None)
+                st.session_state.pop("batch_fp", None)
+
+            # Fingerprint to reuse cached runs
+            fp_items = []
+            for p in selected:
+                try:
+                    fp_items.append(f"{p}|{p.stat().st_mtime_ns}")
+                except Exception:
+                    fp_items.append(str(p))
+            fp = "|".join(fp_items)
+
+            if run_batch and selected:
+                presets = load_en15227_presets(Path.cwd())
+                prog = st.progress(0)
+                results: dict[str, pd.DataFrame] = {}
+                meta_rows: list[dict[str, Any]] = []
+
+                for i, p in enumerate(selected):
+                    try:
+                        cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                        if not isinstance(cfg, dict):
+                            cfg = {}
+                    except Exception as e:
+                        st.warning(f"Failed to load {p}: {e}")
+                        continue
+
+                    label = cfg.get("case_name") or p.stem
+
+                    # Resolve EN15227 info if present
+                    scenario_id = None
+                    try:
+                        col = cfg.get("collision") or {}
+                        if isinstance(col, dict):
+                            scenario_id = col.get("scenario")
+                    except Exception:
+                        scenario_id = None
+
+                    scen = resolve_scenario_preset(presets, scenario_id) if scenario_id else None
+                    partner_id = None
+                    interface_id = None
+                    speed_kmh = None
+                    if scen:
+                        speed_kmh = scen.get("speed_kmh")
+                        try:
+                            partner_id = (scen.get("partner") or {}).get("preset_id")
+                            interface_id = (scen.get("interface") or {}).get("preset_id")
+                        except Exception:
+                            pass
+
+                    partner = resolve_partner_preset(presets, partner_id) if partner_id else None
+                    interface = resolve_interface_preset(presets, interface_id) if interface_id else None
+
+                    M_train = None
+                    try:
+                        masses = cfg.get("masses")
+                        if masses is not None:
+                            M_train = float(sum(float(x) for x in masses))
+                    except Exception:
+                        M_train = None
+
+                    M_ref = None
+                    if partner and isinstance(partner.get("mass_kg"), (int, float)):
+                        M_ref = float(partner["mass_kg"])
+
+                    # Run
+                    with st.spinner(f"Running: {label}"):
+                        try:
+                            df_i = run_simulation(cfg)
+                        except Exception as e:
+                            st.error(f"Run failed for {label}: {e}")
+                            continue
+                    results[label] = df_i
+
+                    # Summary
+                    row = {
+                        "case": label,
+                        "yaml": _label(p),
+                        "scenario": scenario_id or "",
+                        "speed_kmh": speed_kmh,
+                        "train_mass_t": (M_train / 1000.0) if M_train else None,
+                        "ref_mass_t": (M_ref / 1000.0) if M_ref else None,
+                        "max_force_MN": float(df_i["Impact_Force_MN"].max()) if "Impact_Force_MN" in df_i else None,
+                        "max_pen_mm": float(df_i["Penetration_mm"].max()) if "Penetration_mm" in df_i else None,
+                        "max_acc_g": float(df_i["Acceleration_g"].max()) if "Acceleration_g" in df_i else None,
+                        "peak_E_num_%": (100.0 * float(df_i["E_num_ratio"].max())) if "E_num_ratio" in df_i else None,
+                    }
+                    if interface and isinstance(interface.get("metadata"), dict):
+                        row["expected_energy_kJ"] = float(interface["metadata"].get("expected_energy_J", 0.0)) / 1e3
+                    meta_rows.append(row)
+
+                    prog.progress((i + 1) / max(1, len(selected)))
+
+                st.session_state["batch_results"] = results
+                st.session_state["batch_meta"] = meta_rows
+                st.session_state["batch_fp"] = fp
+                st.success(f"Batch complete: {len(results)} run(s)")
+
+            # Show cached
+            batch_results = st.session_state.get("batch_results")
+            batch_meta = st.session_state.get("batch_meta")
+            batch_fp = st.session_state.get("batch_fp")
+
+            if batch_results and batch_fp == fp:
+                st.markdown("### Summary")
+                meta_df = pd.DataFrame(batch_meta)
+                if not meta_df.empty:
+                    st.dataframe(meta_df.sort_values(by=["max_force_MN"], ascending=False), use_container_width=True)
+
+                st.markdown("### Overlay plots")
+                y_choice = st.selectbox(
+                    "Signal",
+                    options=[
+                        "Impact_Force_MN vs Time_ms",
+                        "Penetration_mm vs Time_ms",
+                        "Acceleration_g vs Time_ms",
+                        "Hysteresis (Force vs Penetration)",
+                        "Energy Balance Quality (E_num_ratio %)",
+                    ],
+                    index=0,
+                )
+
+                fig_o = go.Figure()
+                for label, dfi in batch_results.items():
+                    try:
+                        if y_choice == "Impact_Force_MN vs Time_ms":
+                            fig_o.add_trace(go.Scatter(x=dfi["Time_ms"], y=dfi["Impact_Force_MN"], mode="lines", name=label))
+                            fig_o.update_xaxes(title_text="Time (ms)")
+                            fig_o.update_yaxes(title_text="Impact force (MN)")
+                        elif y_choice == "Penetration_mm vs Time_ms":
+                            fig_o.add_trace(go.Scatter(x=dfi["Time_ms"], y=dfi["Penetration_mm"], mode="lines", name=label))
+                            fig_o.update_xaxes(title_text="Time (ms)")
+                            fig_o.update_yaxes(title_text="Penetration (mm)")
+                        elif y_choice == "Acceleration_g vs Time_ms":
+                            fig_o.add_trace(go.Scatter(x=dfi["Time_ms"], y=dfi["Acceleration_g"], mode="lines", name=label))
+                            fig_o.update_xaxes(title_text="Time (ms)")
+                            fig_o.update_yaxes(title_text="Acceleration (g)")
+                        elif y_choice == "Hysteresis (Force vs Penetration)":
+                            fig_o.add_trace(go.Scatter(x=dfi["Penetration_mm"], y=dfi["Impact_Force_MN"], mode="lines", name=label))
+                            fig_o.update_xaxes(title_text="Penetration (mm)")
+                            fig_o.update_yaxes(title_text="Impact force (MN)")
+                        else:
+                            fig_o.add_trace(go.Scatter(x=dfi["Time_ms"], y=100.0 * dfi["E_num_ratio"], mode="lines", name=label))
+                            fig_o.update_xaxes(title_text="Time (ms)")
+                            fig_o.update_yaxes(title_text="|E_num| / E0 (%)")
+                    except Exception:
+                        continue
+
+                fig_o.update_layout(height=520, margin=dict(t=30, b=30, l=60, r=30))
+                safe_plotly_chart(st, fig_o, width="stretch")
+
+                # Zip download (CSV per run)
+                if col_dl.button("📦 Download batch CSV zip", use_container_width=True):
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                        for label, dfi in batch_results.items():
+                            z.writestr(f"{label}.csv", dfi.to_csv(index=False))
+                        if batch_meta:
+                            z.writestr("summary.csv", pd.DataFrame(batch_meta).to_csv(index=False))
+                    buf.seek(0)
+                    safe_download_button(st, "Download", buf.read(), "batch_results.zip", "application/zip", width="stretch")
+            else:
+                st.info("Select some YAML files and click **Run batch** to generate overlay plots.")
 
         st.subheader("📥 Export")
         e1, e2, e3 = st.columns(3)
@@ -387,6 +653,75 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
     # ----- Train geometry / Riera mass distribution -----
     with tab_train:
         st.markdown("### Train configuration and Riera-type mass distribution")
+
+        # EN15227 helper (only if current run came from YAML with collision info)
+        try:
+            yaml_cfg = st.session_state.get("yaml_example_cfg")
+        except Exception:
+            yaml_cfg = None
+
+        with st.expander("🇪🇺 EN 15227 helper", expanded=False):
+            presets = load_en15227_presets(Path.cwd())
+            scenario_id = None
+            if isinstance(yaml_cfg, dict):
+                col = yaml_cfg.get("collision")
+                if isinstance(col, dict):
+                    scenario_id = col.get("scenario")
+
+            if not scenario_id:
+                st.caption("No EN15227 scenario found in the selected YAML.")
+            else:
+                scen = resolve_scenario_preset(presets, scenario_id)
+                if not scen:
+                    st.warning(f"Unknown scenario: {scenario_id}")
+                else:
+                    partner_id = (scen.get("partner") or {}).get("preset_id")
+                    interface_id = (scen.get("interface") or {}).get("preset_id")
+                    speed_kmh = scen.get("speed_kmh")
+                    partner = resolve_partner_preset(presets, partner_id) if partner_id else None
+                    interface = resolve_interface_preset(presets, interface_id) if interface_id else None
+
+                    cA, cB, cC = st.columns(3)
+                    cA.metric("Scenario", scenario_id)
+                    if speed_kmh is not None:
+                        cB.metric("Reference speed", f"{float(speed_kmh):.0f} km/h")
+                    if partner and partner.get("mass_kg") is not None:
+                        cC.metric("Reference mass", f"{float(partner['mass_kg'])/1000.0:.1f} t")
+
+                    if interface and isinstance(interface.get("points"), list):
+                        import plotly.graph_objects as go
+                        pts = interface["points"]
+                        x_m = [float(p[0]) for p in pts]
+                        f_MN = [float(p[1]) / 1e6 for p in pts]
+                        fig_if = go.Figure()
+                        fig_if.add_trace(go.Scatter(x=x_m, y=f_MN, mode="lines+markers", name=interface_id))
+                        fig_if.update_layout(height=320, margin=dict(t=10, b=10, l=60, r=20))
+                        fig_if.update_xaxes(title_text="Displacement (m)")
+                        fig_if.update_yaxes(title_text="Force (MN)")
+                        safe_plotly_chart(st, fig_if, width="stretch")
+
+                        # Energy (area under curve)
+                        try:
+                            import numpy as _np
+                            E = 0.0
+                            for (x0, f0), (x1, f1) in zip(pts[:-1], pts[1:]):
+                                E += 0.5 * (float(f0) + float(f1)) * (float(x1) - float(x0))
+                            st.caption(f"Curve energy (area) ≈ {E/1e3:.1f} kJ")
+                            md = interface.get("metadata") or {}
+                            if isinstance(md, dict) and md.get("expected_energy_J") is not None:
+                                st.caption(f"Expected energy (metadata) ≈ {float(md['expected_energy_J'])/1e3:.1f} kJ")
+                        except Exception:
+                            pass
+
+                    # Mass consistency quick check
+                    try:
+                        masses = np.asarray(params.get("masses", []), dtype=float)
+                        M = float(masses.sum())
+                        if partner and partner.get("mass_kg") is not None:
+                            M_ref = float(partner["mass_kg"])
+                            st.caption(f"Current train mass: {M/1000.0:.1f} t · target: {M_ref/1000.0:.1f} t · ratio: {M/M_ref:.3f}")
+                    except Exception:
+                        pass
         fig_train = create_train_geometry_plot(params)
         safe_plotly_chart(st, fig_train, width="stretch")
 

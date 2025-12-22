@@ -197,7 +197,6 @@ class SimulationParams:
     k_wall: float
     cr_wall: float
     contact_model: str
-    contact_law: object | None = None
 
     # Building SDOF (still stored here, but *used* in app/postprocessing)
     building_enable: bool
@@ -233,6 +232,11 @@ class SimulationParams:
     T_max: float   # Maximum simulation time
     step: int      # Number of steps (T_max / h_init)
     T_int: Tuple[float, float]  # Time interval (0, T_max)
+
+    # Contact law implementation object (optional; injected by UI/CLI)
+    # Keep this *after* all required fields: dataclasses require non-default
+    # fields to come before default fields.
+    contact_law: object | None = None
 
     # Optional metadata / consistency check: linear stiffness between masses
     k_train: np.ndarray | None = None
@@ -1708,42 +1712,51 @@ class ImpactSimulator:
             z_friction[i, step_idx + 1] = z_new
 
     def _compute_contact(
-        self,
-        step_idx: int,
-        q: np.ndarray,
-        qp: np.ndarray,
-        u_contact: np.ndarray,
-        R_contact: np.ndarray,
-        contact_active: bool,
-        v0_contact: np.ndarray,
-    ) -> Tuple[bool, np.ndarray]:
-        """Compute contact forces at wall and update contact state."""
-        p = self.params
-        n = p.n_masses
-        dof = 2 * n
+            self,
+            step_idx: int,
+            q: np.ndarray,
+            qp: np.ndarray,
+            u_contact: np.ndarray,
+            R_contact: np.ndarray,
+            contact_active: bool,
+            v0_contact: np.ndarray,
+        ) -> Tuple[bool, np.ndarray]:
+            """Compute contact forces at wall and update contact state."""
+            p = self.params
+            n = p.n_masses
+            dof = 2 * n
 
-        u_contact[:, step_idx + 1] = 0.0
+            u_contact[:, step_idx + 1] = 0.0
 
-        # Check for contact (x < 0)
-        if np.any(q[:n] < 0.0):
-            for i in range(n):
-                if q[i] < 0.0:
-                    u_contact[i, step_idx + 1] = q[i]
+            # Always define R to avoid unbound-local errors when contact persists
+            R = np.zeros(dof)
 
-            if step_idx > 0:
-                du_contact = (u_contact[:, step_idx + 1] -
-                              u_contact[:, step_idx]) / self.h
-            else:
-                du_contact = np.zeros(dof)
+            # Check for contact (x < 0)
+            if np.any(q[:n] < 0.0):
+                for i in range(n):
+                    if q[i] < 0.0:
+                        u_contact[i, step_idx + 1] = q[i]
 
-            # First contact
-            if (not contact_active) and np.any(du_contact[:n] < 0.0):
-                contact_active = True
-                # Only set v0 for x-DOFs that are actually in contact
-                mask_contact_x = du_contact[:n] < 0.0
-                v0_contact[:n] = np.where(mask_contact_x, du_contact[:n], 1.0)
-                v0_contact[:n][v0_contact[:n] == 0.0] = 1.0
+                if step_idx > 0:
+                    du_contact = (u_contact[:, step_idx + 1] -
+                                  u_contact[:, step_idx]) / self.h
+                else:
+                    du_contact = np.zeros(dof)
 
+                # Engage contact as soon as penetration exists.
+                # Capture v0 on the *first* approach into contact.
+                if (not contact_active) and np.any(du_contact[:n] < 0.0):
+                    contact_active = True
+                    # Only set v0 for x-DOFs that are actually approaching
+                    mask_contact_x = du_contact[:n] < 0.0
+                    v0_contact[:n] = np.where(mask_contact_x, du_contact[:n], 1.0)
+                    v0_contact[:n][v0_contact[:n] == 0.0] = 1.0
+                elif not contact_active:
+                    # Penetration with zero/positive du (e.g., initial penetration)
+                    # should still be treated as active contact.
+                    contact_active = True
+
+                # Compute contact forces on every step during penetration
                 R = ContactModels.compute_force(
                     u_contact[:, step_idx + 1],
                     du_contact,
@@ -1754,14 +1767,14 @@ class ImpactSimulator:
                     contact_law=p.contact_law,
                 )
 
-            R_contact[:, step_idx + 1] = -R
+                R_contact[:, step_idx + 1] = -R
 
-        # Loss of contact
-        elif step_idx > 0 and np.any(u_contact[:n, step_idx] < 0.0):
-            contact_active = False
-            v0_contact = np.ones_like(v0_contact)
+            # Loss of contact
+            elif step_idx > 0 and np.any(u_contact[:n, step_idx] < 0.0):
+                contact_active = False
+                v0_contact = np.ones_like(v0_contact)
 
-        return contact_active, v0_contact
+            return contact_active, v0_contact
 
     def _compute_mass_contact(
         self,
@@ -2177,6 +2190,12 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
         "description",
         "title",
         "tags",
+        # YAML/UI helper keys (safe to ignore at the core level)
+        "collision",
+        "collision_meta",
+        "collision_partner",
+        "units",
+        "legacy",
     }
     unknown = sorted(set(raw.keys()) - allowed)
     unknown_nonmeta = [k for k in unknown if k not in extra_ok]

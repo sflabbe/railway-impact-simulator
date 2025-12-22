@@ -1,0 +1,28 @@
+scenarios:
+  EN15227_2011_C1_baseline:
+    description: "EN15227-inspired C1 wagon-to-train baseline (not compliance)."
+    partner:
+      type: en15227_preset
+      preset_id: EN15227_2011_C1_wagon_80t
+    interface:
+      type: en15227_preset
+      preset_id: EN15227_2011_C1_side_buffers_pair
+    speed_kmh: 36
+  EN15227_2011_C2_baseline:
+    description: "EN15227-inspired C2 train-to-train baseline (not compliance)."
+    partner:
+      type: en15227_preset
+      preset_id: EN15227_2011_C2_regional_129t
+    interface:
+      type: en15227_preset
+      preset_id: EN15227_2011_C2_central_coupler
+    speed_kmh: 36
+  EN15227_2011_C3_baseline:
+    description: "EN15227-inspired C3 obstacle baseline (not compliance)."
+    partner:
+      type: en15227_preset
+      preset_id: EN15227_2011_C3_deformable_obstacle_15t
+    interface:
+      type: en15227_preset
+      preset_id: EN15227_2011_C3_min_curve
+    speed_kmh: 110

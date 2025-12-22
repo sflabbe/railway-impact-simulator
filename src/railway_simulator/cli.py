@@ -15,9 +15,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import typer
-import yaml
 
 from .core.engine import run_simulation
+from .config.loader import (
+    ConfigError,
+    apply_collision_to_params,
+    load_simulation_config,
+)
 from .core.parametric import ScenarioDefinition, run_parametric_envelope
 
 app = typer.Typer(
@@ -96,20 +100,10 @@ def _speed_kmh_to_v0_init(speed_kmh: float) -> float:
 
 def _load_config(path: Path) -> dict:
     """Load a YAML or JSON configuration file into a dict."""
-    if not path.is_file():
-        raise typer.BadParameter(f"Config file not found: {path}")
-
-    suffix = path.suffix.lower()
-    text = path.read_text(encoding="utf-8")
-
-    if suffix in {".yaml", ".yml"}:
-        return yaml.safe_load(text)
-    elif suffix == ".json":
-        return json.loads(text)
-    else:
-        raise typer.BadParameter(
-            f"Unsupported config extension '{suffix}'. Use .yml, .yaml or .json."
-        )
+    try:
+        return load_simulation_config(path)
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _parse_speeds_spec(spec: str) -> Tuple[List[float], List[float]]:
@@ -882,6 +876,15 @@ def run(
     # ------------------------------------------------------------------
     _print_and_log(logger, f"Loading config: {config}")
     params = _load_config(config)
+    params = apply_collision_to_params(params, config_path=config)
+    if "collision_meta" in params and params["collision_meta"]:
+        meta = params["collision_meta"]
+        energy = meta.get("absorbed_energy_J")
+        if energy is not None:
+            _print_and_log(
+                logger,
+                f"Interface absorbed energy from curve: {energy:.2f} J",
+            )
 
     # ------------------------------------------------------------------
     # Velocity handling (CLI overrides vs config)
@@ -1017,6 +1020,7 @@ def parametric(
 
     _print_and_log(logger, f"Loading base config: {base_config}")
     base_params = _load_config(base_config)
+    base_params = apply_collision_to_params(base_params, config_path=base_config)
 
     _print_and_log(logger, f"Parsing speeds specification: {speeds}")
     speeds_kmh, weights = _parse_speeds_spec(speeds)

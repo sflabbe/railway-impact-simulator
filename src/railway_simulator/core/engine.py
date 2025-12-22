@@ -197,6 +197,7 @@ class SimulationParams:
     k_wall: float
     cr_wall: float
     contact_model: str
+    contact_law: object | None = None
 
     # Building SDOF (still stored here, but *used* in app/postprocessing)
     building_enable: bool
@@ -753,6 +754,7 @@ class ImpactSimulator:
                 p.k_wall,
                 p.cr_wall,
                 p.contact_model,
+                contact_law=p.contact_law,
             )
             R_contact[:, 0] = -R0
 
@@ -969,6 +971,7 @@ class ImpactSimulator:
                             p.k_wall,
                             p.cr_wall,
                             p.contact_model,
+                            contact_law=p.contact_law,
                         )
                         R_cont_new = -R_raw
                     else:
@@ -1325,21 +1328,30 @@ class ImpactSimulator:
             # Wall at x=0 → penetration δ = max(-x, 0)
             delta = np.maximum(-u_contact[:n, step_idx + 1], 0.0)
             model = self.params.contact_model.lower()
-            if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
-                exp = 1.0
-            else:
-                exp = 1.5
-
-            if np.any(delta > 0.0):
-                if exp == 1.0:
-                    E_pot_contact[step_idx + 1] = 0.5 * self.params.k_wall * float(np.sum(delta ** 2))
-                else:
-                    # For Hertzian: V = ∫ k*δ^n dδ = k*δ^(n+1)/(n+1)
-                    E_pot_contact[step_idx + 1] = (
-                        self.params.k_wall / (exp + 1.0) * float(np.sum(delta ** (exp + 1.0)))
+            contact_law = self.params.contact_law
+            if contact_law is not None:
+                if np.any(delta > 0.0):
+                    E_pot_contact[step_idx + 1] = float(
+                        np.sum([contact_law.absorbed_energy(float(dval)) for dval in delta])
                     )
+                else:
+                    E_pot_contact[step_idx + 1] = 0.0
             else:
-                E_pot_contact[step_idx + 1] = 0.0
+                if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
+                    exp = 1.0
+                else:
+                    exp = 1.5
+
+                if np.any(delta > 0.0):
+                    if exp == 1.0:
+                        E_pot_contact[step_idx + 1] = 0.5 * self.params.k_wall * float(np.sum(delta ** 2))
+                    else:
+                        # For Hertzian: V = ∫ k*δ^n dδ = k*δ^(n+1)/(n+1)
+                        E_pot_contact[step_idx + 1] = (
+                            self.params.k_wall / (exp + 1.0) * float(np.sum(delta ** (exp + 1.0)))
+                        )
+                else:
+                    E_pot_contact[step_idx + 1] = 0.0
 
             # Total potential and mechanical energy
             E_pot[step_idx + 1] = E_pot_spring[step_idx + 1] + E_pot_contact[step_idx + 1]
@@ -1434,7 +1446,9 @@ class ImpactSimulator:
                 if np.any(d > 0.0):
                     for j in range(n):
                         if d[j] > 0.0:
-                            if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
+                            if p.contact_law is not None:
+                                R_el[j] = p.contact_law.evaluate(float(d[j]))
+                            elif model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
                                 R_el[j] = p.k_wall * d[j]
                             else:
                                 R_el[j] = p.k_wall * d[j] ** 1.5
@@ -1730,14 +1744,15 @@ class ImpactSimulator:
                 v0_contact[:n] = np.where(mask_contact_x, du_contact[:n], 1.0)
                 v0_contact[:n][v0_contact[:n] == 0.0] = 1.0
 
-            R = ContactModels.compute_force(
-                u_contact[:, step_idx + 1],
-                du_contact,
-                v0_contact,
-                p.k_wall,
-                p.cr_wall,
-                p.contact_model,
-            )
+                R = ContactModels.compute_force(
+                    u_contact[:, step_idx + 1],
+                    du_contact,
+                    v0_contact,
+                    p.k_wall,
+                    p.cr_wall,
+                    p.contact_model,
+                    contact_law=p.contact_law,
+                )
 
             R_contact[:, step_idx + 1] = -R
 
@@ -1866,12 +1881,17 @@ class ImpactSimulator:
         delta = np.maximum(-u_contact[0, :], 0.0)
 
         model = self.params.contact_model.lower()
-        if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
-            exponent = 1.0
+        if self.params.contact_law is not None:
+            F_backbone_MN = np.array(
+                [self.params.contact_law.evaluate(float(dval)) / 1e6 for dval in delta]
+            )
         else:
-            exponent = 1.5
+            if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
+                exponent = 1.0
+            else:
+                exponent = 1.5
 
-        F_backbone_MN = (self.params.k_wall * delta ** exponent) / 1e6
+            F_backbone_MN = (self.params.k_wall * delta ** exponent) / 1e6
 
         if X_bw.size > 0:
             bw_state = X_bw[0, :]

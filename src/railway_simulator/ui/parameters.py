@@ -695,7 +695,8 @@ def build_train_geometry_ui() -> Dict[str, Any]:
             rel_path = yaml_path.name
         st.caption(f"Selected YAML: **{rel_path}**  ·  case_name: **{case_name}**")
 
-        with st.expander("Preview YAML (read-only)", expanded=False):
+        show_yaml_preview = st.checkbox("Preview YAML (read-only)", value=False, key="yaml_preview_ro")
+        if show_yaml_preview:
             try:
                 st.code(yaml_path.read_text(encoding="utf-8"), language="yaml")
             except Exception:
@@ -759,7 +760,8 @@ def build_train_geometry_ui() -> Dict[str, Any]:
             if y_init.size != n_masses:
                 st.warning(f"'y_init' length ({y_init.size}) != n_masses ({n_masses}). Engine will attempt to coerce.")
 
-        with st.expander("Preview YAML (top-level keys)", expanded=False):
+        show_yaml_keys = st.checkbox("Preview YAML (top-level keys)", value=False, key="yaml_preview_keys")
+        if show_yaml_keys:
             st.json({k: yaml_cfg.get(k) for k in sorted(yaml_cfg.keys())})
 
         return {

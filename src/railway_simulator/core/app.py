@@ -544,7 +544,7 @@ def main():
                         data=_fig_to_html_bytes(fig_speed),
                         file_name="speed_histories_overlay.html",
                         mime="text/html",
-                        width="stretch",
+                        use_container_width=True,
                         key="env_export_speed_overlay_html",
                     )
 
@@ -685,7 +685,7 @@ def main():
                         data=bundle,
                         file_name=f"speed_envelope__{sanitize_filename(str(q))}__{utc_timestamp()}.zip",
                         mime="application/zip",
-                        width="stretch",
+                        use_container_width=True,
                         key="env_export_bundle_zip",
                     )
                 except Exception as exc:
@@ -776,7 +776,7 @@ def main():
                     "Run contact model sweep",
                     type="primary",
                     key="run_contact_sweep",
-                    width="stretch",
+                    use_container_width=True,
                     disabled=(len(models) == 0),
                 )
 
@@ -857,7 +857,7 @@ def main():
                     summary_df = pd.DataFrame(rows)
 
                     st.markdown("#### Summary")
-                    st.dataframe(summary_df, width="stretch")
+                    st.dataframe(summary_df, use_container_width=True)
 
                     if 'E_diss_friction_J_end' in summary_df.columns:
                         try:
@@ -883,7 +883,7 @@ def main():
                             _fig_to_html_bytes(figF),
                             "contact_sweep_force_overlay.html",
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     if show_acc and any("Acceleration_g" in d.columns for _, d in captured):
@@ -901,7 +901,7 @@ def main():
                             _fig_to_html_bytes(figA),
                             "contact_sweep_acc_overlay.html",
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     if show_pen and any("Penetration_mm" in d.columns for _, d in captured):
@@ -919,7 +919,7 @@ def main():
                             _fig_to_html_bytes(figP),
                             "contact_sweep_pen_overlay.html",
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     if show_fd and any(("Penetration_mm" in d.columns and "Impact_Force_MN" in d.columns) for _, d in captured):
@@ -935,7 +935,7 @@ def main():
                             _fig_to_html_bytes(figFD),
                             f"contact_sweep_force_penetration__{pick}.html".replace(" ", "_"),
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     # Exports (data)
@@ -948,7 +948,7 @@ def main():
                         summary_df.to_csv(index=False).encode(),
                         "contact_sweep_summary.csv",
                         "text/csv",
-                        width="stretch",
+                        use_container_width=True,
                     )
                     safe_download_button(
                         c2,
@@ -956,7 +956,7 @@ def main():
                         to_excel(summary_df),
                         "contact_sweep_summary.xlsx",
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        width="stretch",
+                        use_container_width=True,
                     )
 
                     long_df = _stack_parametric_histories(
@@ -970,7 +970,7 @@ def main():
                         _zip_parametric_runs(captured, scenario_name_fn=scen_name, prefix="contact_sweep"),
                         "contact_sweep_runs.zip",
                         "application/zip",
-                        width="stretch",
+                        use_container_width=True,
                     )
 
                     if not long_df.empty:
@@ -981,7 +981,7 @@ def main():
                             long_df.to_csv(index=False).encode(),
                             "contact_sweep_histories_long.csv",
                             "text/csv",
-                            width="stretch",
+                            use_container_width=True,
                         )
                         safe_download_button(
                             d2,
@@ -989,7 +989,7 @@ def main():
                             to_excel(long_df),
                             "contact_sweep_histories_long.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     # One-click bundle: raw runs + tables + plots (HTML)
@@ -1086,7 +1086,7 @@ def main():
                             bundle,
                             f"contact_models__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",
-                            width="stretch",
+                            use_container_width=True,
                         )
                     except Exception as exc:
                         st.warning(f"Bundle export not available: {exc}")
@@ -1155,7 +1155,7 @@ def main():
                     "Run friction/restitution sweep",
                     type="primary",
                     key="run_fric_sweep",
-                    width="stretch",
+                    use_container_width=True,
                     disabled=disable_run,
                 )
 
@@ -1287,7 +1287,7 @@ def main():
                     summary_df = pd.DataFrame(rows)
 
                     st.markdown("#### Summary")
-                    st.dataframe(summary_df, width="stretch")
+                    st.dataframe(summary_df, use_container_width=True)
 
                     if 'E_diss_friction_J_end' in summary_df.columns:
                         try:
@@ -1312,7 +1312,7 @@ def main():
                             _fig_to_html_bytes(figF),
                             "fric_sweep_force_overlay.html",
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     if show_acc and any("Acceleration_g" in d.columns for _, d in captured):
@@ -1330,7 +1330,7 @@ def main():
                             _fig_to_html_bytes(figA),
                             "fric_sweep_acc_overlay.html",
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     if show_pen and any("Penetration_mm" in d.columns for _, d in captured):
@@ -1348,7 +1348,7 @@ def main():
                             _fig_to_html_bytes(figP),
                             "fric_sweep_pen_overlay.html",
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     if show_fd and any(("Penetration_mm" in d.columns and "Impact_Force_MN" in d.columns) for _, d in captured):
@@ -1364,7 +1364,7 @@ def main():
                             _fig_to_html_bytes(figFD),
                             f"fric_sweep_force_penetration__{pick}.html".replace(" ", "_"),
                             "text/html",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     st.markdown("#### Export data")
@@ -1375,7 +1375,7 @@ def main():
                         summary_df.to_csv(index=False).encode(),
                         "fric_sweep_summary.csv",
                         "text/csv",
-                        width="stretch",
+                        use_container_width=True,
                     )
                     safe_download_button(
                         c2,
@@ -1383,7 +1383,7 @@ def main():
                         to_excel(summary_df),
                         "fric_sweep_summary.xlsx",
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        width="stretch",
+                        use_container_width=True,
                     )
                     safe_download_button(
                         c3,
@@ -1391,7 +1391,7 @@ def main():
                         _zip_parametric_runs(captured, scenario_name_fn=scen_name, prefix="fric_sweep"),
                         "fric_sweep_runs.zip",
                         "application/zip",
-                        width="stretch",
+                        use_container_width=True,
                     )
 
                     long_df = _stack_parametric_histories(
@@ -1407,7 +1407,7 @@ def main():
                             long_df.to_csv(index=False).encode(),
                             "fric_sweep_histories_long.csv",
                             "text/csv",
-                            width="stretch",
+                            use_container_width=True,
                         )
                         safe_download_button(
                             d2,
@@ -1415,7 +1415,7 @@ def main():
                             to_excel(long_df),
                             "fric_sweep_histories_long.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            width="stretch",
+                            use_container_width=True,
                         )
 
                     # One-click bundle: raw runs + tables + plots (HTML)
@@ -1511,7 +1511,7 @@ def main():
                             bundle,
                             f"friction_sweep__{sanitize_filename(str(sweep_kind))}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",
-                            width="stretch",
+                            use_container_width=True,
                         )
                     except Exception as exc:
                         st.warning(f"Bundle export not available: {exc}")
@@ -1774,7 +1774,7 @@ def main():
                             bundle,
                             f"numerics_sensitivity__{sanitize_filename(str(q_label))}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",
-                            width="stretch",
+                            use_container_width=True,
                         )
                     except Exception as exc:
                         st.warning(f"Bundle export not available: {exc}")
@@ -1959,7 +1959,7 @@ def main():
                                 bundle,
                                 f"dif_study__{sanitize_filename(k_path.strip())}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                                 "application/zip",
-                                width="stretch",
+                                use_container_width=True,
                             )
                         except Exception as exc:
                             st.warning(f"Bundle export not available: {exc}")
@@ -2233,7 +2233,7 @@ def main():
                             bundle,
                             f"solver_comparison__{sanitize_filename(str(q_label))}__{vmin:.0f}-{vmax:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",
-                            width="stretch",
+                            use_container_width=True,
                         )
                     except Exception as exc:
                         st.warning(f"Bundle export not available: {exc}")

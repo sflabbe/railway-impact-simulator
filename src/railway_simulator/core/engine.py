@@ -27,8 +27,9 @@ Set ``SimulationParams.solver`` (or the YAML key ``solver``) to switch.
 
 from __future__ import annotations
 from dataclasses import dataclass, fields
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Callable, Optional
 import logging
+import time
 import numpy as np
 import pandas as pd
 from scipy.constants import g as GRAVITY
@@ -658,9 +659,25 @@ class ImpactSimulator:
     # ----------------------------------------------------------------
     # RUN
     # ----------------------------------------------------------------
-    def run(self) -> pd.DataFrame:
+    def run(
+        self,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        progress_min_period_s: float = 0.10,
+        emit_peak_diagnostics: bool = True,
+    ) -> pd.DataFrame:
         """
         Execute time-stepping simulation with full HHT-α fixed-point / Newton iteration.
+
+        Parameters
+        ----------
+        progress_callback
+            Optional callable receiving a dict of live metrics during the run.
+            Intended for CLI monitors.
+        progress_min_period_s
+            Minimum wall-clock interval between callback calls.
+        emit_peak_diagnostics
+            If True, prints a 10-line diagnostic about the worst energy-balance
+            residual after the run. Disable this when running a curses monitor.
         """
         p = self.params
         n = p.n_masses
@@ -803,6 +820,8 @@ class ImpactSimulator:
         E_pot[0] = 0.0
         E_mech[0] = E_kin[0]
         E0 = E_mech[0]  # Initial total energy
+
+        last_progress_t = time.perf_counter()
 
         # Time stepping
         solver = str(getattr(p, "solver", "newton")).lower()
@@ -1533,45 +1552,88 @@ class ImpactSimulator:
             else:
                 E_num_ratio[step_idx + 1] = 0.0
 
+            # --------------------------------------------------
+            # Optional progress callback for live monitoring
+            # --------------------------------------------------
+            if progress_callback is not None:
+                try:
+                    now = time.perf_counter()
+                    min_period = float(progress_min_period_s) if progress_min_period_s is not None else 0.0
+                    if min_period < 0.0:
+                        min_period = 0.0
+                    if (now - last_progress_t) >= min_period:
+                        last_progress_t = now
+
+                        F0 = float(R_contact[0, step_idx + 1]) if R_contact.size else 0.0
+                        F0 = max(F0, 0.0)
+                        u0 = float(u_contact[0, step_idx + 1]) if u_contact.size else 0.0
+
+                        progress_callback(
+                            {
+                                "step": int(step_idx + 1),
+                                "n_steps": int(p.step),
+                                "t": float(self.t[step_idx + 1]),
+                                "dt": float(self.h),
+                                "solver": str(getattr(p, "solver", "newton")),
+                                "iters": int(iters_hist[step_idx]),
+                                "max_residual": float(self.max_residual),
+                                "contact_active": bool(contact_active),
+                                "impact_force_MN": float(F0 / 1e6),
+                                "penetration_mm": float(-u0 * 1000.0),
+                                "velocity_m_s": float(qp[0, step_idx + 1]),
+                                "acceleration_g": float(qpp[0, step_idx + 1] / GRAVITY),
+                                "E_kin_J": float(E_kin[step_idx + 1]),
+                                "E_pot_J": float(E_pot[step_idx + 1]),
+                                "E_mech_J": float(E_mech[step_idx + 1]),
+                                "E_diss_total_J": float(E_diss_total[step_idx + 1]),
+                                "E_num_J": float(E_num[step_idx + 1]),
+                                "E_num_ratio": float(E_num_ratio[step_idx + 1]),
+                            }
+                        )
+                except Exception:
+                    # Live monitoring must never break a simulation.
+                    pass
+
         # --------------------------------------------------
         # Peak residual diagnostic print (exactly 10 lines)
         # --------------------------------------------------
-        try:
-            idx_peak = int(np.argmax(E_num_ratio))
-            if idx_peak >= 1:
-                n0 = idx_peak - 1
-                # Energies are stored at end levels t_{n+1}
-                t_peak = float(self.t[idx_peak])
-                dt = float(self.h)
-                iters_peak = int(iters_hist[n0])
+        if emit_peak_diagnostics:
+            try:
+                idx_peak = int(np.argmax(E_num_ratio))
+                if idx_peak >= 1:
+                    n0 = idx_peak - 1
+                    # Energies are stored at end levels t_{n+1}
+                    t_peak = float(self.t[idx_peak])
+                    dt = float(self.h)
+                    iters_peak = int(iters_hist[n0])
 
-                dE_mech = float(E_mech[idx_peak] - E_mech[n0])
-                dE_diss = float(E_diss_total[idx_peak] - E_diss_total[n0])
-                dW_ext = float(W_ext[idx_peak] - W_ext[n0])
-                r_inc = float(dE_mech + dE_diss - dW_ext)
+                    dE_mech = float(E_mech[idx_peak] - E_mech[n0])
+                    dE_diss = float(E_diss_total[idx_peak] - E_diss_total[n0])
+                    dW_ext = float(W_ext[idx_peak] - W_ext[n0])
+                    r_inc = float(dE_mech + dE_diss - dW_ext)
 
-                P_nc = float(P_nc_hist[n0])
-                P_ext = float(P_ext_hist[n0])
+                    P_nc = float(P_nc_hist[n0])
+                    P_ext = float(P_ext_hist[n0])
 
-                delta0 = float(delta_hist[idx_peak])
-                delta_dot0 = float(delta_dot_hist[n0])
-                f_el0 = float(f_el_hist[idx_peak])
-                f_damp0 = float(f_damp_hist[idx_peak])
-                V_contact0 = float(E_pot_contact[idx_peak])
+                    delta0 = float(delta_hist[idx_peak])
+                    delta_dot0 = float(delta_dot_hist[n0])
+                    f_el0 = float(f_el_hist[idx_peak])
+                    f_damp0 = float(f_damp_hist[idx_peak])
+                    V_contact0 = float(E_pot_contact[idx_peak])
 
-                print(f"[EB_PEAK 01/10] step={idx_peak} t={t_peak:.6e} dt={dt:.3e} iters={iters_peak}")
-                print(f"[EB_PEAK 02/10] E_kin={E_kin[idx_peak]:.6e} E_pot={E_pot[idx_peak]:.6e} E_mech={E_mech[idx_peak]:.6e} E_diss={E_diss_total[idx_peak]:.6e}")
-                print(f"[EB_PEAK 03/10] W_ext={W_ext[idx_peak]:.6e} E_num={E_num[idx_peak]:.6e} E_num_ratio={E_num_ratio[idx_peak]:.6e}")
-                print(f"[EB_PEAK 04/10] dE_mech={dE_mech:.6e} dE_diss={dE_diss:.6e} dW_ext={dW_ext:.6e}")
-                print(f"[EB_PEAK 05/10] r_inc=dE_mech+dE_diss-dW_ext={r_inc:.6e}")
-                print(f"[EB_PEAK 06/10] P_nc=qdot_mid@Q_nc_mid={P_nc:.6e}")
-                print(f"[EB_PEAK 07/10] P_ext=qdot_mid@Q_ext_mid={P_ext:.6e}")
-                print(f"[EB_PEAK 08/10] contact delta={delta0:.6e} delta_dot={delta_dot0:.6e}")
-                print(f"[EB_PEAK 09/10] contact f_el={f_el0:.6e} f_damp={f_damp0:.6e}")
-                print(f"[EB_PEAK 10/10] contact V_contact={V_contact0:.6e}")
-        except Exception:
-            # Never fail a run because of optional diagnostics
-            pass
+                    print(f"[EB_PEAK 01/10] step={idx_peak} t={t_peak:.6e} dt={dt:.3e} iters={iters_peak}")
+                    print(f"[EB_PEAK 02/10] E_kin={E_kin[idx_peak]:.6e} E_pot={E_pot[idx_peak]:.6e} E_mech={E_mech[idx_peak]:.6e} E_diss={E_diss_total[idx_peak]:.6e}")
+                    print(f"[EB_PEAK 03/10] W_ext={W_ext[idx_peak]:.6e} E_num={E_num[idx_peak]:.6e} E_num_ratio={E_num_ratio[idx_peak]:.6e}")
+                    print(f"[EB_PEAK 04/10] dE_mech={dE_mech:.6e} dE_diss={dE_diss:.6e} dW_ext={dW_ext:.6e}")
+                    print(f"[EB_PEAK 05/10] r_inc=dE_mech+dE_diss-dW_ext={r_inc:.6e}")
+                    print(f"[EB_PEAK 06/10] P_nc=qdot_mid@Q_nc_mid={P_nc:.6e}")
+                    print(f"[EB_PEAK 07/10] P_ext=qdot_mid@Q_ext_mid={P_ext:.6e}")
+                    print(f"[EB_PEAK 08/10] contact delta={delta0:.6e} delta_dot={delta_dot0:.6e}")
+                    print(f"[EB_PEAK 09/10] contact f_el={f_el0:.6e} f_damp={f_damp0:.6e}")
+                    print(f"[EB_PEAK 10/10] contact V_contact={V_contact0:.6e}")
+            except Exception:
+                # Never fail a run because of optional diagnostics
+                pass
 
         # Sync linear solves count from integrator
         self.linear_solves = self.integrator.n_lu
@@ -2139,7 +2201,12 @@ def get_default_simulation_params() -> dict:
     }
 
 
-def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
+def run_simulation(
+    params: SimulationParams | Dict[str, Any],
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    progress_min_period_s: float = 0.10,
+    emit_peak_diagnostics: bool = True,
+) -> pd.DataFrame:
     """
     High-level convenience wrapper.
 
@@ -2260,7 +2327,11 @@ def run_simulation(params: SimulationParams | Dict[str, Any]) -> pd.DataFrame:
     sim_params = SimulationParams(**coerced)
 
     simulator = ImpactSimulator(sim_params)
-    return simulator.run()
+    return simulator.run(
+        progress_callback=progress_callback,
+        progress_min_period_s=progress_min_period_s,
+        emit_peak_diagnostics=emit_peak_diagnostics,
+    )
 
 def _coerce_scalar_types_for_simulation(base: dict) -> dict:
     """

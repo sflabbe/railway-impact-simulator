@@ -8,6 +8,8 @@ import os
 import sys
 import subprocess
 import time
+import threading
+import queue
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -17,6 +19,7 @@ import pandas as pd
 import typer
 
 from .core.engine import run_simulation
+from .terminal_monitor import run_htop_monitor
 from .config.loader import (
     ConfigError,
     apply_collision_to_params,
@@ -826,6 +829,29 @@ def run(
             "Use a negative value for motion towards the barrier."
         ),
     ),
+    live_monitor: bool = typer.Option(
+        False,
+        "--live-monitor",
+        help="Show a full-screen live monitor (htop style) while the simulation runs.",
+    ),
+    live_refresh_s: float = typer.Option(
+        0.05,
+        "--live-refresh-s",
+        help="Terminal UI refresh period in seconds (live monitor only).",
+    ),
+    live_sample_s: float = typer.Option(
+        0.02,
+        "--live-sample-s",
+        help="Minimum wall-time between progress samples from the solver (live monitor only).",
+    ),
+    live_hold: bool = typer.Option(
+        True,
+        "--live-hold/--live-auto-close",
+        help=(
+            "Keep the live monitor on screen after completion until you press q. "
+            "Use --live-auto-close to return to the shell automatically."
+        ),
+    ),
     ascii_plot: bool = typer.Option(
         False,
         "--ascii-plot",
@@ -895,9 +921,79 @@ def run(
     # Run simulation
     # ------------------------------------------------------------------
     _print_and_log(logger, "Running simulation ...")
-    t0 = time.perf_counter()
-    results_df = run_simulation(params)
-    wall_time = time.perf_counter() - t0
+
+    results_df: pd.DataFrame
+    wall_time: float
+
+    can_live = bool(live_monitor and sys.stdout.isatty() and sys.stdin.isatty())
+    if can_live:
+        updates: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=16)
+        done_event = threading.Event()
+        result_holder: Dict[str, Any] = {}
+        error_holder: List[BaseException] = []
+
+        def _progress_cb(snapshot: Dict[str, Any]) -> None:
+            # Keep only the newest samples; the UI will draw the latest.
+            try:
+                while updates.qsize() > 8:
+                    updates.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                updates.put_nowait(snapshot)
+            except queue.Full:
+                pass
+
+        def _worker() -> None:
+            t0w = time.perf_counter()
+            try:
+                df = run_simulation(
+                    params,
+                    progress_callback=_progress_cb,
+                    progress_min_period_s=float(live_sample_s),
+                    emit_peak_diagnostics=False,
+                )
+                result_holder["df"] = df
+                result_holder["wall"] = time.perf_counter() - t0w
+            except BaseException as exc:
+                error_holder.append(exc)
+            finally:
+                done_event.set()
+
+        th = threading.Thread(target=_worker, daemon=True)
+        th.start()
+
+        title = str(params.get("case_name") or config.stem)
+        try:
+            run_htop_monitor(
+                updates=updates,
+                done_event=done_event,
+                title=title,
+                refresh_s=float(live_refresh_s),
+                hold_on_done=bool(live_hold),
+            )
+        except Exception:
+            logger.exception("Live terminal monitor failed.")
+
+        th.join()
+
+        if error_holder:
+            raise error_holder[0]
+
+        results_df = result_holder.get("df")
+        wall_time = float(result_holder.get("wall", 0.0))
+        if results_df is None:
+            raise RuntimeError("Live run finished without a results dataframe.")
+
+    else:
+        if live_monitor:
+            _print_and_log(
+                logger,
+                "Live monitor requested, but stdout or stdin is not a TTY. Running without live monitor.",
+            )
+        t0 = time.perf_counter()
+        results_df = run_simulation(params)
+        wall_time = time.perf_counter() - t0
 
     perf = _compute_single_run_performance(results_df, wall_time, params)
     perf["velocity_source"] = velocity_source

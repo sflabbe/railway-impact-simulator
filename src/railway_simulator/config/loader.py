@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -28,6 +28,32 @@ from .presets import (
 
 class ConfigError(ValueError):
     pass
+
+
+def _obj_to_dict(obj: Any) -> Any:
+    """Convert common config objects to plain Python types.
+
+    Supports dict, Pydantic models (v2 and v1), and dataclasses.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    # Pydantic v2
+    if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+        try:
+            return obj.model_dump()
+        except Exception:
+            pass
+    # Pydantic v1
+    if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+        try:
+            return obj.dict()
+        except Exception:
+            pass
+    if is_dataclass(obj):
+        return asdict(obj)
+    return obj
 
 
 def load_simulation_config(path: Path) -> Dict[str, Any]:
@@ -150,7 +176,7 @@ def resolve_collision(
         interface_meta["tabulated_energy_J"] = compute_absorbed_energy(interface_spec.points)
 
     return {
-        "partner": partner if isinstance(partner, dict) else asdict(partner),
+        "partner": _obj_to_dict(partner),
         "interface": interface_spec.model_dump() if interface_spec is not None else None,
         "interface_law": law,
         "interface_meta": interface_meta,

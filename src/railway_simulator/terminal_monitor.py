@@ -26,6 +26,60 @@ _SPARK = "▁▂▃▄▅▆▇█"
 _SPARK_ASCII = " .:-=+*#%@"
 
 
+_BRAILLE_BASE = 0x2800
+_BRAILLE_BITS = (
+    (0x01, 0x08),
+    (0x02, 0x10),
+    (0x04, 0x20),
+    (0x40, 0x80),
+)
+
+
+def _set_braille(mask_grid: List[List[int]], x_sub: int, y_sub: int) -> None:
+    cell_x = x_sub // 2
+    cell_y = y_sub // 4
+    if cell_y < 0 or cell_y >= len(mask_grid):
+        return
+    row = mask_grid[cell_y]
+    if cell_x < 0 or cell_x >= len(row):
+        return
+    dx = x_sub % 2
+    dy = y_sub % 4
+    row[cell_x] |= _BRAILLE_BITS[dy][dx]
+
+
+def _draw_line_braille(mask_grid: List[List[int]], x0: int, y0: int, x1: int, y1: int) -> None:
+    """Bresenham line in sub pixel coordinates."""
+    dx = abs(x1 - x0)
+    sx = 1 if x0 < x1 else -1
+    dy = -abs(y1 - y0)
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    x = x0
+    y = y0
+    while True:
+        _set_braille(mask_grid, x, y)
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x += sx
+        if e2 <= dx:
+            err += dx
+            y += sy
+
+
+def _render_braille_row(mask_row: List[int]) -> str:
+    out = []
+    for m in mask_row:
+        if m:
+            out.append(chr(_BRAILLE_BASE + m))
+        else:
+            out.append(" ")
+    return "".join(out)
+
+
 def _supports_unicode() -> bool:
     try:
         if curses is None:
@@ -36,15 +90,22 @@ def _supports_unicode() -> bool:
 
 
 def _fmt_num(x: float) -> str:
-    ax = abs(float(x))
+    """Compact numeric formatting for axes and headers.
+
+    Avoids scientific notation for zero and common plot scales.
+    """
+    x = float(x)
+    ax = abs(x)
+    if ax < 1e-12:
+        return "0"
     if ax >= 1e6:
         return f"{x:.3e}"
     if ax >= 1e3:
-        return f"{x:.3g}"
+        return f"{x:.4g}"
     if ax >= 1.0:
-        return f"{x:.3g}"
+        return f"{x:.4g}"
     if ax >= 1e-3:
-        return f"{x:.3g}"
+        return f"{x:.4g}"
     return f"{x:.3e}"
 
 
@@ -203,6 +264,8 @@ class HtopLikeMonitor:
         self.paused = False
         self.detached = False
 
+
+        self.view_idx = 0
         self.last: Dict[str, Any] = {}
 
         self.buf_t_ms: Deque[float] = deque(maxlen=self.cfg.buffer_len)
@@ -210,6 +273,7 @@ class HtopLikeMonitor:
         self.buf_force: Deque[float] = deque(maxlen=self.cfg.buffer_len)
         self.buf_pen: Deque[float] = deque(maxlen=self.cfg.buffer_len)
         self.buf_ratio: Deque[float] = deque(maxlen=self.cfg.buffer_len)
+        self.buf_ratio_ppm: Deque[float] = deque(maxlen=self.cfg.buffer_len)
         self.buf_emech: Deque[float] = deque(maxlen=self.cfg.buffer_len)
 
 
@@ -224,6 +288,7 @@ class HtopLikeMonitor:
         self.peak_force = 0.0
         self.peak_pen = 0.0
         self.peak_ratio = 0.0
+        self.peak_ratio_ppm = 0.0
 
     def _consume_updates(self) -> None:
         latest = None
@@ -254,6 +319,7 @@ class HtopLikeMonitor:
         self.buf_force.append(f)
         self.buf_pen.append(p)
         self.buf_ratio.append(r)
+        self.buf_ratio_ppm.append(r * 1e6)
         self.buf_emech.append(em)
 
         self.buf_ekin.append(ek)
@@ -263,10 +329,12 @@ class HtopLikeMonitor:
         self.peak_force = max(self.peak_force, f)
         self.peak_pen = max(self.peak_pen, p)
         self.peak_ratio = max(self.peak_ratio, r)
+        self.peak_ratio_ppm = max(self.peak_ratio_ppm, r * 1e6)
 
         self.peak_ekin = max(self.peak_ekin, ek)
         self.peak_ediss = max(self.peak_ediss, ed)
         self.peak_enum = max(self.peak_enum, abs(en))
+
 
 
     def _draw_plot_core(
@@ -288,10 +356,18 @@ class HtopLikeMonitor:
         if height < 3 or width < 10:
             return
 
-        xs = list(x_ms)
-        ys = list(y_vals)
-        if not xs or not ys:
+        xs0 = list(x_ms)
+        ys0 = list(y_vals)
+        if not xs0 or not ys0:
             return
+
+        n = min(len(xs0), len(ys0))
+        xs0 = xs0[-n:]
+        ys0 = ys0[-n:]
+
+        x_base = float(xs0[0])
+        xs = [float(v) - x_base for v in xs0]
+        ys = [float(v) for v in ys0]
 
         ylab_w = 9 if show_y_labels else 0
         plot_h = max(1, height)
@@ -299,17 +375,18 @@ class HtopLikeMonitor:
 
         y_min = float(min(ys))
         y_max = float(max(ys))
+
+        if y_min >= 0.0:
+            y_min = 0.0
+
         if abs(y_max - y_min) < 1e-30:
             y_max = y_min + 1.0
         else:
             span = y_max - y_min
-            y_min = y_min - 0.05 * span
-            y_max = y_max + 0.05 * span
-
-        if downsample_kind == "last":
-            xs_ds, ys_ds = _downsample_last(xs, ys, plot_w)
-        else:
-            xs_ds, ys_ds = _downsample_max(xs, ys, plot_w)
+            y_min = y_min - 0.03 * span
+            y_max = y_max + 0.03 * span
+            if y_min >= 0.0:
+                y_min = 0.0
 
         if ylab_w > 0:
             for frac in (1.0, 0.5, 0.0):
@@ -320,39 +397,79 @@ class HtopLikeMonitor:
                 _safe_addstr(win, top + row, left + 0, lab)
 
         ascii_only = bool(self.cfg.ascii_only)
-        plot_char = "#" if ascii_only else "▇"
-        line_char = "|" if ascii_only else "│"
 
-        prev_row = None
-        prev_col = None
-        for j in range(len(ys_ds)):
-            col = j
-            yv = float(ys_ds[j])
+        attr = 0
+        try:
+            if curses.has_colors() and color_pair > 0:
+                attr = curses.color_pair(color_pair)
+        except Exception:
+            attr = 0
+
+        if ascii_only:
+            plot_char = "#"
+            line_char = "|"
+            if downsample_kind == "last":
+                xs_ds, ys_ds = _downsample_last(xs, ys, plot_w)
+            else:
+                xs_ds, ys_ds = _downsample_max(xs, ys, plot_w)
+
+            prev_row = None
+            prev_col = None
+            for j in range(len(ys_ds)):
+                col = j
+                yv = float(ys_ds[j])
+                rr = (yv - y_min) / (y_max - y_min)
+                rr = max(0.0, min(1.0, rr))
+                row = int(round((1.0 - rr) * (plot_h - 1)))
+                row = max(0, min(plot_h - 1, row))
+
+                wy = top + row
+                wx = left + ylab_w + col
+                _safe_addstr(win, wy, wx, plot_char, attr)
+
+                if prev_row is not None and prev_col is not None and col != prev_col:
+                    y0 = min(prev_row, row)
+                    y1 = max(prev_row, row)
+                    if y1 - y0 >= 2:
+                        for rrow in range(y0 + 1, y1):
+                            _safe_addstr(win, top + rrow, left + ylab_w + col, line_char, attr)
+                prev_row = row
+                prev_col = col
+            return
+
+        # Unicode braille plot for smoother curves
+        w_sub = max(2, plot_w * 2)
+        h_sub = max(4, plot_h * 4)
+
+        if downsample_kind == "last":
+            _xs_ds, ys_ds = _downsample_last(xs, ys, w_sub)
+        else:
+            _xs_ds, ys_ds = _downsample_max(xs, ys, w_sub)
+
+        if not ys_ds:
+            return
+
+        mask_grid: List[List[int]] = [[0 for _ in range(plot_w)] for _ in range(plot_h)]
+
+        npts = len(ys_ds)
+        for k in range(npts):
+            yv = float(ys_ds[k])
             rr = (yv - y_min) / (y_max - y_min)
             rr = max(0.0, min(1.0, rr))
-            row = int(round((1.0 - rr) * (plot_h - 1)))
-            row = max(0, min(plot_h - 1, row))
+            x_sub = 0 if npts <= 1 else int(round(k * (w_sub - 1) / (npts - 1)))
+            y_sub = int(round((1.0 - rr) * (h_sub - 1)))
+            if k == 0:
+                x_prev = x_sub
+                y_prev = y_sub
+                _set_braille(mask_grid, x_sub, y_sub)
+            else:
+                _draw_line_braille(mask_grid, x_prev, y_prev, x_sub, y_sub)
+                x_prev = x_sub
+                y_prev = y_sub
 
-            wy = top + row
-            wx = left + ylab_w + col
-            attr = 0
-            try:
-                if curses.has_colors() and color_pair > 0:
-                    attr = curses.color_pair(color_pair)
-            except Exception:
-                attr = 0
-            _safe_addstr(win, wy, wx, plot_char, attr)
-
-            if prev_row is not None and prev_col is not None and col != prev_col:
-                y0 = min(prev_row, row)
-                y1 = max(prev_row, row)
-                if y1 - y0 >= 2:
-                    for rrow in range(y0 + 1, y1):
-                        _safe_addstr(win, top + rrow, left + ylab_w + col, line_char, attr)
-            prev_row = row
-            prev_col = col
-
-        _safe_addstr(win, top + plot_h - 1, left + ylab_w + 1, "ms")
+        for r in range(plot_h):
+            row_txt = _render_braille_row(mask_grid[r])
+            _safe_addstr(win, top + r, left + ylab_w, row_txt, attr)
 
     def _draw_plot_multi_core(
         self,
@@ -364,22 +481,169 @@ class HtopLikeMonitor:
         x_ms: Deque[float],
         series: List[Tuple[str, Deque[float], int]],
         base_unit: str = "J",
+        normalize: bool = False,
     ) -> None:
         if curses is None:
             return
-        if height < 3 or width < 10:
+        if height < 4 or width < 18:
             return
 
-        xs = list(x_ms)
-        if not xs:
+        xs0 = list(x_ms)
+        if not xs0:
             return
 
         ys_list: List[List[float]] = []
         for _label, buf, _cp in series:
             ys_list.append(list(buf))
-        if not ys_list or any(len(ys) != len(xs) for ys in ys_list):
+
+        n = min([len(xs0)] + [len(ys) for ys in ys_list]) if ys_list else len(xs0)
+        if n < 2:
             return
 
+        xs0 = xs0[-n:]
+        ys_list = [ys[-n:] for ys in ys_list]
+
+        x_base = float(xs0[0])
+        xs = [float(v) - x_base for v in xs0]
+
+        # Layout
+        ylab_w = 9
+        if width - ylab_w < 6:
+            ylab_w = 0
+        plot_w = max(1, width - ylab_w)
+
+        legend_y = top
+        plot_top = top + 1
+        plot_h = height - 1
+        if plot_h < 2:
+            return
+
+        ascii_only = bool(self.cfg.ascii_only)
+
+        # Normalized mode: each series is scaled by its own abs max, so all curves are visible.
+        if normalize:
+            # Build normalized series and legend info with human units.
+            ys_plot_list: List[List[float]] = []
+            legend_texts: List[str] = []
+            unit_txt = "norm"
+
+            for (label, _buf, _cp), ys in zip(series, ys_list):
+                absmax = 0.0
+                if ys:
+                    absmax = float(max(abs(float(v)) for v in ys))
+                if absmax < 1e-30:
+                    absmax = 1.0
+                ys_plot_list.append([float(v) / absmax for v in ys])
+
+                scale_i = 1.0
+                unit_i = base_unit
+                if absmax >= 1e6:
+                    scale_i = 1e6
+                    unit_i = "MJ"
+                elif absmax >= 1e3:
+                    scale_i = 1e3
+                    unit_i = "kJ"
+                last_i = float(ys[-1]) / scale_i if ys else 0.0
+                legend_texts.append(f"{label} {_fmt_num(last_i)} {unit_i} ")
+
+            y_min_s = -1.05
+            y_max_s = 1.05
+
+            # Y labels for normalized axis
+            if ylab_w > 0:
+                for frac, yy in ((1.0, 1.0), (0.5, 0.0), (0.0, -1.0)):
+                    row = int(round((1.0 - frac) * (plot_h - 1)))
+                    row = max(0, min(plot_h - 1, row))
+                    lab = _fmt_num(yy).rjust(ylab_w - 1)
+                    _safe_addstr(win, plot_top + row, left + 0, lab)
+
+            # Legend
+            xoff = left + ylab_w + 1
+            for seg, (_label, _buf, cp) in zip(legend_texts, series):
+                attr = 0
+                try:
+                    if curses.has_colors() and cp > 0:
+                        attr = curses.color_pair(cp)
+                except Exception:
+                    attr = 0
+                _safe_addstr(win, legend_y, xoff, seg, attr)
+                xoff += len(seg)
+                if xoff >= left + width - 2:
+                    break
+            _safe_addstr(win, legend_y, left + width - len(unit_txt) - 1, unit_txt)
+
+            # Zero baseline
+            try:
+                frac0 = (0.0 - y_min_s) / (y_max_s - y_min_s)
+                frac0 = max(0.0, min(1.0, frac0))
+                row0 = int(round((1.0 - frac0) * (plot_h - 1)))
+                row0 = max(0, min(plot_h - 1, row0))
+                win.hline(plot_top + row0, left + ylab_w, curses.ACS_HLINE, plot_w)
+            except Exception:
+                pass
+
+            def _draw_series(ys_scaled: List[float], cp: int) -> None:
+                attr = 0
+                try:
+                    if curses.has_colors() and cp > 0:
+                        attr = curses.color_pair(cp)
+                except Exception:
+                    attr = 0
+
+                if ascii_only:
+                    _, ys_ds = _downsample_last(xs, ys_scaled, plot_w)
+                    for j, yv in enumerate(ys_ds):
+                        rr = (float(yv) - y_min_s) / (y_max_s - y_min_s)
+                        rr = max(0.0, min(1.0, rr))
+                        row = int(round((1.0 - rr) * (plot_h - 1)))
+                        row = max(0, min(plot_h - 1, row))
+                        _safe_addstr(win, plot_top + row, left + ylab_w + j, "#", attr)
+                    return
+
+                w_sub = max(2, plot_w * 2)
+                h_sub = max(4, plot_h * 4)
+
+                _, ys_ds = _downsample_last(xs, ys_scaled, w_sub)
+                if not ys_ds:
+                    return
+
+                mask_grid: List[List[int]] = [[0 for _ in range(plot_w)] for _ in range(plot_h)]
+
+                npts = len(ys_ds)
+                for k in range(npts):
+                    yv = float(ys_ds[k])
+                    rr = (yv - y_min_s) / (y_max_s - y_min_s)
+                    rr = max(0.0, min(1.0, rr))
+                    x_sub = 0 if npts <= 1 else int(round(k * (w_sub - 1) / (npts - 1)))
+                    y_sub = int(round((1.0 - rr) * (h_sub - 1)))
+                    if k == 0:
+                        x_prev = x_sub
+                        y_prev = y_sub
+                        _set_braille(mask_grid, x_sub, y_sub)
+                    else:
+                        _draw_line_braille(mask_grid, x_prev, y_prev, x_sub, y_sub)
+                        x_prev = x_sub
+                        y_prev = y_sub
+
+                for r in range(plot_h):
+                    row_txt = _render_braille_row(mask_grid[r])
+                    c = 0
+                    while c < plot_w:
+                        if row_txt[c] == " ":
+                            c += 1
+                            continue
+                        c0 = c
+                        while c < plot_w and row_txt[c] != " ":
+                            c += 1
+                        seg = row_txt[c0:c]
+                        _safe_addstr(win, plot_top + r, left + ylab_w + c0, seg, attr)
+
+            for ys_scaled, (_label, _buf, cp) in zip(ys_plot_list, series):
+                _draw_series(ys_scaled, cp)
+
+            return
+
+        # Absolute mode: shared scaling for all series
         abs_max = 0.0
         y_min = None
         y_max = None
@@ -407,82 +671,122 @@ class HtopLikeMonitor:
 
         y_min_s = y_min / scale
         y_max_s = y_max / scale
+
+        if y_min_s >= 0.0:
+            y_min_s = 0.0
+
         span = y_max_s - y_min_s
-        y_min_s = y_min_s - 0.05 * span
-        y_max_s = y_max_s + 0.05 * span
+        if abs(span) < 1e-30:
+            y_max_s = y_min_s + 1.0
+            span = y_max_s - y_min_s
+
+        y_min_s = y_min_s - 0.03 * span
+        y_max_s = y_max_s + 0.03 * span
+        if y_min_s >= 0.0:
+            y_min_s = 0.0
         if abs(y_max_s - y_min_s) < 1e-30:
             y_max_s = y_min_s + 1.0
 
-        ylab_w = 9
-        plot_h = max(1, height)
-        plot_w = max(1, width - ylab_w)
-
         # Y labels
-        for frac in (1.0, 0.5, 0.0):
-            yy = y_min_s + frac * (y_max_s - y_min_s)
-            row = int(round((1.0 - frac) * (plot_h - 1)))
-            row = max(0, min(plot_h - 1, row))
-            lab = _fmt_num(yy).rjust(ylab_w - 1)
-            _safe_addstr(win, top + row, left + 0, lab)
+        if ylab_w > 0:
+            for frac in (1.0, 0.5, 0.0):
+                yy = y_min_s + frac * (y_max_s - y_min_s)
+                row = int(round((1.0 - frac) * (plot_h - 1)))
+                row = max(0, min(plot_h - 1, row))
+                lab = _fmt_num(yy).rjust(ylab_w - 1)
+                _safe_addstr(win, plot_top + row, left + 0, lab)
 
-        # Legend
+        # Legend and unit
         xoff = left + ylab_w + 1
-        for label, _buf, cp in series:
-            seg = f"{label} "
+        for s_idx, (label, _buf, cp) in enumerate(series):
+            try:
+                last_v = float(ys_list[s_idx][-1]) / float(scale)
+            except Exception:
+                last_v = None
+
+            if last_v is None:
+                seg = f"{label} "
+            else:
+                seg = f"{label} {_fmt_num(last_v)} "
+
             attr = 0
             try:
                 if curses.has_colors() and cp > 0:
                     attr = curses.color_pair(cp)
             except Exception:
                 attr = 0
-            _safe_addstr(win, top, xoff, seg, attr)
+            _safe_addstr(win, legend_y, xoff, seg, attr)
             xoff += len(seg)
             if xoff >= left + width - 2:
                 break
-        unit_txt = f"{unit}"
-        _safe_addstr(win, top, left + width - len(unit_txt) - 1, unit_txt)
 
-        ascii_only = bool(self.cfg.ascii_only)
-        chars = ["*", "+", "x", "o", "#", "%"] if ascii_only else ["●", "◆", "▲", "■", "✚", "✖"]
-        line_char = "|" if ascii_only else "│"
+        unit_txt = f"{unit}"
+        _safe_addstr(win, legend_y, left + width - len(unit_txt) - 1, unit_txt)
+
+        def _draw_braille_series(
+            ys_scaled: List[float],
+            cp: int,
+        ) -> None:
+            attr = 0
+            try:
+                if curses.has_colors() and cp > 0:
+                    attr = curses.color_pair(cp)
+            except Exception:
+                attr = 0
+
+            if ascii_only:
+                _, ys_ds = _downsample_last(xs, ys_scaled, plot_w)
+                for j, yv in enumerate(ys_ds):
+                    rr = (float(yv) - y_min_s) / (y_max_s - y_min_s)
+                    rr = max(0.0, min(1.0, rr))
+                    row = int(round((1.0 - rr) * (plot_h - 1)))
+                    row = max(0, min(plot_h - 1, row))
+                    _safe_addstr(win, plot_top + row, left + ylab_w + j, "*", attr)
+                return
+
+            w_sub = max(2, plot_w * 2)
+            h_sub = max(4, plot_h * 4)
+
+            _, ys_ds = _downsample_last(xs, ys_scaled, w_sub)
+            if not ys_ds:
+                return
+
+            mask_grid: List[List[int]] = [[0 for _ in range(plot_w)] for _ in range(plot_h)]
+
+            npts = len(ys_ds)
+            for k in range(npts):
+                yv = float(ys_ds[k])
+                rr = (yv - y_min_s) / (y_max_s - y_min_s)
+                rr = max(0.0, min(1.0, rr))
+                x_sub = 0 if npts <= 1 else int(round(k * (w_sub - 1) / (npts - 1)))
+                y_sub = int(round((1.0 - rr) * (h_sub - 1)))
+                if k == 0:
+                    x_prev = x_sub
+                    y_prev = y_sub
+                    _set_braille(mask_grid, x_sub, y_sub)
+                else:
+                    _draw_line_braille(mask_grid, x_prev, y_prev, x_sub, y_sub)
+                    x_prev = x_sub
+                    y_prev = y_sub
+
+            for r in range(plot_h):
+                row_txt = _render_braille_row(mask_grid[r])
+                c = 0
+                while c < plot_w:
+                    if row_txt[c] == " ":
+                        c += 1
+                        continue
+                    c0 = c
+                    while c < plot_w and row_txt[c] != " ":
+                        c += 1
+                    seg = row_txt[c0:c]
+                    _safe_addstr(win, plot_top + r, left + ylab_w + c0, seg, attr)
 
         for s_idx, (_label, _buf, cp) in enumerate(series):
             ys = ys_list[s_idx]
-            _, ys_ds = _downsample_last(xs, ys, plot_w)
-            ys_ds = [v / scale for v in ys_ds]
+            ys_scaled = [float(v) / scale for v in ys]
+            _draw_braille_series(ys_scaled, cp)
 
-            plot_char = chars[s_idx % len(chars)]
-            prev_row = None
-            prev_col = None
-            for j in range(len(ys_ds)):
-                col = j
-                yv = float(ys_ds[j])
-                rr = (yv - y_min_s) / (y_max_s - y_min_s)
-                rr = max(0.0, min(1.0, rr))
-                row = int(round((1.0 - rr) * (plot_h - 1)))
-                row = max(0, min(plot_h - 1, row))
-
-                wy = top + row
-                wx = left + ylab_w + col
-                attr = 0
-                try:
-                    if curses.has_colors() and cp > 0:
-                        attr = curses.color_pair(cp)
-                except Exception:
-                    attr = 0
-                _safe_addstr(win, wy, wx, plot_char, attr)
-
-                if prev_row is not None and prev_col is not None and col != prev_col:
-                    y0 = min(prev_row, row)
-                    y1 = max(prev_row, row)
-                    if y1 - y0 >= 2:
-                        for rrow in range(y0 + 1, y1):
-                            _safe_addstr(win, top + rrow, left + ylab_w + col, line_char, attr)
-
-                prev_row = row
-                prev_col = col
-
-        _safe_addstr(win, top + plot_h - 1, left + ylab_w + 1, "ms")
 
     def _draw_box_plot(
         self,
@@ -515,19 +819,17 @@ class HtopLikeMonitor:
         except Exception:
             return
 
-        ascii_only = bool(self.cfg.ascii_only)
-        dot = "*" if ascii_only else "•"
-        line = "|" if ascii_only else "│"
-
         attr_plot = 0
         try:
-            if curses is not None and color_pair:
+            if curses is not None and color_pair and curses.has_colors():
                 attr_plot = curses.color_pair(int(color_pair))
         except Exception:
             attr_plot = 0
 
         inner_h = height - 2
         inner_w = width - 2
+        if inner_h < 3 or inner_w < 10:
+            return
 
         ylab_w = 0
         if inner_w >= 52:
@@ -536,33 +838,39 @@ class HtopLikeMonitor:
         plot_w = max(1, inner_w - ylab_w)
         plot_h = max(1, inner_h)
 
-        # Title on top border
         header = f" {title}  last { _fmt_num(last_val) } {y_unit}  peak { _fmt_num(peak_val) } {y_unit} "
         header = header[: max(0, width - 2)]
         _safe_addstr(win, 0, 1, header)
 
-        xs = list(x_ms)
-        ys = list(y_vals)
-        if len(xs) != len(ys):
-            n = min(len(xs), len(ys))
-            xs = xs[-n:]
-            ys = ys[-n:]
-        if len(xs) < 2:
+        xs0 = list(x_ms)
+        ys0 = list(y_vals)
+        n = min(len(xs0), len(ys0))
+        if n < 2:
             return
+        xs0 = xs0[-n:]
+        ys0 = ys0[-n:]
 
-        x0 = float(xs[0])
+        x_base = float(xs0[0])
+        xs = [float(v) - x_base for v in xs0]
+        ys = [float(v) for v in ys0]
+
+        x0 = 0.0
         x1 = float(xs[-1])
         if x1 <= x0:
             x1 = x0 + 1.0
 
-        y_min = 0.0
-        y_max = max(ys) if len(ys) else 0.0
+        y_min = float(min(ys))
+        y_max = float(max(ys))
+        if y_min >= 0.0:
+            y_min = 0.0
         if abs(y_max - y_min) < 1e-30:
             y_max = y_min + 1.0
         else:
-            y_max = y_max * 1.05
-
-        xs_ds, ys_ds = _downsample_max(xs, ys, plot_w)
+            span = y_max - y_min
+            y_min = y_min - 0.03 * span
+            y_max = y_max + 0.03 * span
+            if y_min >= 0.0:
+                y_min = 0.0
 
         # Y axis labels
         if ylab_w > 0:
@@ -573,37 +881,51 @@ class HtopLikeMonitor:
                 lab = _fmt_num(yy).rjust(ylab_w - 1)
                 _safe_addstr(win, 1 + row, 1, lab)
 
-        # Plot
-        prev_row = None
-        prev_col = None
-        for j in range(len(ys_ds)):
-            col = j
-            yv = float(ys_ds[j])
-            r = (yv - y_min) / (y_max - y_min)
-            r = max(0.0, min(1.0, r))
-            row = int(round((1.0 - r) * (plot_h - 1)))
-            row = max(0, min(plot_h - 1, row))
+        ascii_only = bool(self.cfg.ascii_only)
 
-            wy = 1 + row
-            wx = 1 + ylab_w + col
-            try:
-                win.addstr(wy, wx, dot, attr_plot)
-            except Exception:
-                pass
-
-            if prev_row is not None and prev_col is not None:
-                if col == prev_col + 1 and row != prev_row:
+        if ascii_only:
+            xs_ds, ys_ds = _downsample_max(xs, ys, plot_w)
+            prev_row = None
+            prev_col = None
+            for j in range(len(ys_ds)):
+                col = j
+                yv = float(ys_ds[j])
+                r = (yv - y_min) / (y_max - y_min)
+                r = max(0.0, min(1.0, r))
+                row = int(round((1.0 - r) * (plot_h - 1)))
+                row = max(0, min(plot_h - 1, row))
+                _safe_addstr(win, 1 + row, 1 + ylab_w + col, "#", attr_plot)
+                if prev_row is not None and prev_col is not None and col == prev_col + 1 and row != prev_row:
                     a = min(row, prev_row)
                     b = max(row, prev_row)
                     for rr in range(a, b + 1):
-                        wy2 = 1 + rr
-                        wx2 = 1 + ylab_w + col
-                        try:
-                            win.addstr(wy2, wx2, line, attr_plot)
-                        except Exception:
-                            pass
-            prev_row = row
-            prev_col = col
+                        _safe_addstr(win, 1 + rr, 1 + ylab_w + col, "|", attr_plot)
+                prev_row = row
+                prev_col = col
+        else:
+            w_sub = max(2, plot_w * 2)
+            h_sub = max(4, plot_h * 4)
+            _xs_ds, ys_ds = _downsample_max(xs, ys, w_sub)
+            if ys_ds:
+                mask_grid: List[List[int]] = [[0 for _ in range(plot_w)] for _ in range(plot_h)]
+                npts = len(ys_ds)
+                for k in range(npts):
+                    yv = float(ys_ds[k])
+                    rr = (yv - y_min) / (y_max - y_min)
+                    rr = max(0.0, min(1.0, rr))
+                    x_sub = 0 if npts <= 1 else int(round(k * (w_sub - 1) / (npts - 1)))
+                    y_sub = int(round((1.0 - rr) * (h_sub - 1)))
+                    if k == 0:
+                        x_prev = x_sub
+                        y_prev = y_sub
+                        _set_braille(mask_grid, x_sub, y_sub)
+                    else:
+                        _draw_line_braille(mask_grid, x_prev, y_prev, x_sub, y_sub)
+                        x_prev = x_sub
+                        y_prev = y_sub
+                for r in range(plot_h):
+                    row_txt = _render_braille_row(mask_grid[r])
+                    _safe_addstr(win, 1 + r, 1 + ylab_w, row_txt, attr_plot)
 
         # X axis labels on bottom border
         if width >= 36:
@@ -613,7 +935,6 @@ class HtopLikeMonitor:
             xlab = f" {x1:.0f} ms "
         xlab = xlab[: max(0, width - 2)]
         _safe_addstr(win, height - 1, 1, xlab)
-
 
     def _draw_energy_panel(
         self,
@@ -645,7 +966,7 @@ class HtopLikeMonitor:
             return
 
         title = "energy balance"
-        stats = f"Eb last {last_ratio:.2e}  peak {peak_ratio:.2e}"
+        stats = f"Eb ppm  last { _fmt_num(last_ratio) }  peak { _fmt_num(peak_ratio) }"
         header = f" {title}  {stats} "
         header = header[: max(0, width - 2)]
         _safe_addstr(win, 0, 2, header)
@@ -675,7 +996,7 @@ class HtopLikeMonitor:
             width=width - 2,
             x_ms=x_ms,
             y_vals=ratio_vals,
-            y_unit="ratio",
+            y_unit="ppm",
             color_pair=3,
             downsample_kind="max",
             show_y_labels=True,
@@ -698,6 +1019,7 @@ class HtopLikeMonitor:
                 ("Enum", en_vals, 4),
             ],
             base_unit="J",
+            normalize=True,
         )
 
     def _render(self, stdscr) -> None:
@@ -754,11 +1076,12 @@ class HtopLikeMonitor:
         footer_h = 1
         avail_h = max(0, h - footer_h - y_top)
         gap = 1
-        n_pan = 3
+
+        view_name = "impact" if int(getattr(self, "view_idx", 0) or 0) == 0 else "energy"
 
         # If the terminal is tiny, fall back to one line sparklines.
-        if avail_h < (n_pan * 5 + (n_pan - 1) * gap) or w < 60:
-            y = 5
+        if avail_h < 12 or w < 60:
+            y = y_top + 1
             plot_w = max(10, w - 28)
 
             def plot_row(label: str, buf, last_val: float, peak_val: float, y_row: int) -> None:
@@ -769,73 +1092,85 @@ class HtopLikeMonitor:
                 _safe_addstr(stdscr, y_row, 11, spark)
                 _safe_addstr(stdscr, y_row, 11 + plot_w + 1, right)
 
-            if y < h:
-                plot_row("force MN", self.buf_force, f, self.peak_force, y)
-            if y + 1 < h:
-                plot_row("pen mm", self.buf_pen, p, self.peak_pen, y + 1)
-            if y + 2 < h:
-                plot_row("Eb ratio", self.buf_ratio, ratio, self.peak_ratio, y + 2)
-            if y + 3 < h:
-                plot_row("E kin J", self.buf_ekin, float(self.last.get("E_kin_J", 0.0) or 0.0), self.peak_ekin, y + 3)
-            if y + 4 < h:
-                plot_row("E diss J", self.buf_ediss, float(self.last.get("E_diss_total_J", 0.0) or 0.0), self.peak_ediss, y + 4)
-            if y + 5 < h:
-                plot_row("E num J", self.buf_enum, float(self.last.get("E_num_J", 0.0) or 0.0), self.peak_enum, y + 5)
+            if view_name == "impact":
+                if y < h:
+                    plot_row("force MN", self.buf_force, f, self.peak_force, y)
+                if y + 1 < h:
+                    plot_row("pen mm", self.buf_pen, p, self.peak_pen, y + 1)
+                if y + 2 < h:
+                    plot_row("Eb ppm", self.buf_ratio_ppm, ratio * 1e6, self.peak_ratio_ppm, y + 2)
+            else:
+                if y < h:
+                    plot_row("Eb ppm", self.buf_ratio_ppm, ratio * 1e6, self.peak_ratio_ppm, y)
+                if y + 1 < h:
+                    plot_row("E kin J", self.buf_ekin, float(self.last.get("E_kin_J", 0.0) or 0.0), self.peak_ekin, y + 1)
+                if y + 2 < h:
+                    plot_row("E diss J", self.buf_ediss, float(self.last.get("E_diss_total_J", 0.0) or 0.0), self.peak_ediss, y + 2)
+                if y + 3 < h:
+                    plot_row("E num J", self.buf_enum, float(self.last.get("E_num_J", 0.0) or 0.0), self.peak_enum, y + 3)
         else:
-            pan_h = int((avail_h - (n_pan - 1) * gap) / n_pan)
-            if pan_h < 5:
-                pan_h = 5
-            y0 = y_top
-            self._draw_box_plot(
-                stdscr,
-                top=y0,
-                left=0,
-                height=pan_h,
-                width=w,
-                title="impact force",
-                x_ms=self.buf_t_ms,
-                y_vals=self.buf_force,
-                last_val=f,
-                peak_val=self.peak_force,
-                y_unit="MN",
-                color_pair=1,
-            )
-            y0 = y0 + pan_h + gap
-            self._draw_box_plot(
-                stdscr,
-                top=y0,
-                left=0,
-                height=pan_h,
-                width=w,
-                title="indentation",
-                x_ms=self.buf_t_ms,
-                y_vals=self.buf_pen,
-                last_val=p,
-                peak_val=self.peak_pen,
-                y_unit="mm",
-                color_pair=2,
-            )
-            y0 = y0 + pan_h + gap
-            self._draw_energy_panel(
-                stdscr,
-                top=y0,
-                left=0,
-                height=pan_h,
-                width=w,
-                x_ms=self.buf_t_ms,
-                ratio_vals=self.buf_ratio,
-                last_ratio=ratio,
-                peak_ratio=self.peak_ratio,
-                ek_vals=self.buf_ekin,
-                ed_vals=self.buf_ediss,
-                en_vals=self.buf_enum,
-            )
+            if view_name == "impact":
+                # Two large plots for phone friendly viewing
+                n_pan = 2
+                pan_h = int((avail_h - (n_pan - 1) * gap) / n_pan)
+                if pan_h < 6:
+                    pan_h = 6
+                y0 = y_top
+                h0 = pan_h
+                h1 = max(6, avail_h - h0 - gap)
 
-        footer = "keys  q quit view  d detach  p pause"
+                self._draw_box_plot(
+                    stdscr,
+                    top=y0,
+                    left=0,
+                    height=h0,
+                    width=w,
+                    title="impact force",
+                    x_ms=self.buf_t_ms,
+                    y_vals=self.buf_force,
+                    last_val=f,
+                    peak_val=self.peak_force,
+                    y_unit="MN",
+                    color_pair=1,
+                )
+                y0 = y0 + h0 + gap
+                self._draw_box_plot(
+                    stdscr,
+                    top=y0,
+                    left=0,
+                    height=h1,
+                    width=w,
+                    title="indentation",
+                    x_ms=self.buf_t_ms,
+                    y_vals=self.buf_pen,
+                    last_val=p,
+                    peak_val=self.peak_pen,
+                    y_unit="mm",
+                    color_pair=2,
+                )
+            else:
+                # One large energy view so curves do not look flat
+                self._draw_energy_panel(
+                    stdscr,
+                    top=y_top,
+                    left=0,
+                    height=avail_h,
+                    width=w,
+                    x_ms=self.buf_t_ms,
+                    ratio_vals=self.buf_ratio_ppm,
+                    last_ratio=ratio * 1e6,
+                    peak_ratio=self.peak_ratio_ppm,
+                    ek_vals=self.buf_ekin,
+                    ed_vals=self.buf_ediss,
+                    en_vals=self.buf_enum,
+                )
+
+
+        footer = f"keys  q quit view  v switch  d detach  p pause   view {view_name}"
         if self.done_event.is_set() and not self.cfg.hold_on_done:
-            footer = "done  closing view"
+            footer = f"done  closing view   view {view_name}"
         elif self.done_event.is_set() and self.cfg.hold_on_done:
-            footer = "done  q quit view"
+            footer = f"done  q quit view   v switch   view {view_name}"
         _safe_addstr(stdscr, h - 1, 0, footer)
 
         stdscr.refresh()
@@ -889,6 +1224,8 @@ class HtopLikeMonitor:
             elif ch in (ord("d"), ord("D")):
                 self.detached = True
                 break
+            elif ch in (ord("v"), ord("V")):
+                self.view_idx = 1 - int(getattr(self, "view_idx", 0) or 0)
             elif ch in (ord("q"), ord("Q")):
                 break
 

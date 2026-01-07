@@ -965,12 +965,14 @@ def run(
 
         title = str(params.get("case_name") or config.stem)
         try:
+            os.environ["RIS_OUTPUT_DIR"] = str(output_dir)
             run_htop_monitor(
                 updates=updates,
                 done_event=done_event,
                 title=title,
                 refresh_s=float(live_refresh_s),
                 hold_on_done=bool(live_hold),
+                output_dir=output_dir,
             )
         except Exception:
             logger.exception("Live terminal monitor failed.")

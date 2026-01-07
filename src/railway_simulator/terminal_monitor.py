@@ -1,8 +1,7 @@
 """Terminal live monitor.
 
-This module provides a curses based live monitor inspired by htop.
-It is designed to be light, dependency free, and usable over SSH
-including mobile clients.
+Curses based full screen monitor inspired by htop.
+Designed to be light, dependency free, and usable over SSH including mobile clients.
 
 The engine can call a progress callback that pushes dict snapshots.
 The CLI consumes those snapshots and renders a full screen monitor.
@@ -12,19 +11,22 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Deque, Dict, Any, Optional, Iterable, Tuple, List
+
+import math
+import os
+import queue
+import time
 
 try:
     import curses  # type: ignore
 except Exception:  # pragma: no cover
     curses = None  # type: ignore
-import queue
-import time
 
 
 _SPARK = "▁▂▃▄▅▆▇█"
 _SPARK_ASCII = " .:-=+*#%@"
-
 
 _BRAILLE_BASE = 0x2800
 _BRAILLE_BITS = (
@@ -90,10 +92,7 @@ def _supports_unicode() -> bool:
 
 
 def _fmt_num(x: float) -> str:
-    """Compact numeric formatting for axes and headers.
-
-    Avoids scientific notation for zero and common plot scales.
-    """
+    """Compact numeric formatting for axes and headers."""
     x = float(x)
     ax = abs(x)
     if ax < 1e-12:
@@ -107,6 +106,39 @@ def _fmt_num(x: float) -> str:
     if ax >= 1e-3:
         return f"{x:.4g}"
     return f"{x:.3e}"
+
+
+def _quantile(sorted_vals: List[float], q: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    n = len(sorted_vals)
+    if n == 1:
+        return float(sorted_vals[0])
+    q = float(q)
+    if q <= 0.0:
+        return float(sorted_vals[0])
+    if q >= 1.0:
+        return float(sorted_vals[-1])
+    pos = q * (n - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if hi <= lo:
+        return float(sorted_vals[lo])
+    frac = pos - lo
+    return float(sorted_vals[lo]) * (1.0 - frac) + float(sorted_vals[hi]) * frac
+
+
+def _robust_minmax(vals: List[float], q_lo: float = 0.01, q_hi: float = 0.99) -> Tuple[float, float]:
+    if not vals:
+        return 0.0, 1.0
+    if len(vals) < 6:
+        return float(min(vals)), float(max(vals))
+    sv = sorted(float(v) for v in vals)
+    lo = _quantile(sv, q_lo)
+    hi = _quantile(sv, q_hi)
+    if abs(hi - lo) < 1e-30:
+        return float(min(vals)), float(max(vals))
+    return float(lo), float(hi)
 
 
 def _downsample_max(x: List[float], y: List[float], width: int) -> Tuple[List[float], List[float]]:
@@ -133,7 +165,6 @@ def _downsample_max(x: List[float], y: List[float], width: int) -> Tuple[List[fl
                 best = y[i]
                 best_x = x[i]
         if best is None:
-            # fall back to nearest sample
             k = min(n - 1, int(j * n / width))
             best = y[k]
             best_x = x[k]
@@ -193,7 +224,6 @@ def _safe_addstr(stdscr, y: int, x: int, s: str, attr: int = 0) -> None:
             s = str(s)
         if not s:
             return
-        # Keep one column margin to avoid bottom right corner issues on some terminals
         s = s[: max(0, w - x - 1)]
         if not s:
             return
@@ -239,6 +269,13 @@ def _sparkline(values, width: int, ascii_only: bool) -> str:
     return "".join(out)
 
 
+def _is_trivial(buf: Deque[float], eps: float = 1e-18) -> bool:
+    for v in buf:
+        if abs(float(v)) > eps:
+            return False
+    return True
+
+
 @dataclass
 class MonitorConfig:
     buffer_len: int = 600
@@ -254,6 +291,7 @@ class HtopLikeMonitor:
         done_event,
         title: str = "Railway impact simulator",
         cfg: Optional[MonitorConfig] = None,
+        output_dir: Optional[Path] = None,
     ) -> None:
         self.updates = updates
         self.done_event = done_event
@@ -264,9 +302,23 @@ class HtopLikeMonitor:
         self.paused = False
         self.detached = False
 
-
         self.view_idx = 0
         self.last: Dict[str, Any] = {}
+
+        self.window_modes_ms: List[Optional[float]] = [None, 200.0, 500.0, 1000.0, 2000.0]
+        self.window_idx = 0
+
+        self.show_contact_markers = True
+        self.contact_edges_ms: Deque[float] = deque(maxlen=64)
+        self._last_contact_active: Optional[bool] = None
+
+        self.energy_normalize = True
+
+        self.toast_msg = ""
+        self.toast_until = 0.0
+
+        env_out = os.environ.get("RIS_OUTPUT_DIR") or os.environ.get("RIS_MONITOR_OUTDIR")
+        self.output_dir = output_dir or (Path(env_out) if env_out else None)
 
         self.buf_t_ms: Deque[float] = deque(maxlen=self.cfg.buffer_len)
 
@@ -274,12 +326,14 @@ class HtopLikeMonitor:
         self.buf_pen: Deque[float] = deque(maxlen=self.cfg.buffer_len)
         self.buf_ratio: Deque[float] = deque(maxlen=self.cfg.buffer_len)
         self.buf_ratio_ppm: Deque[float] = deque(maxlen=self.cfg.buffer_len)
-        self.buf_emech: Deque[float] = deque(maxlen=self.cfg.buffer_len)
-
 
         self.buf_ekin: Deque[float] = deque(maxlen=self.cfg.buffer_len)
         self.buf_ediss: Deque[float] = deque(maxlen=self.cfg.buffer_len)
         self.buf_enum: Deque[float] = deque(maxlen=self.cfg.buffer_len)
+
+        self.buf_emech: Deque[float] = deque(maxlen=self.cfg.buffer_len)
+        self.buf_epot: Deque[float] = deque(maxlen=self.cfg.buffer_len)
+        self.buf_wext: Deque[float] = deque(maxlen=self.cfg.buffer_len)
 
         self.peak_ekin = 0.0
         self.peak_ediss = 0.0
@@ -308,10 +362,15 @@ class HtopLikeMonitor:
         f = float(latest.get("impact_force_MN", 0.0) or 0.0)
         p = float(latest.get("penetration_mm", 0.0) or 0.0)
         r = float(latest.get("E_num_ratio", 0.0) or 0.0)
-        em = float(latest.get("E_mech_J", 0.0) or 0.0)
+
         ek = float(latest.get("E_kin_J", 0.0) or 0.0)
         ed = float(latest.get("E_diss_total_J", 0.0) or 0.0)
         en = float(latest.get("E_num_J", 0.0) or 0.0)
+
+        em = float(latest.get("E_mech_J", 0.0) or 0.0)
+        ep = float(latest.get("E_pot_J", 0.0) or 0.0)
+        wx = float(latest.get("W_ext_J", 0.0) or 0.0)
+
         t_ms = float(latest.get("t", 0.0) or 0.0) * 1000.0
 
         self.buf_t_ms.append(t_ms)
@@ -320,11 +379,14 @@ class HtopLikeMonitor:
         self.buf_pen.append(p)
         self.buf_ratio.append(r)
         self.buf_ratio_ppm.append(r * 1e6)
-        self.buf_emech.append(em)
 
         self.buf_ekin.append(ek)
         self.buf_ediss.append(ed)
         self.buf_enum.append(en)
+
+        self.buf_emech.append(em)
+        self.buf_epot.append(ep)
+        self.buf_wext.append(wx)
 
         self.peak_force = max(self.peak_force, f)
         self.peak_pen = max(self.peak_pen, p)
@@ -335,7 +397,97 @@ class HtopLikeMonitor:
         self.peak_ediss = max(self.peak_ediss, ed)
         self.peak_enum = max(self.peak_enum, abs(en))
 
+        contact_active = bool(latest.get("contact_active", latest.get("contact_active", False)))
+        if self._last_contact_active is None:
+            self._last_contact_active = contact_active
+        else:
+            if contact_active != self._last_contact_active:
+                self.contact_edges_ms.append(t_ms)
+            self._last_contact_active = contact_active
 
+    def _window_label(self) -> str:
+        win_ms = self.window_modes_ms[self.window_idx]
+        if win_ms is None:
+            return "full"
+        if win_ms >= 1000.0:
+            return f"{int(round(win_ms / 1000.0))}s"
+        return f"{int(round(win_ms))}ms"
+
+    def _window_start_idx(self, xs_ms: List[float]) -> int:
+        if not xs_ms:
+            return 0
+        win_ms = self.window_modes_ms[self.window_idx]
+        if win_ms is None:
+            return 0
+        t_end = float(xs_ms[-1])
+        t_start = t_end - float(win_ms)
+        i0 = 0
+        n = len(xs_ms)
+        while i0 < n and float(xs_ms[i0]) < t_start:
+            i0 += 1
+        return i0
+
+    def _aligned_window(
+        self,
+        xs_ms: List[float],
+        ys: List[float],
+        i0: int,
+    ) -> Tuple[List[float], List[float]]:
+        n = min(len(xs_ms), len(ys))
+        if n <= 0:
+            return [], []
+        xs_ms = xs_ms[-n:]
+        ys = ys[-n:]
+        i0 = max(0, min(i0, n - 1))
+        return xs_ms[i0:], ys[i0:]
+
+    def _marker_cols(
+        self,
+        markers_ms: Optional[Iterable[float]],
+        x_base_ms: float,
+        x_end_ms: float,
+        plot_w: int,
+    ) -> List[int]:
+        if not markers_ms:
+            return []
+        if plot_w <= 1:
+            return []
+        span = float(x_end_ms - x_base_ms)
+        if span <= 1e-12:
+            return []
+        cols: List[int] = []
+        for t_abs in markers_ms:
+            x_rel = float(t_abs) - float(x_base_ms)
+            if x_rel < 0.0 or x_rel > span:
+                continue
+            col = int(round(x_rel / span * (plot_w - 1)))
+            col = max(0, min(plot_w - 1, col))
+            cols.append(col)
+        cols = sorted(set(cols))
+        return cols
+
+    def _draw_contact_markers(
+        self,
+        win,
+        top: int,
+        left: int,
+        plot_h: int,
+        plot_w: int,
+        cols: List[int],
+    ) -> None:
+        if curses is None:
+            return
+        if not cols or plot_h <= 0 or plot_w <= 0:
+            return
+        try:
+            attr = curses.A_DIM
+        except Exception:
+            attr = 0
+        ch = "│" if not self.cfg.ascii_only else "|"
+        for c in cols:
+            x = left + c
+            for r in range(plot_h):
+                _safe_addstr(win, top + r, x, ch, attr)
 
     def _draw_plot_core(
         self,
@@ -344,37 +496,42 @@ class HtopLikeMonitor:
         left: int,
         height: int,
         width: int,
-        x_ms: Deque[float],
-        y_vals: Deque[float],
+        x_ms: List[float],
+        y_vals: List[float],
         y_unit: str,
         color_pair: int,
         downsample_kind: str = "max",
         show_y_labels: bool = True,
+        markers_ms: Optional[Iterable[float]] = None,
+        robust_scale: bool = True,
     ) -> None:
         if curses is None:
             return
         if height < 3 or width < 10:
             return
 
-        xs0 = list(x_ms)
-        ys0 = list(y_vals)
-        if not xs0 or not ys0:
+        if not x_ms or not y_vals:
             return
 
-        n = min(len(xs0), len(ys0))
-        xs0 = xs0[-n:]
-        ys0 = ys0[-n:]
+        n = min(len(x_ms), len(y_vals))
+        if n < 2:
+            return
+        x_ms = x_ms[-n:]
+        y_vals = y_vals[-n:]
 
-        x_base = float(xs0[0])
-        xs = [float(v) - x_base for v in xs0]
-        ys = [float(v) for v in ys0]
+        x_base = float(x_ms[0])
+        xs = [float(v) - x_base for v in x_ms]
+        ys = [float(v) for v in y_vals]
 
         ylab_w = 9 if show_y_labels else 0
         plot_h = max(1, height)
         plot_w = max(1, width - ylab_w)
 
-        y_min = float(min(ys))
-        y_max = float(max(ys))
+        if robust_scale:
+            y_min, y_max = _robust_minmax(ys)
+        else:
+            y_min = float(min(ys))
+            y_max = float(max(ys))
 
         if y_min >= 0.0:
             y_min = 0.0
@@ -396,8 +553,6 @@ class HtopLikeMonitor:
                 lab = _fmt_num(yy).rjust(ylab_w - 1)
                 _safe_addstr(win, top + row, left + 0, lab)
 
-        ascii_only = bool(self.cfg.ascii_only)
-
         attr = 0
         try:
             if curses.has_colors() and color_pair > 0:
@@ -405,13 +560,19 @@ class HtopLikeMonitor:
         except Exception:
             attr = 0
 
+        cols = []
+        if self.show_contact_markers and markers_ms is not None:
+            cols = self._marker_cols(markers_ms, x_base, float(x_ms[-1]), plot_w)
+            self._draw_contact_markers(win, top, left + ylab_w, plot_h, plot_w, cols)
+
+        ascii_only = bool(self.cfg.ascii_only)
         if ascii_only:
             plot_char = "#"
             line_char = "|"
             if downsample_kind == "last":
-                xs_ds, ys_ds = _downsample_last(xs, ys, plot_w)
+                _, ys_ds = _downsample_last(xs, ys, plot_w)
             else:
-                xs_ds, ys_ds = _downsample_max(xs, ys, plot_w)
+                _, ys_ds = _downsample_max(xs, ys, plot_w)
 
             prev_row = None
             prev_col = None
@@ -437,14 +598,13 @@ class HtopLikeMonitor:
                 prev_col = col
             return
 
-        # Unicode braille plot for smoother curves
         w_sub = max(2, plot_w * 2)
         h_sub = max(4, plot_h * 4)
 
         if downsample_kind == "last":
-            _xs_ds, ys_ds = _downsample_last(xs, ys, w_sub)
+            _, ys_ds = _downsample_last(xs, ys, w_sub)
         else:
-            _xs_ds, ys_ds = _downsample_max(xs, ys, w_sub)
+            _, ys_ds = _downsample_max(xs, ys, w_sub)
 
         if not ys_ds:
             return
@@ -478,35 +638,37 @@ class HtopLikeMonitor:
         left: int,
         height: int,
         width: int,
-        x_ms: Deque[float],
-        series: List[Tuple[str, Deque[float], int]],
+        x_ms: List[float],
+        series: List[Tuple[str, List[float], int]],
         base_unit: str = "J",
         normalize: bool = False,
+        markers_ms: Optional[Iterable[float]] = None,
     ) -> None:
         if curses is None:
             return
         if height < 4 or width < 18:
             return
-
-        xs0 = list(x_ms)
-        if not xs0:
+        if not x_ms:
             return
 
-        ys_list: List[List[float]] = []
-        for _label, buf, _cp in series:
-            ys_list.append(list(buf))
-
-        n = min([len(xs0)] + [len(ys) for ys in ys_list]) if ys_list else len(xs0)
+        n = len(x_ms)
         if n < 2:
             return
 
-        xs0 = xs0[-n:]
+        ys_list: List[List[float]] = []
+        for _label, ys, _cp in series:
+            ys_list.append(list(ys))
+
+        n = min([n] + [len(ys) for ys in ys_list]) if ys_list else n
+        if n < 2:
+            return
+
+        x_ms = x_ms[-n:]
         ys_list = [ys[-n:] for ys in ys_list]
 
-        x_base = float(xs0[0])
-        xs = [float(v) - x_base for v in xs0]
+        x_base = float(x_ms[0])
+        xs = [float(v) - x_base for v in x_ms]
 
-        # Layout
         ylab_w = 9
         if width - ylab_w < 6:
             ylab_w = 0
@@ -520,14 +682,17 @@ class HtopLikeMonitor:
 
         ascii_only = bool(self.cfg.ascii_only)
 
-        # Normalized mode: each series is scaled by its own abs max, so all curves are visible.
+        # Contact markers
+        if self.show_contact_markers and markers_ms is not None:
+            cols = self._marker_cols(markers_ms, x_base, float(x_ms[-1]), plot_w)
+            self._draw_contact_markers(win, plot_top, left + ylab_w, plot_h, plot_w, cols)
+
         if normalize:
-            # Build normalized series and legend info with human units.
             ys_plot_list: List[List[float]] = []
             legend_texts: List[str] = []
             unit_txt = "norm"
 
-            for (label, _buf, _cp), ys in zip(series, ys_list):
+            for (label, _ys, _cp), ys in zip(series, ys_list):
                 absmax = 0.0
                 if ys:
                     absmax = float(max(abs(float(v)) for v in ys))
@@ -549,7 +714,6 @@ class HtopLikeMonitor:
             y_min_s = -1.05
             y_max_s = 1.05
 
-            # Y labels for normalized axis
             if ylab_w > 0:
                 for frac, yy in ((1.0, 1.0), (0.5, 0.0), (0.0, -1.0)):
                     row = int(round((1.0 - frac) * (plot_h - 1)))
@@ -557,9 +721,8 @@ class HtopLikeMonitor:
                     lab = _fmt_num(yy).rjust(ylab_w - 1)
                     _safe_addstr(win, plot_top + row, left + 0, lab)
 
-            # Legend
             xoff = left + ylab_w + 1
-            for seg, (_label, _buf, cp) in zip(legend_texts, series):
+            for seg, (_label, _ys, cp) in zip(legend_texts, series):
                 attr = 0
                 try:
                     if curses.has_colors() and cp > 0:
@@ -638,23 +801,22 @@ class HtopLikeMonitor:
                         seg = row_txt[c0:c]
                         _safe_addstr(win, plot_top + r, left + ylab_w + c0, seg, attr)
 
-            for ys_scaled, (_label, _buf, cp) in zip(ys_plot_list, series):
+            for ys_scaled, (_label, _ys, cp) in zip(ys_plot_list, series):
                 _draw_series(ys_scaled, cp)
 
             return
 
-        # Absolute mode: shared scaling for all series
-        abs_max = 0.0
+        # Absolute mode
         y_min = None
         y_max = None
+        abs_max = 0.0
         for ys in ys_list:
             if not ys:
                 continue
             abs_max = max(abs_max, float(max(abs(v) for v in ys)))
-            mn = float(min(ys))
-            mx = float(max(ys))
-            y_min = mn if y_min is None else min(y_min, mn)
-            y_max = mx if y_max is None else max(y_max, mx)
+            mn0, mx0 = _robust_minmax([float(v) for v in ys])
+            y_min = mn0 if y_min is None else min(y_min, mn0)
+            y_max = mx0 if y_max is None else max(y_max, mx0)
         if y_min is None or y_max is None:
             return
         if abs(y_max - y_min) < 1e-30:
@@ -669,8 +831,8 @@ class HtopLikeMonitor:
             scale = 1e3
             unit = "kJ"
 
-        y_min_s = y_min / scale
-        y_max_s = y_max / scale
+        y_min_s = float(y_min) / scale
+        y_max_s = float(y_max) / scale
 
         if y_min_s >= 0.0:
             y_min_s = 0.0
@@ -687,7 +849,6 @@ class HtopLikeMonitor:
         if abs(y_max_s - y_min_s) < 1e-30:
             y_max_s = y_min_s + 1.0
 
-        # Y labels
         if ylab_w > 0:
             for frac in (1.0, 0.5, 0.0):
                 yy = y_min_s + frac * (y_max_s - y_min_s)
@@ -696,18 +857,13 @@ class HtopLikeMonitor:
                 lab = _fmt_num(yy).rjust(ylab_w - 1)
                 _safe_addstr(win, plot_top + row, left + 0, lab)
 
-        # Legend and unit
         xoff = left + ylab_w + 1
-        for s_idx, (label, _buf, cp) in enumerate(series):
+        for s_idx, (label, _ys, cp) in enumerate(series):
             try:
                 last_v = float(ys_list[s_idx][-1]) / float(scale)
             except Exception:
                 last_v = None
-
-            if last_v is None:
-                seg = f"{label} "
-            else:
-                seg = f"{label} {_fmt_num(last_v)} "
+            seg = f"{label} " if last_v is None else f"{label} {_fmt_num(last_v)} "
 
             attr = 0
             try:
@@ -723,10 +879,7 @@ class HtopLikeMonitor:
         unit_txt = f"{unit}"
         _safe_addstr(win, legend_y, left + width - len(unit_txt) - 1, unit_txt)
 
-        def _draw_braille_series(
-            ys_scaled: List[float],
-            cp: int,
-        ) -> None:
+        def _draw_braille_series(ys_scaled: List[float], cp: int) -> None:
             attr = 0
             try:
                 if curses.has_colors() and cp > 0:
@@ -782,11 +935,10 @@ class HtopLikeMonitor:
                     seg = row_txt[c0:c]
                     _safe_addstr(win, plot_top + r, left + ylab_w + c0, seg, attr)
 
-        for s_idx, (_label, _buf, cp) in enumerate(series):
+        for s_idx, (_label, _ys, cp) in enumerate(series):
             ys = ys_list[s_idx]
             ys_scaled = [float(v) / scale for v in ys]
             _draw_braille_series(ys_scaled, cp)
-
 
     def _draw_box_plot(
         self,
@@ -796,12 +948,13 @@ class HtopLikeMonitor:
         height: int,
         width: int,
         title: str,
-        x_ms: Deque[float],
-        y_vals: Deque[float],
+        x_ms: List[float],
+        y_vals: List[float],
         last_val: float,
         peak_val: float,
         y_unit: str,
         color_pair: int = 0,
+        markers_ms: Optional[Iterable[float]] = None,
     ) -> None:
         if curses is None:
             return
@@ -842,25 +995,22 @@ class HtopLikeMonitor:
         header = header[: max(0, width - 2)]
         _safe_addstr(win, 0, 1, header)
 
-        xs0 = list(x_ms)
-        ys0 = list(y_vals)
-        n = min(len(xs0), len(ys0))
+        n = min(len(x_ms), len(y_vals))
         if n < 2:
             return
-        xs0 = xs0[-n:]
-        ys0 = ys0[-n:]
+        x_ms = x_ms[-n:]
+        y_vals = y_vals[-n:]
 
-        x_base = float(xs0[0])
-        xs = [float(v) - x_base for v in xs0]
-        ys = [float(v) for v in ys0]
+        x_base = float(x_ms[0])
+        xs = [float(v) - x_base for v in x_ms]
+        ys = [float(v) for v in y_vals]
 
         x0 = 0.0
         x1 = float(xs[-1])
         if x1 <= x0:
             x1 = x0 + 1.0
 
-        y_min = float(min(ys))
-        y_max = float(max(ys))
+        y_min, y_max = _robust_minmax(ys)
         if y_min >= 0.0:
             y_min = 0.0
         if abs(y_max - y_min) < 1e-30:
@@ -872,7 +1022,6 @@ class HtopLikeMonitor:
             if y_min >= 0.0:
                 y_min = 0.0
 
-        # Y axis labels
         if ylab_w > 0:
             for frac in (1.0, 0.5, 0.0):
                 yy = y_min + frac * (y_max - y_min)
@@ -881,10 +1030,14 @@ class HtopLikeMonitor:
                 lab = _fmt_num(yy).rjust(ylab_w - 1)
                 _safe_addstr(win, 1 + row, 1, lab)
 
+        if self.show_contact_markers and markers_ms is not None:
+            cols = self._marker_cols(markers_ms, x_base, float(x_ms[-1]), plot_w)
+            self._draw_contact_markers(win, 1, 1 + ylab_w, plot_h, plot_w, cols)
+
         ascii_only = bool(self.cfg.ascii_only)
 
         if ascii_only:
-            xs_ds, ys_ds = _downsample_max(xs, ys, plot_w)
+            _, ys_ds = _downsample_max(xs, ys, plot_w)
             prev_row = None
             prev_col = None
             for j in range(len(ys_ds)):
@@ -905,7 +1058,7 @@ class HtopLikeMonitor:
         else:
             w_sub = max(2, plot_w * 2)
             h_sub = max(4, plot_h * 4)
-            _xs_ds, ys_ds = _downsample_max(xs, ys, w_sub)
+            _, ys_ds = _downsample_max(xs, ys, w_sub)
             if ys_ds:
                 mask_grid: List[List[int]] = [[0 for _ in range(plot_w)] for _ in range(plot_h)]
                 npts = len(ys_ds)
@@ -927,7 +1080,6 @@ class HtopLikeMonitor:
                     row_txt = _render_braille_row(mask_grid[r])
                     _safe_addstr(win, 1 + r, 1 + ylab_w, row_txt, attr_plot)
 
-        # X axis labels on bottom border
         if width >= 36:
             xm = 0.5 * (x0 + x1)
             xlab = f" {x0:.0f} ms   {xm:.0f} ms   {x1:.0f} ms "
@@ -943,13 +1095,12 @@ class HtopLikeMonitor:
         left: int,
         height: int,
         width: int,
-        x_ms: Deque[float],
-        ratio_vals: Deque[float],
-        last_ratio: float,
-        peak_ratio: float,
-        ek_vals: Deque[float],
-        ed_vals: Deque[float],
-        en_vals: Deque[float],
+        x_ms: List[float],
+        ratio_vals_ppm: List[float],
+        last_ratio_ppm: float,
+        peak_ratio_ppm: float,
+        series: List[Tuple[str, List[float], int]],
+        markers_ms: Optional[Iterable[float]] = None,
     ) -> None:
         if curses is None:
             return
@@ -966,7 +1117,8 @@ class HtopLikeMonitor:
             return
 
         title = "energy balance"
-        stats = f"Eb ppm  last { _fmt_num(last_ratio) }  peak { _fmt_num(peak_ratio) }"
+        mode = "norm" if self.energy_normalize else "abs"
+        stats = f"Eb ppm  last { _fmt_num(last_ratio_ppm) }  peak { _fmt_num(peak_ratio_ppm) }  {mode}"
         header = f" {title}  {stats} "
         header = header[: max(0, width - 2)]
         _safe_addstr(win, 0, 2, header)
@@ -987,7 +1139,6 @@ class HtopLikeMonitor:
             except Exception:
                 pass
 
-        # Ratio plot on top
         self._draw_plot_core(
             win,
             top=1,
@@ -995,17 +1146,18 @@ class HtopLikeMonitor:
             height=ratio_h,
             width=width - 2,
             x_ms=x_ms,
-            y_vals=ratio_vals,
+            y_vals=ratio_vals_ppm,
             y_unit="ppm",
             color_pair=3,
             downsample_kind="max",
             show_y_labels=True,
+            markers_ms=markers_ms,
+            robust_scale=True,
         )
 
         if ener_h < 3:
             return
 
-        # Energies plot on bottom
         self._draw_plot_multi_core(
             win,
             top=sep_y + 1,
@@ -1013,20 +1165,60 @@ class HtopLikeMonitor:
             height=ener_h,
             width=width - 2,
             x_ms=x_ms,
-            series=[
-                ("Ekin", ek_vals, 1),
-                ("Ediss", ed_vals, 2),
-                ("Enum", en_vals, 4),
-            ],
+            series=series,
             base_unit="J",
-            normalize=True,
+            normalize=bool(self.energy_normalize),
+            markers_ms=markers_ms,
         )
+
+    def _maybe_toast(self, now: float) -> str:
+        if self.toast_msg and now < self.toast_until:
+            return self.toast_msg
+        return ""
+
+    def _save_screenshot(self, stdscr) -> Optional[Path]:
+        if curses is None:
+            return None
+        h, w = stdscr.getmaxyx()
+
+        out_dir = self.output_dir
+        if out_dir is None:
+            out_dir = Path(os.getcwd())
+
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            out_dir = Path(os.getcwd())
+
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        view_name = "impact" if int(getattr(self, "view_idx", 0) or 0) == 0 else "energy"
+        fname = f"monitor_{view_name}_{ts}.txt"
+        path = out_dir / fname
+
+        lines: List[str] = []
+        for y in range(h):
+            try:
+                raw = stdscr.instr(y, 0, max(0, w - 1))
+                if isinstance(raw, bytes):
+                    line = raw.decode("utf-8", errors="ignore")
+                else:
+                    line = str(raw)
+            except Exception:
+                line = ""
+            lines.append(line.rstrip())
+
+        try:
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            return None
+        return path
 
     def _render(self, stdscr) -> None:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
-        wall = time.perf_counter() - self.t0_wall
+        now = time.perf_counter()
+        wall = now - self.t0_wall
 
         step = int(self.last.get("step", 0) or 0)
         n_steps = int(self.last.get("n_steps", 0) or 0)
@@ -1069,9 +1261,27 @@ class HtopLikeMonitor:
         line3 = f"F {f:9.3f} MN   pen {p:9.3f} mm   v {v:9.3f} m/s   a {a:9.3f} g   Eb {ratio:9.3e}"
         _safe_addstr(stdscr, 3, 0, line3)
 
-        # --------------------------------------------------
+        # Windowed buffers
+        xs_full = list(self.buf_t_ms)
+        if xs_full:
+            i0 = self._window_start_idx(xs_full)
+        else:
+            i0 = 0
+
+        xs_win, force_win = self._aligned_window(xs_full, list(self.buf_force), i0)
+        _xs_win2, pen_win = self._aligned_window(xs_full, list(self.buf_pen), i0)
+        _xs_win3, ratio_ppm_win = self._aligned_window(xs_full, list(self.buf_ratio_ppm), i0)
+
+        _xs_win4, ek_win = self._aligned_window(xs_full, list(self.buf_ekin), i0)
+        _xs_win5, ed_win = self._aligned_window(xs_full, list(self.buf_ediss), i0)
+        _xs_win6, en_win = self._aligned_window(xs_full, list(self.buf_enum), i0)
+        _xs_win7, em_win = self._aligned_window(xs_full, list(self.buf_emech), i0)
+        _xs_win8, ep_win = self._aligned_window(xs_full, list(self.buf_epot), i0)
+        _xs_win9, wx_win = self._aligned_window(xs_full, list(self.buf_wext), i0)
+
+        markers = list(self.contact_edges_ms) if self.show_contact_markers else []
+
         # Plots area
-        # --------------------------------------------------
         y_top = 4
         footer_h = 1
         avail_h = max(0, h - footer_h - y_top)
@@ -1079,38 +1289,37 @@ class HtopLikeMonitor:
 
         view_name = "impact" if int(getattr(self, "view_idx", 0) or 0) == 0 else "energy"
 
-        # If the terminal is tiny, fall back to one line sparklines.
+        # Tiny terminals fallback
         if avail_h < 12 or w < 60:
             y = y_top + 1
             plot_w = max(10, w - 28)
 
             def plot_row(label: str, buf, last_val: float, peak_val: float, y_row: int) -> None:
                 spark = _sparkline(buf, plot_w, self.cfg.ascii_only)
-                left = f"{label:<10}"
-                right = f" last {last_val:9.3g}  peak {peak_val:9.3g}"
-                _safe_addstr(stdscr, y_row, 0, left)
+                left_txt = f"{label:<10}"
+                right_txt = f" last {last_val:9.3g}  peak {peak_val:9.3g}"
+                _safe_addstr(stdscr, y_row, 0, left_txt)
                 _safe_addstr(stdscr, y_row, 11, spark)
-                _safe_addstr(stdscr, y_row, 11 + plot_w + 1, right)
+                _safe_addstr(stdscr, y_row, 11 + plot_w + 1, right_txt)
 
             if view_name == "impact":
                 if y < h:
-                    plot_row("force MN", self.buf_force, f, self.peak_force, y)
+                    plot_row("force MN", force_win, f, self.peak_force, y)
                 if y + 1 < h:
-                    plot_row("pen mm", self.buf_pen, p, self.peak_pen, y + 1)
+                    plot_row("pen mm", pen_win, p, self.peak_pen, y + 1)
                 if y + 2 < h:
-                    plot_row("Eb ppm", self.buf_ratio_ppm, ratio * 1e6, self.peak_ratio_ppm, y + 2)
+                    plot_row("Eb ppm", ratio_ppm_win, ratio * 1e6, self.peak_ratio_ppm, y + 2)
             else:
                 if y < h:
-                    plot_row("Eb ppm", self.buf_ratio_ppm, ratio * 1e6, self.peak_ratio_ppm, y)
+                    plot_row("Eb ppm", ratio_ppm_win, ratio * 1e6, self.peak_ratio_ppm, y)
                 if y + 1 < h:
-                    plot_row("E kin J", self.buf_ekin, float(self.last.get("E_kin_J", 0.0) or 0.0), self.peak_ekin, y + 1)
+                    plot_row("E kin J", ek_win, float(self.last.get("E_kin_J", 0.0) or 0.0), self.peak_ekin, y + 1)
                 if y + 2 < h:
-                    plot_row("E diss J", self.buf_ediss, float(self.last.get("E_diss_total_J", 0.0) or 0.0), self.peak_ediss, y + 2)
+                    plot_row("E diss J", ed_win, float(self.last.get("E_diss_total_J", 0.0) or 0.0), self.peak_ediss, y + 2)
                 if y + 3 < h:
-                    plot_row("E num J", self.buf_enum, float(self.last.get("E_num_J", 0.0) or 0.0), self.peak_enum, y + 3)
+                    plot_row("E num J", en_win, float(self.last.get("E_num_J", 0.0) or 0.0), self.peak_enum, y + 3)
         else:
             if view_name == "impact":
-                # Two large plots for phone friendly viewing
                 n_pan = 2
                 pan_h = int((avail_h - (n_pan - 1) * gap) / n_pan)
                 if pan_h < 6:
@@ -1126,12 +1335,13 @@ class HtopLikeMonitor:
                     height=h0,
                     width=w,
                     title="impact force",
-                    x_ms=self.buf_t_ms,
-                    y_vals=self.buf_force,
+                    x_ms=xs_win,
+                    y_vals=force_win,
                     last_val=f,
                     peak_val=self.peak_force,
                     y_unit="MN",
                     color_pair=1,
+                    markers_ms=markers,
                 )
                 y0 = y0 + h0 + gap
                 self._draw_box_plot(
@@ -1141,38 +1351,60 @@ class HtopLikeMonitor:
                     height=h1,
                     width=w,
                     title="indentation",
-                    x_ms=self.buf_t_ms,
-                    y_vals=self.buf_pen,
+                    x_ms=xs_win,
+                    y_vals=pen_win,
                     last_val=p,
                     peak_val=self.peak_pen,
                     y_unit="mm",
                     color_pair=2,
+                    markers_ms=markers,
                 )
             else:
-                # One large energy view so curves do not look flat
+                series: List[Tuple[str, List[float], int]] = [
+                    ("Ekin", ek_win, 1),
+                    ("Ediss", ed_win, 2),
+                    ("Enum", en_win, 4),
+                ]
+                if not _is_trivial(self.buf_emech):
+                    series.append(("Emech", em_win, 6))
+                if not _is_trivial(self.buf_epot):
+                    series.append(("Epot", ep_win, 3))
+                if not _is_trivial(self.buf_wext):
+                    series.append(("Wext", wx_win, 5))
+
                 self._draw_energy_panel(
                     stdscr,
                     top=y_top,
                     left=0,
                     height=avail_h,
                     width=w,
-                    x_ms=self.buf_t_ms,
-                    ratio_vals=self.buf_ratio_ppm,
-                    last_ratio=ratio * 1e6,
-                    peak_ratio=self.peak_ratio_ppm,
-                    ek_vals=self.buf_ekin,
-                    ed_vals=self.buf_ediss,
-                    en_vals=self.buf_enum,
+                    x_ms=xs_win,
+                    ratio_vals_ppm=ratio_ppm_win,
+                    last_ratio_ppm=ratio * 1e6,
+                    peak_ratio_ppm=self.peak_ratio_ppm,
+                    series=series,
+                    markers_ms=markers,
                 )
 
+        # Footer
+        win_txt = self._window_label()
+        view_txt = f"view {view_name}"
+        contact_txt = "contact on" if self.show_contact_markers else "contact off"
+        energy_txt = "norm" if self.energy_normalize else "abs"
+        toast = self._maybe_toast(now)
 
-        footer = f"keys  q quit view  v switch  d detach  p pause   view {view_name}"
-        if self.done_event.is_set() and not self.cfg.hold_on_done:
-            footer = f"done  closing view   view {view_name}"
-        elif self.done_event.is_set() and self.cfg.hold_on_done:
-            footer = f"done  q quit view   v switch   view {view_name}"
+        if view_name == "energy":
+            footer = f"keys q quit  v view  w win {win_txt}  c {contact_txt}  n {energy_txt}  s save  d detach  p pause"
+        else:
+            footer = f"keys q quit  v view  w win {win_txt}  c {contact_txt}  s save  d detach  p pause"
+
+        if toast:
+            footer = (footer + "  " + toast)
+
+        if self.done_event.is_set() and self.cfg.hold_on_done:
+            footer = "done  " + footer
+
         _safe_addstr(stdscr, h - 1, 0, footer)
-
         stdscr.refresh()
 
     def run(self) -> None:
@@ -1226,6 +1458,19 @@ class HtopLikeMonitor:
                 break
             elif ch in (ord("v"), ord("V")):
                 self.view_idx = 1 - int(getattr(self, "view_idx", 0) or 0)
+            elif ch in (ord("w"), ord("W")):
+                self.window_idx = (self.window_idx + 1) % len(self.window_modes_ms)
+            elif ch in (ord("c"), ord("C")):
+                self.show_contact_markers = not self.show_contact_markers
+            elif ch in (ord("n"), ord("N")):
+                self.energy_normalize = not self.energy_normalize
+            elif ch in (ord("s"), ord("S")):
+                pth = self._save_screenshot(stdscr)
+                if pth is None:
+                    self.toast_msg = "save failed"
+                else:
+                    self.toast_msg = f"saved {pth.name}"
+                self.toast_until = time.perf_counter() + 2.0
             elif ch in (ord("q"), ord("Q")):
                 break
 
@@ -1239,12 +1484,15 @@ def run_htop_monitor(
     title: str,
     refresh_s: float = 0.05,
     hold_on_done: bool = True,
+    output_dir: Optional[Path] = None,
 ) -> None:
-    """Run a full screen curses monitor.
-
-    If curses is not available or the session is not a TTY, callers should
-    fall back to simple line logging.
-    """
+    """Run a full screen curses monitor."""
     cfg = MonitorConfig(refresh_s=refresh_s, hold_on_done=hold_on_done)
-    mon = HtopLikeMonitor(updates=updates, done_event=done_event, title=title, cfg=cfg)
+    mon = HtopLikeMonitor(
+        updates=updates,
+        done_event=done_event,
+        title=title,
+        cfg=cfg,
+        output_dir=output_dir,
+    )
     mon.run()

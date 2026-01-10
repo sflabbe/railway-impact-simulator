@@ -148,7 +148,9 @@ def run_parametric_envelope(
             "time_of_peak_s": t_peak,
             "n_lu": df.attrs.get("n_lu", 0),
             "n_dof": df.attrs.get("n_dof", 0),
-            "soft_converged_steps": int(df.attrs.get("soft_converged_steps", 0)),
+            "contact_inexact_steps": int(df.attrs.get("contact_inexact_steps", 0)),
+            "max_err_contact": float(df.attrs.get("max_err_contact", 0.0)),
+            "max_dq_rel_contact": float(df.attrs.get("max_dq_rel_contact", 0.0)),
             # Strain-rate metrics
             "strain_rate_peak_1_s": float(df.attrs.get("strain_rate_peak_1_s", 0.0)),
             "strain_rate_rms_1_s": float(df.attrs.get("strain_rate_rms_1_s", 0.0)),

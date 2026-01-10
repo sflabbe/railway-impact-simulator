@@ -144,8 +144,11 @@ sigma_2: 0.40
 h_init: 1.0e-4        # Time step [s]
 T_max: 3.0            # Total simulation time [s] (longer for full train)
 alpha_hht: -0.10
-newton_tol: 1.0e-6
-max_iter: 50
+newton_jacobian_mode: each_iter
+newton_tol: 1.0e-2
+picard_tol: 1.0e-3
+picard_max_iters: 50
+max_iter: 80
 solver: picard
 
 # Initial conditions (set via CLI)

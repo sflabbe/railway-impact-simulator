@@ -133,8 +133,11 @@ sigma_2: 0.40
 h_init: 5.0e-5        # Smaller step for stiffer system
 T_max: 3.0
 alpha_hht: -0.10
-newton_tol: 1.0e-6
-max_iter: 50
+newton_jacobian_mode: each_iter
+newton_tol: 1.0e-2
+picard_tol: 1.0e-3
+picard_max_iters: 50
+max_iter: 80
 solver: picard
 
 # Initial conditions

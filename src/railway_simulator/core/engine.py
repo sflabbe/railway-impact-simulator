@@ -1375,7 +1375,10 @@ class ImpactSimulator:
                 # Initial guess for a_{n+1}
                 qpp[:, step_idx + 1] = qpp[:, step_idx]
 
-                for it in range(p.max_iter):
+                picard_max_iters = int(getattr(p, 'picard_max_iters', p.max_iter))
+                picard_tol = float(getattr(p, 'picard_tol', self.params.newton_tol))
+
+                for it in range(picard_max_iters):
                     # Reset forces for this iteration
                     R_internal[:, step_idx + 1] = 0.0
                     R_contact[:, step_idx + 1] = 0.0
@@ -1496,7 +1499,7 @@ class ImpactSimulator:
                     if err > self.max_residual:
                         self.max_residual = err
 
-                    if err < self.params.newton_tol:
+                    if err < picard_tol:
                         converged = True
                         break
 
@@ -1504,9 +1507,10 @@ class ImpactSimulator:
 
                 if not converged:
                     logger.warning(
-                        "Picard solver did not converge at step %d (rel Δa = %.3e)",
+                        "Picard solver did not converge at step %d (rel Δa = %.3e, tol = %.3e)",
                         step_idx,
                         err,
+                        picard_tol,
                     )
                     if solver_fail_policy in ("switch", "fallback", "auto", "newton"):
                         logger.info("Retrying step %d with Newton solver.", step_idx)
@@ -2580,7 +2584,7 @@ def run_simulation(
         user_flags["T_max"] = ("T_max" in user_overrides) and (user_overrides.get("T_max") is not None)
         user_flags["h_init"] = ("h_init" in user_overrides) and (user_overrides.get("h_init") is not None)
 
-        base = defaults
+        base = dict(defaults)
         base.update(user_overrides)
         raw = base
 
@@ -2614,6 +2618,14 @@ def run_simulation(
 
     coerced = _coerce_scalar_types_for_simulation(raw)
     coerced = normalize_simulation_params(coerced, defaults, user_flags)
+
+    # Backward-compatible coupling: if the user overrides max_iter/newton_tol
+    # but does not provide Picard-specific controls, mirror them.
+    if isinstance(params, dict) and params is not None:
+        if ('max_iter' in params) and ('picard_max_iters' not in params):
+            coerced['picard_max_iters'] = int(coerced.get('max_iter', coerced.get('picard_max_iters', 25)))
+        if ('newton_tol' in params) and ('picard_tol' not in params):
+            coerced['picard_tol'] = float(coerced.get('newton_tol', coerced.get('picard_tol', 1e-6)))
 
     # Optional consistency check: if k_train is provided in YAML,
     # verify it matches the implied elastic stiffness fy/uy.

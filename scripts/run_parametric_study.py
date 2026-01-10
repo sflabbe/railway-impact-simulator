@@ -191,7 +191,15 @@ def compute_metrics(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
         fy_MN = fy_arr[0] / 1e6 if len(fy_arr) > 0 else 15.0
         metrics["DAF"] = metrics.get("peak_force_MN", 0) / fy_MN
 
-    for key in ("fallback_used", "max_residual_seen", "max_iters_step", "converged_all_steps"):
+    for key in (
+        "fallback_used",
+        "max_residual_seen",
+        "max_iters_step",
+        "converged_all_steps",
+        "contact_inexact_steps",
+        "max_err_contact",
+        "max_dq_rel_contact",
+    ):
         if key in df.attrs:
             metrics[key] = df.attrs[key]
 

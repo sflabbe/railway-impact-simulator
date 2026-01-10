@@ -146,7 +146,10 @@ T_max: 3.0            # Total simulation time [s] (longer for full train)
 alpha_hht: -0.10
 newton_jacobian_mode: each_iter
 newton_tol: 1.0e-2
-newton_soft_tol: 3.0e-2
+newton_contact_tol: 8.0e-2
+newton_contact_inc_tol: 1.0e-6
+newton_contact_only: true
+newton_soft_reject_err: 2.0e-1
 picard_tol: 1.0e-3
 picard_max_iters: 50
 picard_relaxation: 0.25

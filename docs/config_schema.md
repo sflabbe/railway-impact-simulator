@@ -23,6 +23,19 @@ All existing train/material/solver fields remain valid at the top level (e.g.,
 information into a `collision` section at runtime and preserves the original
 keys under `legacy:`.
 
+## Solver and damping controls
+
+```yaml
+# Nonlinear solver handling
+solver: newton               # or "picard"
+solver_fail_policy: switch   # "switch" (fallback) or "raise"
+
+# Damping configuration
+damping_model: stiffness     # "stiffness" (default) or "rayleigh_full"
+damping_zeta: 0.05           # damping ratio used for the chosen model
+damping_target: null         # optional target frequency (rad/s) for stiffness model
+```
+
 ## Collision partner
 
 ```yaml

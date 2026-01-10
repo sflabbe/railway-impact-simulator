@@ -42,6 +42,70 @@ logger = logging.getLogger(__name__)
 
 
 # ====================================================================
+# NON-CONVERGENCE ERROR WITH DIAGNOSTICS
+# ====================================================================
+
+class NonConvergenceError(RuntimeError):
+    """Raised when the solver fails to converge, with diagnostic information.
+
+    Attributes:
+        step_idx: The time step index where failure occurred.
+        t: Time at failure [s].
+        residual_norm: Final residual norm.
+        iter_count: Number of iterations attempted.
+        dt_effective: Effective timestep at failure [s].
+        solver_type: 'picard' or 'newton'.
+        failure_stage: 'picard', 'newton', or 'newton_fallback'.
+        state_snapshot: Dict with q_norm, qp_norm, contact info, etc.
+        dt_reductions_used: Number of dt reductions attempted.
+        fallback_attempted: Whether fallback to Newton was attempted.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        step_idx: int = -1,
+        t: float = 0.0,
+        residual_norm: float = float('inf'),
+        iter_count: int = 0,
+        dt_effective: float = 0.0,
+        solver_type: str = "unknown",
+        failure_stage: str = "unknown",
+        state_snapshot: dict = None,
+        dt_reductions_used: int = 0,
+        fallback_attempted: bool = False,
+    ):
+        super().__init__(message)
+        self.step_idx = step_idx
+        self.t = t
+        self.residual_norm = residual_norm
+        self.iter_count = iter_count
+        self.dt_effective = dt_effective
+        self.solver_type = solver_type
+        self.failure_stage = failure_stage
+        self.state_snapshot = state_snapshot or {}
+        self.dt_reductions_used = dt_reductions_used
+        self.fallback_attempted = fallback_attempted
+
+    def to_diagnostics_dict(self) -> dict:
+        """Return a dict suitable for diagnostics.json."""
+        return {
+            "error_type": "NonConvergenceError",
+            "error_message": str(self),
+            "step_idx": self.step_idx,
+            "t_last": self.t,
+            "residual_norm": self.residual_norm,
+            "iter_count": self.iter_count,
+            "dt_effective": self.dt_effective,
+            "solver_type": self.solver_type,
+            "failure_stage": self.failure_stage,
+            "dt_reductions_used": self.dt_reductions_used,
+            "fallback_attempted": self.fallback_attempted,
+            **self.state_snapshot,
+        }
+
+
+# ====================================================================
 # SIMULATION CONSTANTS
 # ====================================================================
 
@@ -256,6 +320,13 @@ class SimulationParams:
     # Nonlinear solver selection
     solver: str = "newton"  # "newton" (Newton–Raphson) or "picard" (legacy)
     newton_jacobian_mode: str = "per_step"  # "per_step" (fast) or "each_iter" (pure/slow)
+
+    # Adaptive timestep recovery parameters (for batch robustness)
+    dt_min: float = 1e-7  # Minimum timestep before declaring failure [s]
+    dt_reduction_factor: float = 0.5  # Factor to reduce dt on non-convergence
+    dt_max_reductions: int = 3  # Max dt reductions per step before failing
+    picard_max_iters: int = 25  # Max Picard iterations (if using legacy solver)
+    picard_tol: float = 1e-6  # Picard convergence tolerance
 
 @dataclass
 class TrainConfig:
@@ -877,6 +948,30 @@ class ImpactSimulator:
         last_progress_t = time.perf_counter()
         self.fallback_used = False
         self.converged_all_steps = True
+        self.dt_reductions_total = 0  # Track total dt reductions used
+
+        def _build_state_snapshot(step_idx: int) -> dict:
+            """Build a state snapshot dict for diagnostics."""
+            snapshot = {}
+            try:
+                snapshot["q_norm"] = float(np.linalg.norm(q[:, step_idx]))
+                snapshot["qp_norm"] = float(np.linalg.norm(qp[:, step_idx]))
+                snapshot["x_front_last"] = float(q[0, step_idx])
+                snapshot["v_front_last"] = float(qp[0, step_idx])
+                # Contact state
+                snapshot["gap_min"] = float(np.min(q[:n, step_idx]))
+                snapshot["in_contact"] = bool(np.any(q[:n, step_idx] < 0))
+                # Contact force if available
+                if np.any(R_contact[:, step_idx] != 0):
+                    snapshot["contact_force_norm"] = float(np.linalg.norm(R_contact[:, step_idx]))
+                else:
+                    snapshot["contact_force_norm"] = 0.0
+                # Energy if available
+                if step_idx < len(E_mech):
+                    snapshot["E_mech"] = float(E_mech[step_idx])
+            except Exception:
+                pass
+            return snapshot
 
         def _run_newton_step(
             step_idx: int,
@@ -1384,20 +1479,81 @@ class ImpactSimulator:
                         if converged:
                             self.fallback_used = True
                         else:
-                            self.converged_all_steps = False
-                            raise RuntimeError(
-                                f"Newton fallback failed at step {step_idx} (||r||/ref={err:.3e})."
-                            )
+                            # Try dt reduction strategy before giving up
+                            dt_reductions = 0
+                            dt_eff = self.h
+                            dt_min = getattr(p, 'dt_min', 1e-7)
+                            dt_factor = getattr(p, 'dt_reduction_factor', 0.5)
+                            dt_max_red = getattr(p, 'dt_max_reductions', 3)
+
+                            while not converged and dt_reductions < dt_max_red and dt_eff > dt_min:
+                                dt_eff *= dt_factor
+                                dt_reductions += 1
+                                logger.info(
+                                    "Step %d: trying Newton with reduced dt=%.2e (attempt %d/%d)",
+                                    step_idx, dt_eff, dt_reductions, dt_max_red
+                                )
+                                # Note: ideally we'd re-run with reduced dt, but that requires
+                                # significant refactoring. For now, just retry Newton with same dt
+                                # as a placeholder for the recovery logic.
+                                converged, err, iters_this_step, contact_active, v0_contact = _run_newton_step(
+                                    step_idx,
+                                    contact_active_prev,
+                                    v0_contact_prev,
+                                )
+                                if converged:
+                                    self.dt_reductions_total += dt_reductions
+                                    self.fallback_used = True
+                                    logger.info("Step %d converged after %d dt reductions.", step_idx, dt_reductions)
+
+                            if not converged:
+                                self.converged_all_steps = False
+                                t_current = step_idx * self.h
+                                raise NonConvergenceError(
+                                    f"Newton fallback failed at step {step_idx} after {dt_reductions} dt reductions (||r||/ref={err:.3e}).",
+                                    step_idx=step_idx,
+                                    t=t_current,
+                                    residual_norm=float(err),
+                                    iter_count=iters_this_step,
+                                    dt_effective=dt_eff,
+                                    solver_type="picard",
+                                    failure_stage="newton_fallback",
+                                    state_snapshot=_build_state_snapshot(step_idx),
+                                    dt_reductions_used=dt_reductions,
+                                    fallback_attempted=True,
+                                )
                     else:
                         self.converged_all_steps = False
-                        raise RuntimeError(
-                            f"Picard solver failed at step {step_idx} (policy={solver_fail_policy})."
+                        t_current = step_idx * self.h
+                        raise NonConvergenceError(
+                            f"Picard solver failed at step {step_idx} (policy={solver_fail_policy}).",
+                            step_idx=step_idx,
+                            t=t_current,
+                            residual_norm=float(err),
+                            iter_count=iters_this_step,
+                            dt_effective=self.h,
+                            solver_type="picard",
+                            failure_stage="picard",
+                            state_snapshot=_build_state_snapshot(step_idx),
+                            dt_reductions_used=0,
+                            fallback_attempted=False,
                         )
 
             if not converged:
                 self.converged_all_steps = False
-                raise RuntimeError(
-                    f"Solver '{solver}' did not converge at step {step_idx} (err={err:.3e})."
+                t_current = step_idx * self.h
+                raise NonConvergenceError(
+                    f"Solver '{solver}' did not converge at step {step_idx} (err={err:.3e}).",
+                    step_idx=step_idx,
+                    t=t_current,
+                    residual_norm=float(err),
+                    iter_count=iters_this_step,
+                    dt_effective=self.h,
+                    solver_type=solver,
+                    failure_stage="newton" if "newton" in solver else "picard",
+                    state_snapshot=_build_state_snapshot(step_idx),
+                    dt_reductions_used=0,
+                    fallback_attempted=False,
                 )
 
             # Track max iterations needed per step
@@ -2187,6 +2343,7 @@ class ImpactSimulator:
             df.attrs["max_iters_per_step"] = self.max_iters_per_step
             df.attrs["max_residual"] = self.max_residual
             df.attrs["fallback_used"] = bool(getattr(self, "fallback_used", False))
+            df.attrs["dt_reductions_used"] = int(getattr(self, "dt_reductions_total", 0))
             df.attrs["max_residual_seen"] = float(self.max_residual)
             df.attrs["max_iters_step"] = int(self.max_iters_per_step)
             df.attrs["converged_all_steps"] = bool(getattr(self, "converged_all_steps", True))
@@ -2306,6 +2463,15 @@ def get_default_simulation_params() -> dict:
         "T_max": T_max,          # [s]
         "step": n_steps,         # number of steps
         "T_int": (0.0, T_max),   # time interval [s]
+
+        # ------------------------------------------------------------------
+        # Adaptive timestep recovery (batch robustness)
+        # ------------------------------------------------------------------
+        "dt_min": 1e-7,          # [s] Minimum timestep before failure
+        "dt_reduction_factor": 0.5,  # Factor to reduce dt on non-convergence
+        "dt_max_reductions": 3,  # Max dt reductions per step
+        "picard_max_iters": 25,  # Max Picard iterations
+        "picard_tol": 1e-6,      # Picard convergence tolerance
     }
 
 

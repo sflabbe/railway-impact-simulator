@@ -84,24 +84,68 @@ LINE_STYLES = {
 MARKERS = ["o", "s", "^", "D", "v", "<", ">", "p", "h"]
 
 
-def load_case_results(section: str, case_name: str) -> Tuple[pd.DataFrame, Dict]:
-    """Load results CSV and metrics JSON for a case."""
+def load_case_results(section: str, case_name: str) -> Tuple[Optional[pd.DataFrame], Dict]:
+    """Load results CSV and metrics JSON for a case.
+
+    Returns (None, metrics) if the case failed (no results.csv).
+    """
     case_dir = RESULTS_DIR / section / case_name
-    df = pd.read_csv(case_dir / "results.csv")
-    with open(case_dir / "metrics.json", "r") as f:
+    metrics_path = case_dir / "metrics.json"
+    results_path = case_dir / "results.csv"
+
+    if not metrics_path.exists():
+        return None, {"status": "missing", "case_name": case_name}
+
+    with open(metrics_path, "r") as f:
         metrics = json.load(f)
+
+    # Check if case failed (no results.csv or status=failed)
+    if metrics.get("status") == "failed" or not results_path.exists():
+        return None, metrics
+
+    df = pd.read_csv(results_path)
     return df, metrics
 
 
-def load_section_results(section: str) -> Dict[str, Tuple[pd.DataFrame, Dict]]:
-    """Load all results for a section."""
+def load_section_results(
+    section: str,
+    include_failed: bool = False,
+) -> Dict[str, Tuple[Optional[pd.DataFrame], Dict]]:
+    """Load all results for a section.
+
+    Args:
+        section: Section ID (e.g., "8.3_friction").
+        include_failed: If True, include failed cases with df=None.
+
+    Returns:
+        Dict mapping case_name to (DataFrame or None, metrics dict).
+    """
     section_dir = RESULTS_DIR / section
     results = {}
     if section_dir.exists():
         for case_dir in section_dir.iterdir():
-            if case_dir.is_dir() and (case_dir / "results.csv").exists():
-                results[case_dir.name] = load_case_results(section, case_dir.name)
+            if case_dir.is_dir():
+                # Check if has metrics.json (required for all cases)
+                if (case_dir / "metrics.json").exists():
+                    df, metrics = load_case_results(section, case_dir.name)
+                    if df is not None or include_failed:
+                        results[case_dir.name] = (df, metrics)
     return results
+
+
+def get_convergence_summary(section: str) -> Dict[str, Any]:
+    """Get convergence summary for a section."""
+    all_results = load_section_results(section, include_failed=True)
+    n_total = len(all_results)
+    n_converged = sum(1 for df, m in all_results.values() if df is not None)
+    n_failed = n_total - n_converged
+    failed_cases = [name for name, (df, m) in all_results.items() if df is None]
+    return {
+        "n_total": n_total,
+        "n_converged": n_converged,
+        "n_failed": n_failed,
+        "failed_cases": failed_cases,
+    }
 
 
 # =============================================================================
@@ -242,11 +286,21 @@ def generate_fig36_37_friction():
 
     - fig36.pdf: Flores model
     - fig37.pdf: Anagnostopoulos model
+
+    Note: Failed cases are skipped; convergence summary is printed.
     """
     results = load_section_results("8.3_friction")
+    conv_summary = get_convergence_summary("8.3_friction")
+
     if not results:
-        print("No results found for section 8.3")
+        print("No converged results found for section 8.3")
+        if conv_summary["n_failed"] > 0:
+            print(f"  {conv_summary['n_failed']} cases failed: {conv_summary['failed_cases']}")
         return
+
+    print(f"Section 8.3: {conv_summary['n_converged']}/{conv_summary['n_total']} converged")
+    if conv_summary["n_failed"] > 0:
+        print(f"  Skipping {conv_summary['n_failed']} failed cases")
 
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -264,7 +318,10 @@ def generate_fig36_37_friction():
             for d_idx, dist in enumerate(distances):
                 case_name = f"mu{int(mu_s*10)}{int(mu_k*10)}_d{dist}m_{model}"
                 if case_name in results:
-                    df, _ = results[case_name]
+                    df, metrics = results[case_name]
+                    # Skip failed cases (df is None)
+                    if df is None:
+                        continue
                     ax.plot(
                         df["Time_ms"], df["Impact_Force_MN"],
                         label=f"d = {dist} m",
@@ -625,7 +682,10 @@ def generate_fig45_47_accelerations():
 # =============================================================================
 
 def generate_summary_figure():
-    """Generate a summary figure with key results from all sections."""
+    """Generate a summary figure with key results from all sections.
+
+    Includes convergence statistics and handles failed cases gracefully.
+    """
     summary_path = RESULTS_DIR / "summary.csv"
     if not summary_path.exists():
         print("No summary.csv found")
@@ -634,6 +694,16 @@ def generate_summary_figure():
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
     summary = pd.read_csv(summary_path)
+
+    # Print convergence summary
+    if "status" in summary.columns:
+        n_total = len(summary)
+        n_success = (summary["status"] == "success").sum()
+        n_failed = (summary["status"] == "failed").sum()
+        print(f"Summary: {n_success}/{n_total} converged, {n_failed} failed")
+        if n_failed > 0:
+            failed_cases = summary[summary["status"] == "failed"]["case_name"].tolist()
+            print(f"  Failed cases: {failed_cases[:5]}{'...' if len(failed_cases) > 5 else ''}")
 
     fig = plt.figure(figsize=(16, 12))
     gs = gridspec.GridSpec(3, 2, figure=fig)

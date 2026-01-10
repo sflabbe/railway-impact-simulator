@@ -1,0 +1,154 @@
+# ICE 1 Full Trainset Configuration for Dissertation
+# 14 units: 2 powercars + 12 middle cars
+# Based on dissertation parameters (Chapter 8)
+#
+# Geometry:
+#   - Powercar: 78.0 t, L = 20.56 m
+#   - Middle car: 51.4 t, L = 26.4 m
+#   - Coupling gap: 0.5 m
+#   - Total: 2*78 + 12*51.4 = 772.8 t
+#
+# Crushing behavior (Aluminium quasi-static):
+#   - fy = 15 MN
+#   - uy = 200 mm
+
+case_name: ICE1_full_dissertation
+notes: >
+  ICE 1 full trainset for dissertation parametric studies.
+  14 vehicle-level lumped masses (2 powercars + 12 coaches).
+  Aluminium crushing behavior with fy=15MN, uy=200mm.
+
+# Train composition (14 masses)
+n_masses: 14
+
+# Masses [kg]: Powercar (78t), 12x Middle car (51.4t), Powercar (78t)
+masses:
+  - 78000.0    # Front powercar
+  - 51400.0    # Wagon 1
+  - 51400.0    # Wagon 2
+  - 51400.0    # Wagon 3
+  - 51400.0    # Wagon 4
+  - 51400.0    # Wagon 5
+  - 51400.0    # Wagon 6
+  - 51400.0    # Wagon 7
+  - 51400.0    # Wagon 8
+  - 51400.0    # Wagon 9
+  - 51400.0    # Wagon 10
+  - 51400.0    # Wagon 11
+  - 51400.0    # Wagon 12
+  - 78000.0    # Rear powercar
+
+# Positions [m]: cumulative from front
+# Powercar: 20.56m, gap: 0.5m, Middle car: 26.4m, gap: 0.5m, ...
+x_init:
+  - 0.0        # Powercar front at origin
+  - 21.06      # Wagon 1 (20.56 + 0.5)
+  - 47.96      # Wagon 2 (21.06 + 26.4 + 0.5)
+  - 74.86      # Wagon 3
+  - 101.76     # Wagon 4
+  - 128.66     # Wagon 5
+  - 155.56     # Wagon 6
+  - 182.46     # Wagon 7
+  - 209.36     # Wagon 8
+  - 236.26     # Wagon 9
+  - 263.16     # Wagon 10
+  - 290.06     # Wagon 11
+  - 316.96     # Wagon 12
+  - 343.86     # Rear powercar
+
+y_init:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+
+# Spring properties (13 springs between 14 masses)
+# Aluminium quasi-static crushing: fy = 15 MN, uy = 200 mm
+# k_train = fy / uy = 15e6 / 0.2 = 75e6 N/m
+k_train:
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+  - 75000000.0
+
+fy:   # [N] = 15 MN
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+  - 15000000.0
+
+uy:   # [m] = 200 mm
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+  - 0.20
+
+# Bouc-Wen hysteresis parameters
+bw_a: 0.0
+bw_A: 1.0
+bw_beta: 0.10
+bw_gamma: 0.90
+bw_n: 8
+
+# Wall/structure properties
+k_wall: 60000000.0    # 60 MN/m (typical RC structure)
+cr_wall: 0.8          # Coefficient of restitution [-]
+contact_model: anagnostopoulos
+
+# Friction (LuGre model)
+friction_model: lugre
+mu_s: 0.40
+mu_k: 0.30
+sigma_0: 1.0e5
+sigma_1: 3.16e2
+sigma_2: 0.40
+
+# Time integration
+h_init: 1.0e-4        # Time step [s]
+T_max: 3.0            # Total simulation time [s] (longer for full train)
+alpha_hht: -0.10
+newton_tol: 1.0e-6
+max_iter: 50
+solver: picard
+
+# Initial conditions (set via CLI)
+v0_init: -22.22       # ~80 km/h (negative = towards wall)
+angle_rad: 0.0
+d0: 0.01              # Initial gap [m]

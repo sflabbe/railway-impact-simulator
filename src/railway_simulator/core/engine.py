@@ -233,6 +233,10 @@ class SimulationParams:
     T_max: float   # Maximum simulation time
     step: int      # Number of steps (T_max / h_init)
     T_int: Tuple[float, float]  # Time interval (0, T_max)
+    damping_model: str
+    damping_zeta: float
+    damping_target: float | None
+    solver_fail_policy: str
 
     # Contact law implementation object (optional; injected by UI/CLI)
     # Keep this *after* all required fields: dataclasses require non-default
@@ -449,6 +453,16 @@ class StructuralDynamics:
     """Structural analysis utilities."""
 
     @staticmethod
+    def _natural_frequencies(M: np.ndarray, K: np.ndarray) -> np.ndarray:
+        """Return sorted positive natural frequencies (rad/s)."""
+        eigenvalues, _ = np.linalg.eig(np.linalg.solve(M, K))
+        positive = np.real(eigenvalues[np.real(eigenvalues) > SimulationConstants.ZERO_TOL])
+        freqs = np.sqrt(np.abs(positive))
+        freqs = np.real(freqs)
+        freqs.sort()
+        return freqs
+
+    @staticmethod
     def build_stiffness_matrix_2d(
         n: int, x: np.ndarray, y: np.ndarray, k: np.ndarray
     ) -> np.ndarray:
@@ -501,11 +515,7 @@ class StructuralDynamics:
 
         C = α*M + β*K
         """
-        eigenvalues, _ = np.linalg.eig(np.linalg.solve(M, K))
-        positive = np.real(eigenvalues[np.real(eigenvalues) > SimulationConstants.ZERO_TOL])
-        freqs = np.sqrt(np.abs(positive))
-        freqs = np.real(freqs)
-        freqs.sort()
+        freqs = StructuralDynamics._natural_frequencies(M, K)
 
         if len(freqs) >= 2:
             wn1, wn2 = freqs[-2], freqs[-1]
@@ -520,6 +530,30 @@ class StructuralDynamics:
             beta_r = 0.0
 
         return M * alpha_r + K * beta_r
+
+    @staticmethod
+    def compute_stiffness_proportional_damping(
+        M: np.ndarray,
+        K: np.ndarray,
+        zeta: float,
+        target_wn: float | None = None,
+    ) -> np.ndarray:
+        """
+        Compute stiffness-proportional damping (alpha=0, beta*K).
+
+        If target_wn is not provided, use the lowest non-zero natural frequency.
+        """
+        wn_target = float(target_wn) if target_wn is not None else None
+        if wn_target is None or wn_target <= 0.0:
+            freqs = StructuralDynamics._natural_frequencies(M, K)
+            freqs = freqs[freqs > SimulationConstants.ZERO_TOL]
+            wn_target = float(freqs[0]) if len(freqs) else None
+
+        if wn_target is None or wn_target <= 0.0:
+            return np.zeros_like(K)
+
+        beta_r = 2.0 * float(zeta) / float(wn_target)
+        return K * beta_r
 
 
 # ====================================================================
@@ -604,8 +638,27 @@ class ImpactSimulator:
             p.n_masses, p.x_init, p.y_init, k_init
         )
 
-        # Damping matrix (Rayleigh)
-        self.C = StructuralDynamics.compute_rayleigh_damping(self.M, self.K)
+        # Damping matrix
+        damping_model = str(getattr(p, "damping_model", "rayleigh_full") or "rayleigh_full").lower()
+        damping_zeta = float(getattr(p, "damping_zeta", 0.05))
+        damping_target = getattr(p, "damping_target", None)
+        if damping_model in ("stiffness", "stiffness_only", "stiffness_proportional"):
+            self.C = StructuralDynamics.compute_stiffness_proportional_damping(
+                self.M,
+                self.K,
+                damping_zeta,
+                damping_target,
+            )
+        elif damping_model in ("rayleigh_full", "rayleigh"):
+            self.C = StructuralDynamics.compute_rayleigh_damping(self.M, self.K, damping_zeta)
+        else:
+            logger.warning("Unknown damping_model '%s'; defaulting to stiffness.", damping_model)
+            self.C = StructuralDynamics.compute_stiffness_proportional_damping(
+                self.M,
+                self.K,
+                damping_zeta,
+                damping_target,
+            )
 
         # Initial spring lengths (original unshifted geometry)
         self.u10 = np.zeros(p.n_masses - 1)
@@ -822,9 +875,348 @@ class ImpactSimulator:
         E0 = E_mech[0]  # Initial total energy
 
         last_progress_t = time.perf_counter()
+        self.fallback_used = False
+        self.converged_all_steps = True
+
+        def _run_newton_step(
+            step_idx: int,
+            contact_active_in: bool,
+            v0_contact_in: np.ndarray,
+        ) -> Tuple[bool, float, int, bool, np.ndarray]:
+            """Solve one step with Newton–Raphson on displacement."""
+            converged = False
+            err = np.inf
+            iters_this_step = 0
+
+            beta = self.integrator.beta
+            gamma = self.integrator.gamma
+            alpha = self.integrator.alpha
+            h = self.h
+
+            a0 = 1.0 / (beta * h * h)
+
+            q_n = q[:, step_idx]
+            v_n = qp[:, step_idx]
+            a_n = qpp[:, step_idx]
+
+            # Constant-acceleration predictor for q_{n+1}
+            q_guess = q_n + h * v_n + 0.5 * h * h * a_n
+
+            # Cached previous-step state (treated as constant in this step)
+            u_s_old = u_spring[:, step_idx].copy()
+            u_c_old = u_contact[:, step_idx].copy()
+            X_old = X_bw[:, step_idx].copy()
+            z_old = z_friction[:, step_idx].copy()
+
+            R_total_old = (
+                R_internal[:, step_idx]
+                + R_contact[:, step_idx]
+                + R_friction[:, step_idx]
+                + R_mass_contact[:, step_idx]
+            )
+            Cv_old = self.C @ v_n
+
+            contact_active_prev = bool(contact_active_in)
+            v0_contact_prev = v0_contact_in.copy()
+
+            def _av_from_q(q_trial: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+                """Compute (v_{n+1}, a_{n+1}) from trial q_{n+1} (Newmark inversion)."""
+                a_trial = a0 * (
+                    q_trial
+                    - q_n
+                    - h * v_n
+                    - h * h * (0.5 - beta) * a_n
+                )
+                v_trial = v_n + h * ((1.0 - gamma) * a_n + gamma * a_trial)
+                return v_trial, a_trial
+
+            def _eval_state(q_trial: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+                """Return (residual, state-dict) for Newton iterations."""
+                v_trial, a_trial = _av_from_q(q_trial)
+
+                # --- Springs (Bouc–Wen in 2D) ---
+                u_s_new = np.zeros_like(u_s_old)
+                R_int_new = np.zeros(dof)
+                X_new = np.zeros_like(X_old)
+
+                # Spring deformations
+                for i in range(n - 1):
+                    r1 = q_trial[[i, n + i]]
+                    r2 = q_trial[[i + 1, n + i + 1]]
+                    u_s_new[i] = np.linalg.norm(r2 - r1) - self.u10[i]
+
+                du = (u_s_new - u_s_old) / h
+                u_comp = -u_s_new
+                du_comp = -du
+
+                for i in range(n - 1):
+                    X_new[i] = BoucWenModel.integrate_rk4(
+                        X_old[i],
+                        du_comp[i],
+                        h,
+                        self.params.bw_A,
+                        self.params.bw_beta,
+                        self.params.bw_gamma,
+                        self.params.bw_n,
+                        self.params.uy[i],
+                    )
+
+                    f_spring = (
+                        p.bw_a * (self.k_lin[i] * u_comp[i])
+                        + (1.0 - p.bw_a) * p.fy[i] * X_new[i]
+                    )
+
+                    r1 = q_trial[[i, n + i]]
+                    r2 = q_trial[[i + 1, n + i + 1]]
+                    dr = r2 - r1
+                    L = np.linalg.norm(dr)
+                    n_vec = (dr / L) if L > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
+
+                    R_int_new[i] += -f_spring * n_vec[0]
+                    R_int_new[n + i] += -f_spring * n_vec[1]
+                    R_int_new[i + 1] += +f_spring * n_vec[0]
+                    R_int_new[n + i + 1] += +f_spring * n_vec[1]
+
+                # --- Friction (regularized) ---
+                R_fric_new = np.zeros(dof)
+                z_new = z_old.copy()
+                if self.friction_enabled:
+                    Fc_node = p.mu_k * np.abs(FN_node)
+                    Fs_node = p.mu_s * np.abs(FN_node)
+
+                    for i in range(n):
+                        vx = v_trial[i]
+                        vz = v_trial[n + i]
+                        v_t = np.hypot(vx, vz)
+
+                        z_prev = z_old[i]
+                        z_i = z_prev
+                        fx = 0.0
+                        fz = 0.0
+
+                        if v_t > 1e-8:
+                            if p.friction_model == "dahl":
+                                F_tmp, z_i = FrictionModels.dahl(
+                                    z_prev, v_t, Fc_node[i], p.sigma_0, h
+                                )
+                            elif p.friction_model == "lugre":
+                                F_tmp, z_i = FrictionModels.lugre(
+                                    z_prev, v_t, Fc_node[i], Fs_node[i], vs,
+                                    float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
+                                )
+                            elif p.friction_model == "coulomb":
+                                F_tmp = FrictionModels.coulomb_stribeck(
+                                    v_t, Fc_node[i], Fs_node[i], vs, p.sigma_2
+                                )
+                            elif p.friction_model == "brown-mcphee":
+                                F_tmp = FrictionModels.brown_mcphee(
+                                    v_t, Fc_node[i], Fs_node[i], vs
+                                )
+                            else:
+                                F_tmp, z_i = FrictionModels.lugre(
+                                    z_prev, v_t, Fc_node[i], Fs_node[i], vs,
+                                    float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
+                                )
+
+                            F_mag = abs(F_tmp)
+                            fx = -F_mag * vx / v_t
+                            fz = -F_mag * vz / v_t
+
+                        R_fric_new[i] = fx
+                        R_fric_new[n + i] = fz
+                        z_new[i] = z_i
+
+                # --- Wall contact (unilateral) ---
+                u_c_new = np.zeros_like(u_c_old)
+                u_c_new[:n] = np.where(q_trial[:n] < 0.0, q_trial[:n], 0.0)
+                du_c = (u_c_new - u_c_old) / h
+
+                v0_eff = v0_contact_prev.copy()
+                contact_active_new = contact_active_prev
+                if np.any(u_c_new[:n] < 0.0):
+                    if (not contact_active_prev) and np.any(du_c[:n] < 0.0):
+                        contact_active_new = True
+                        mask = du_c[:n] < 0.0
+                        v0_eff[:n] = np.where(mask, du_c[:n], 1.0)
+                        v0_eff[:n][v0_eff[:n] == 0.0] = 1.0
+
+                    R_raw = ContactModels.compute_force(
+                        u_c_new,
+                        du_c,
+                        v0_eff,
+                        p.k_wall,
+                        p.cr_wall,
+                        p.contact_model,
+                        contact_law=p.contact_law,
+                    )
+                    R_cont_new = -R_raw
+                else:
+                    # Loss of contact
+                    if np.any(u_c_old[:n] < 0.0):
+                        contact_active_new = False
+                        v0_eff = np.ones_like(v0_eff)
+                    R_cont_new = np.zeros(dof)
+
+                # --- Mass-to-mass contact (penalty) ---
+                R_mc_new = np.zeros(dof)
+                k_contact = SimulationConstants.MASS_CONTACT_STIFFNESS
+                c_contact = SimulationConstants.MASS_CONTACT_DAMPING
+
+                for i in range(n - 1):
+                    L_current = self.u10[i] + u_s_new[i]
+                    if L_current <= self.L_min[i]:
+                        penetration = self.L_min[i] - L_current
+
+                        r1 = q_trial[[i, n + i]]
+                        r2 = q_trial[[i + 1, n + i + 1]]
+                        v1 = v_trial[[i, n + i]]
+                        v2 = v_trial[[i + 1, n + i + 1]]
+
+                        dr = r2 - r1
+                        dist = np.linalg.norm(dr)
+                        n_vec = (dr / dist) if dist > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
+
+                        dv = v2 - v1
+                        v_rel_normal = float(np.dot(dv, n_vec))
+
+                        F_elastic = k_contact * penetration
+                        F_damping = c_contact * abs(v_rel_normal) if v_rel_normal < 0.0 else 0.0
+                        F_contact = F_elastic + F_damping
+
+                        R_mc_new[i] -= F_contact * n_vec[0]
+                        R_mc_new[n + i] -= F_contact * n_vec[1]
+                        R_mc_new[i + 1] += F_contact * n_vec[0]
+                        R_mc_new[n + i + 1] += F_contact * n_vec[1]
+
+                # Assemble total forces
+                R_total_new = R_int_new + R_cont_new + R_fric_new + R_mc_new
+                Cv_new = self.C @ v_trial
+
+                # Residual consistent with compute_acceleration():
+                #   M a_{n+1} - [(1-α)R_{n+1} + αR_n - (1-α)C v_{n+1} - α C v_n] = 0
+                force = (
+                    (1.0 - alpha) * R_total_new
+                    + alpha * R_total_old
+                    - (1.0 - alpha) * Cv_new
+                    - alpha * Cv_old
+                )
+                r = (self.M @ a_trial) - force
+
+                state = {
+                    "q": q_trial,
+                    "v": v_trial,
+                    "a": a_trial,
+                    "R_internal": R_int_new,
+                    "R_contact": R_cont_new,
+                    "R_friction": R_fric_new,
+                    "R_mass_contact": R_mc_new,
+                    "u_spring": u_s_new,
+                    "u_contact": u_c_new,
+                    "X_bw": X_new,
+                    "z_friction": z_new,
+                    "contact_active": contact_active_new,
+                    "v0_contact": v0_eff,
+                }
+                return r, state
+
+            # Newton loop
+            state_last: Dict[str, Any] | None = None
+            jac_mode = str(getattr(p, "newton_jacobian_mode", "per_step")).lower()
+            J_cache: np.ndarray | None = None
+            contact_cache: bool | None = None
+            for it in range(p.max_iter):
+                r0, state0 = _eval_state(q_guess)
+                state_last = state0
+
+                iters_this_step = it + 1
+                self.total_iters += 1
+
+                rnorm = float(np.linalg.norm(r0))
+                ref = float(np.linalg.norm(R_total_old) + 1.0)
+                err = rnorm / ref
+                if err > self.max_residual:
+                    self.max_residual = err
+
+                if err < self.params.newton_tol:
+                    converged = True
+                    break
+                # Finite-difference Jacobian J = ∂r/∂q (FD; expensive)
+                # newton_jacobian_mode:
+                #   - 'per_step': build once per time step (modified Newton; fast)
+                #   - 'each_iter': rebuild each Newton iteration (pure FD Newton; slow)
+                contact_now = bool(state0.get("contact_active", False))
+                if contact_cache is None:
+                    contact_cache = contact_now
+                elif contact_now != contact_cache:
+                    # Contact state changed -> refresh Jacobian for stability
+                    J_cache = None
+                    contact_cache = contact_now
+
+                rebuild_J = (J_cache is None) or (jac_mode in ("each_iter", "pure", "every_iter"))
+                if rebuild_J:
+                    J = np.zeros((dof, dof), dtype=float)
+                    eps0 = SimulationConstants.FD_EPSILON
+                    for j in range(dof):
+                        dq = eps0 * (1.0 + abs(q_guess[j]))
+                        q_pert = q_guess.copy()
+                        q_pert[j] += dq
+                        r_pert, _ = _eval_state(q_pert)
+                        J[:, j] = (r_pert - r0) / dq
+                    J_cache = J
+                else:
+                    J = J_cache
+
+                # Solve for update
+                try:
+                    dq_vec = np.linalg.solve(J, -r0)
+                except np.linalg.LinAlgError:
+                    dq_vec = np.linalg.lstsq(J, -r0, rcond=None)[0]
+
+                self.linear_solves += 1
+
+                # Backtracking line search (simple Armijo)
+                lam = 1.0
+                q_next = q_guess + dq_vec
+                for _ls in range(SimulationConstants.MAX_LINE_SEARCH_ITERS):
+                    r_try, _ = _eval_state(q_next)
+                    if np.linalg.norm(r_try) <= (1.0 - SimulationConstants.ARMIJO_COEFF * lam) * rnorm:
+                        break
+                    lam *= 0.5
+                    q_next = q_guess + lam * dq_vec
+
+                q_guess = q_next
+
+            # Commit last iterate (converged or best-effort)
+            if state_last is None:
+                _, state_last = _eval_state(q_guess)
+
+            q[:, step_idx + 1] = state_last["q"]
+            qp[:, step_idx + 1] = state_last["v"]
+            qpp[:, step_idx + 1] = state_last["a"]
+            R_internal[:, step_idx + 1] = state_last["R_internal"]
+            R_contact[:, step_idx + 1] = state_last["R_contact"]
+            R_friction[:, step_idx + 1] = state_last["R_friction"]
+            R_mass_contact[:, step_idx + 1] = state_last["R_mass_contact"]
+            u_spring[:, step_idx + 1] = state_last["u_spring"]
+            u_contact[:, step_idx + 1] = state_last["u_contact"]
+            X_bw[:, step_idx + 1] = state_last["X_bw"]
+            z_friction[:, step_idx + 1] = state_last["z_friction"]
+
+            contact_active_out = bool(state_last["contact_active"])
+            v0_contact_out = state_last["v0_contact"]
+
+            if not converged:
+                logger.warning(
+                    "Newton solver did not converge at step %d (||r||/ref = %.3e)",
+                    step_idx,
+                    err,
+                )
+
+            return converged, err, iters_this_step, contact_active_out, v0_contact_out
 
         # Time stepping
         solver = str(getattr(p, "solver", "newton")).lower()
+        solver_fail_policy = str(getattr(p, "solver_fail_policy", "switch")).lower()
         for step_idx in range(p.step):
 
             converged = False
@@ -832,336 +1224,19 @@ class ImpactSimulator:
             iters_this_step = 0
 
             if solver in ("newton", "nr", "newton-raphson", "newton_raphson"):
-                # =========================================================
-                # Newton–Raphson on displacement q_{n+1}
-                # =========================================================
-                beta = self.integrator.beta
-                gamma = self.integrator.gamma
-                alpha = self.integrator.alpha
-                h = self.h
-
-                a0 = 1.0 / (beta * h * h)
-
-                q_n = q[:, step_idx]
-                v_n = qp[:, step_idx]
-                a_n = qpp[:, step_idx]
-
-                # Constant-acceleration predictor for q_{n+1}
-                q_guess = q_n + h * v_n + 0.5 * h * h * a_n
-
-                # Cached previous-step state (treated as constant in this step)
-                u_s_old = u_spring[:, step_idx].copy()
-                u_c_old = u_contact[:, step_idx].copy()
-                X_old = X_bw[:, step_idx].copy()
-                z_old = z_friction[:, step_idx].copy()
-
-                R_total_old = (
-                    R_internal[:, step_idx]
-                    + R_contact[:, step_idx]
-                    + R_friction[:, step_idx]
-                    + R_mass_contact[:, step_idx]
+                converged, err, iters_this_step, contact_active, v0_contact = _run_newton_step(
+                    step_idx,
+                    contact_active,
+                    v0_contact,
                 )
-                Cv_old = self.C @ v_n
-
-                contact_active_prev = bool(contact_active)
-                v0_contact_prev = v0_contact.copy()
-
-                def _av_from_q(q_trial: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-                    """Compute (v_{n+1}, a_{n+1}) from trial q_{n+1} (Newmark inversion)."""
-                    a_trial = a0 * (
-                        q_trial
-                        - q_n
-                        - h * v_n
-                        - h * h * (0.5 - beta) * a_n
-                    )
-                    v_trial = v_n + h * ((1.0 - gamma) * a_n + gamma * a_trial)
-                    return v_trial, a_trial
-
-                def _eval_state(q_trial: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-                    """Return (residual, state-dict) for Newton iterations."""
-                    v_trial, a_trial = _av_from_q(q_trial)
-
-                    # --- Springs (Bouc–Wen in 2D) ---
-                    u_s_new = np.zeros_like(u_s_old)
-                    R_int_new = np.zeros(dof)
-                    X_new = np.zeros_like(X_old)
-
-                    # Spring deformations
-                    for i in range(n - 1):
-                        r1 = q_trial[[i, n + i]]
-                        r2 = q_trial[[i + 1, n + i + 1]]
-                        u_s_new[i] = np.linalg.norm(r2 - r1) - self.u10[i]
-
-                    du = (u_s_new - u_s_old) / h
-                    u_comp = -u_s_new
-                    du_comp = -du
-
-                    for i in range(n - 1):
-                        X_new[i] = BoucWenModel.integrate_rk4(
-                            X_old[i],
-                            du_comp[i],
-                            h,
-                            self.params.bw_A,
-                            self.params.bw_beta,
-                            self.params.bw_gamma,
-                            self.params.bw_n,
-                            self.params.uy[i],
-                        )
-
-                        f_spring = (
-                            p.bw_a * (self.k_lin[i] * u_comp[i])
-                            + (1.0 - p.bw_a) * p.fy[i] * X_new[i]
-                        )
-
-                        r1 = q_trial[[i, n + i]]
-                        r2 = q_trial[[i + 1, n + i + 1]]
-                        dr = r2 - r1
-                        L = np.linalg.norm(dr)
-                        n_vec = (dr / L) if L > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
-
-                        R_int_new[i] += -f_spring * n_vec[0]
-                        R_int_new[n + i] += -f_spring * n_vec[1]
-                        R_int_new[i + 1] += +f_spring * n_vec[0]
-                        R_int_new[n + i + 1] += +f_spring * n_vec[1]
-
-                    # --- Friction (regularized) ---
-                    R_fric_new = np.zeros(dof)
-                    z_new = z_old.copy()
-                    if self.friction_enabled:
-                        Fc_node = p.mu_k * np.abs(FN_node)
-                        Fs_node = p.mu_s * np.abs(FN_node)
-
-                        for i in range(n):
-                            vx = v_trial[i]
-                            vz = v_trial[n + i]
-                            v_t = np.hypot(vx, vz)
-
-                            z_prev = z_old[i]
-                            z_i = z_prev
-                            fx = 0.0
-                            fz = 0.0
-
-                            if v_t > 1e-8:
-                                if p.friction_model == "dahl":
-                                    F_tmp, z_i = FrictionModels.dahl(
-                                        z_prev, v_t, Fc_node[i], p.sigma_0, h
-                                    )
-                                elif p.friction_model == "lugre":
-                                    F_tmp, z_i = FrictionModels.lugre(
-                                        z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                                        float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
-                                    )
-                                elif p.friction_model == "coulomb":
-                                    F_tmp = FrictionModels.coulomb_stribeck(
-                                        v_t, Fc_node[i], Fs_node[i], vs, p.sigma_2
-                                    )
-                                elif p.friction_model == "brown-mcphee":
-                                    F_tmp = FrictionModels.brown_mcphee(
-                                        v_t, Fc_node[i], Fs_node[i], vs
-                                    )
-                                else:
-                                    F_tmp, z_i = FrictionModels.lugre(
-                                        z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                                        float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
-                                    )
-
-                                F_mag = abs(F_tmp)
-                                fx = -F_mag * vx / v_t
-                                fz = -F_mag * vz / v_t
-
-                            R_fric_new[i] = fx
-                            R_fric_new[n + i] = fz
-                            z_new[i] = z_i
-
-                    # --- Wall contact (unilateral) ---
-                    u_c_new = np.zeros_like(u_c_old)
-                    u_c_new[:n] = np.where(q_trial[:n] < 0.0, q_trial[:n], 0.0)
-                    du_c = (u_c_new - u_c_old) / h
-
-                    v0_eff = v0_contact_prev.copy()
-                    contact_active_new = contact_active_prev
-                    if np.any(u_c_new[:n] < 0.0):
-                        if (not contact_active_prev) and np.any(du_c[:n] < 0.0):
-                            contact_active_new = True
-                            mask = du_c[:n] < 0.0
-                            v0_eff[:n] = np.where(mask, du_c[:n], 1.0)
-                            v0_eff[:n][v0_eff[:n] == 0.0] = 1.0
-
-                        R_raw = ContactModels.compute_force(
-                            u_c_new,
-                            du_c,
-                            v0_eff,
-                            p.k_wall,
-                            p.cr_wall,
-                            p.contact_model,
-                            contact_law=p.contact_law,
-                        )
-                        R_cont_new = -R_raw
-                    else:
-                        # Loss of contact
-                        if np.any(u_c_old[:n] < 0.0):
-                            contact_active_new = False
-                            v0_eff = np.ones_like(v0_eff)
-                        R_cont_new = np.zeros(dof)
-
-                    # --- Mass-to-mass contact (penalty) ---
-                    R_mc_new = np.zeros(dof)
-                    k_contact = SimulationConstants.MASS_CONTACT_STIFFNESS
-                    c_contact = SimulationConstants.MASS_CONTACT_DAMPING
-
-                    for i in range(n - 1):
-                        L_current = self.u10[i] + u_s_new[i]
-                        if L_current <= self.L_min[i]:
-                            penetration = self.L_min[i] - L_current
-
-                            r1 = q_trial[[i, n + i]]
-                            r2 = q_trial[[i + 1, n + i + 1]]
-                            v1 = v_trial[[i, n + i]]
-                            v2 = v_trial[[i + 1, n + i + 1]]
-
-                            dr = r2 - r1
-                            dist = np.linalg.norm(dr)
-                            n_vec = (dr / dist) if dist > SimulationConstants.ZERO_TOL else np.array([1.0, 0.0])
-
-                            dv = v2 - v1
-                            v_rel_normal = float(np.dot(dv, n_vec))
-
-                            F_elastic = k_contact * penetration
-                            F_damping = c_contact * abs(v_rel_normal) if v_rel_normal < 0.0 else 0.0
-                            F_contact = F_elastic + F_damping
-
-                            R_mc_new[i] -= F_contact * n_vec[0]
-                            R_mc_new[n + i] -= F_contact * n_vec[1]
-                            R_mc_new[i + 1] += F_contact * n_vec[0]
-                            R_mc_new[n + i + 1] += F_contact * n_vec[1]
-
-                    # Assemble total forces
-                    R_total_new = R_int_new + R_cont_new + R_fric_new + R_mc_new
-                    Cv_new = self.C @ v_trial
-
-                    # Residual consistent with compute_acceleration():
-                    #   M a_{n+1} - [(1-α)R_{n+1} + αR_n - (1-α)C v_{n+1} - α C v_n] = 0
-                    force = (
-                        (1.0 - alpha) * R_total_new
-                        + alpha * R_total_old
-                        - (1.0 - alpha) * Cv_new
-                        - alpha * Cv_old
-                    )
-                    r = (self.M @ a_trial) - force
-
-                    state = {
-                        "q": q_trial,
-                        "v": v_trial,
-                        "a": a_trial,
-                        "R_internal": R_int_new,
-                        "R_contact": R_cont_new,
-                        "R_friction": R_fric_new,
-                        "R_mass_contact": R_mc_new,
-                        "u_spring": u_s_new,
-                        "u_contact": u_c_new,
-                        "X_bw": X_new,
-                        "z_friction": z_new,
-                        "contact_active": contact_active_new,
-                        "v0_contact": v0_eff,
-                    }
-                    return r, state
-
-                # Newton loop
-                state_last: Dict[str, Any] | None = None
-                jac_mode = str(getattr(p, "newton_jacobian_mode", "per_step")).lower()
-                J_cache: np.ndarray | None = None
-                contact_cache: bool | None = None
-                for it in range(p.max_iter):
-                    r0, state0 = _eval_state(q_guess)
-                    state_last = state0
-
-                    iters_this_step = it + 1
-                    self.total_iters += 1
-
-                    rnorm = float(np.linalg.norm(r0))
-                    ref = float(np.linalg.norm(R_total_old) + 1.0)
-                    err = rnorm / ref
-                    if err > self.max_residual:
-                        self.max_residual = err
-
-                    if err < self.params.newton_tol:
-                        converged = True
-                        break
-                    # Finite-difference Jacobian J = ∂r/∂q (FD; expensive)
-                    # newton_jacobian_mode:
-                    #   - 'per_step': build once per time step (modified Newton; fast)
-                    #   - 'each_iter': rebuild each Newton iteration (pure FD Newton; slow)
-                    contact_now = bool(state0.get("contact_active", False))
-                    if contact_cache is None:
-                        contact_cache = contact_now
-                    elif contact_now != contact_cache:
-                        # Contact state changed -> refresh Jacobian for stability
-                        J_cache = None
-                        contact_cache = contact_now
-
-                    rebuild_J = (J_cache is None) or (jac_mode in ("each_iter", "pure", "every_iter"))
-                    if rebuild_J:
-                        J = np.zeros((dof, dof), dtype=float)
-                        eps0 = SimulationConstants.FD_EPSILON
-                        for j in range(dof):
-                            dq = eps0 * (1.0 + abs(q_guess[j]))
-                            q_pert = q_guess.copy()
-                            q_pert[j] += dq
-                            r_pert, _ = _eval_state(q_pert)
-                            J[:, j] = (r_pert - r0) / dq
-                        J_cache = J
-                    else:
-                        J = J_cache
-
-                    # Solve for update
-                    try:
-                        dq_vec = np.linalg.solve(J, -r0)
-                    except np.linalg.LinAlgError:
-                        dq_vec = np.linalg.lstsq(J, -r0, rcond=None)[0]
-
-                    self.linear_solves += 1
-
-                    # Backtracking line search (simple Armijo)
-                    lam = 1.0
-                    q_next = q_guess + dq_vec
-                    for _ls in range(SimulationConstants.MAX_LINE_SEARCH_ITERS):
-                        r_try, _ = _eval_state(q_next)
-                        if np.linalg.norm(r_try) <= (1.0 - SimulationConstants.ARMIJO_COEFF * lam) * rnorm:
-                            break
-                        lam *= 0.5
-                        q_next = q_guess + lam * dq_vec
-
-                    q_guess = q_next
-
-                # Commit last iterate (converged or best-effort)
-                if state_last is None:
-                    _, state_last = _eval_state(q_guess)
-
-                q[:, step_idx + 1] = state_last["q"]
-                qp[:, step_idx + 1] = state_last["v"]
-                qpp[:, step_idx + 1] = state_last["a"]
-                R_internal[:, step_idx + 1] = state_last["R_internal"]
-                R_contact[:, step_idx + 1] = state_last["R_contact"]
-                R_friction[:, step_idx + 1] = state_last["R_friction"]
-                R_mass_contact[:, step_idx + 1] = state_last["R_mass_contact"]
-                u_spring[:, step_idx + 1] = state_last["u_spring"]
-                u_contact[:, step_idx + 1] = state_last["u_contact"]
-                X_bw[:, step_idx + 1] = state_last["X_bw"]
-                z_friction[:, step_idx + 1] = state_last["z_friction"]
-                contact_active = bool(state_last["contact_active"])
-                v0_contact = state_last["v0_contact"]
-
-                if not converged:
-                    logger.warning(
-                        "Newton solver did not converge at step %d (||r||/ref = %.3e)",
-                        step_idx,
-                        err,
-                    )
 
             else:
                 # =========================================================
                 # Legacy Picard iteration in acceleration (kept for reference)
                 # =========================================================
+
+                contact_active_prev = bool(contact_active)
+                v0_contact_prev = v0_contact.copy()
 
                 # Initial guess for a_{n+1}
                 qpp[:, step_idx + 1] = qpp[:, step_idx]
@@ -1299,6 +1374,31 @@ class ImpactSimulator:
                         step_idx,
                         err,
                     )
+                    if solver_fail_policy in ("switch", "fallback", "auto", "newton"):
+                        logger.info("Retrying step %d with Newton solver.", step_idx)
+                        converged, err, iters_this_step, contact_active, v0_contact = _run_newton_step(
+                            step_idx,
+                            contact_active_prev,
+                            v0_contact_prev,
+                        )
+                        if converged:
+                            self.fallback_used = True
+                        else:
+                            self.converged_all_steps = False
+                            raise RuntimeError(
+                                f"Newton fallback failed at step {step_idx} (||r||/ref={err:.3e})."
+                            )
+                    else:
+                        self.converged_all_steps = False
+                        raise RuntimeError(
+                            f"Picard solver failed at step {step_idx} (policy={solver_fail_policy})."
+                        )
+
+            if not converged:
+                self.converged_all_steps = False
+                raise RuntimeError(
+                    f"Solver '{solver}' did not converge at step {step_idx} (err={err:.3e})."
+                )
 
             # Track max iterations needed per step
             if iters_this_step > self.max_iters_per_step:
@@ -1842,8 +1942,8 @@ class ImpactSimulator:
         self,
         step_idx: int,
         u_spring: np.ndarray,
-        q: np.ndarray,
-        qp: np.ndarray,
+        q_vec: np.ndarray,
+        qp_vec: np.ndarray,
         R_mass_contact: np.ndarray,
     ) -> None:
         """
@@ -1856,8 +1956,8 @@ class ImpactSimulator:
         Args:
             step_idx: Current timestep index
             u_spring: Spring deformations (negative = compression)
-            q: Current positions
-            qp: Current velocities
+            q_vec: Current positions (1D vector)
+            qp_vec: Current velocities (1D vector)
             R_mass_contact: Mass contact force vector (output)
         """
         p = self.params
@@ -1880,10 +1980,10 @@ class ImpactSimulator:
                 self.mass_contact_active[i] = True
 
                 # Get positions and velocities of masses i and i+1
-                r1 = q[[i, n + i], step_idx + 1]
-                r2 = q[[i + 1, n + i + 1], step_idx + 1]
-                v1 = qp[[i, n + i], step_idx + 1]
-                v2 = qp[[i + 1, n + i + 1], step_idx + 1]
+                r1 = q_vec[[i, n + i]]
+                r2 = q_vec[[i + 1, n + i + 1]]
+                v1 = qp_vec[[i, n + i]]
+                v2 = qp_vec[[i + 1, n + i + 1]]
 
                 # Contact normal (from mass i to mass i+1)
                 dr = r2 - r1
@@ -2086,6 +2186,10 @@ class ImpactSimulator:
             df.attrs["n_nonlinear_iters"] = self.total_iters
             df.attrs["max_iters_per_step"] = self.max_iters_per_step
             df.attrs["max_residual"] = self.max_residual
+            df.attrs["fallback_used"] = bool(getattr(self, "fallback_used", False))
+            df.attrs["max_residual_seen"] = float(self.max_residual)
+            df.attrs["max_iters_step"] = int(self.max_iters_per_step)
+            df.attrs["converged_all_steps"] = bool(getattr(self, "converged_all_steps", True))
             # Store actual timestep used (not requested h_init, but effective dt)
             df.attrs["dt_eff"] = self.h
             df.attrs["h_requested"] = self.params.h_init
@@ -2194,11 +2298,64 @@ def get_default_simulation_params() -> dict:
         "max_iter": 25,
         "solver": "newton",     # "newton" (NR) or "picard" (legacy)
         "newton_jacobian_mode": "per_step",  # "per_step" (fast) or "each_iter" (pure/slow)
+        "solver_fail_policy": "switch",  # "switch" (fallback) or "raise"
+        "damping_model": "stiffness",  # "stiffness" (default) or "rayleigh_full"
+        "damping_zeta": 0.05,
+        "damping_target": None,
         "h_init": h_init,        # [s]
         "T_max": T_max,          # [s]
         "step": n_steps,         # number of steps
         "T_int": (0.0, T_max),   # time interval [s]
     }
+
+
+def normalize_simulation_params(
+    raw: Dict[str, Any],
+    defaults: Dict[str, Any],
+    user_flags: Dict[str, bool],
+) -> Dict[str, Any]:
+    """
+    Normalize time-grid parameters without letting defaults override user intent.
+
+    Rules:
+    - If the user supplied T_int, derive T_max from T_int.
+    - If the user did not supply T_int, derive T_int from T_max (even if defaults had T_int).
+    - If the user did not supply step, derive step from T_max and h_init.
+    - If the user supplied step, respect it and only adjust T_int to match T_max.
+    """
+    data = dict(raw)
+    user_provided_T_int = bool(user_flags.get("T_int", False))
+    user_provided_step = bool(user_flags.get("step", False))
+    user_provided_h_init = bool(user_flags.get("h_init", False))
+
+    try:
+        if user_provided_T_int and data.get("T_int") is not None:
+            t0, t1 = data["T_int"]
+            T_max_eff = float(t1) - float(t0)
+            if T_max_eff <= 0.0:
+                T_max_eff = float(data.get("T_max", defaults.get("T_max", 0.4)))
+            data["T_max"] = float(T_max_eff)
+        else:
+            T_max_eff = float(data.get("T_max", defaults.get("T_max", 0.4)))
+            data["T_max"] = float(T_max_eff)
+            data["T_int"] = (0.0, float(T_max_eff))
+
+        if not user_provided_step:
+            h = float(data.get("h_init", defaults.get("h_init", 1e-4)))
+            if h > 0.0 and T_max_eff > 0.0:
+                data["step"] = int(np.ceil(T_max_eff / h))
+            if not user_provided_T_int:
+                data["T_int"] = (0.0, float(T_max_eff))
+        else:
+            if not user_provided_T_int:
+                data["T_int"] = (0.0, float(T_max_eff))
+            if not user_provided_h_init:
+                data.setdefault("h_init", defaults.get("h_init", 1e-4))
+    except Exception:
+        # Never fail a run because of an auxiliary consistency correction
+        return data
+
+    return data
 
 
 def run_simulation(
@@ -2219,10 +2376,12 @@ def run_simulation(
     """
     # Track which time/grid keys were explicitly set by the user when passing a dict.
     user_overrides: Dict[str, Any] = {}
-    user_provided_step = False
-    user_provided_T_int = False
-    user_provided_T_max = False
-    user_provided_h_init = False
+    user_flags = {
+        "step": False,
+        "T_int": False,
+        "T_max": False,
+        "h_init": False,
+    }
 
     # Get defaults to compare against
     defaults = get_default_simulation_params()
@@ -2231,17 +2390,17 @@ def run_simulation(
         # Dataclass -> plain dict
         raw = {f.name: getattr(params, f.name) for f in fields(SimulationParams)}
         # Don't assume dataclass means explicit time grid - compare to defaults instead
-        user_provided_step = raw.get("step") != defaults.get("step")
-        user_provided_T_int = raw.get("T_int") != defaults.get("T_int")
-        user_provided_T_max = raw.get("T_max") != defaults.get("T_max")
-        user_provided_h_init = raw.get("h_init") != defaults.get("h_init")
+        user_flags["step"] = raw.get("step") != defaults.get("step")
+        user_flags["T_int"] = raw.get("T_int") != defaults.get("T_int")
+        user_flags["T_max"] = raw.get("T_max") != defaults.get("T_max")
+        user_flags["h_init"] = raw.get("h_init") != defaults.get("h_init")
     else:
         # Dict of overrides coming from CLI / YAML
         user_overrides = params or {}
-        user_provided_step = ("step" in user_overrides) and (user_overrides.get("step") is not None)
-        user_provided_T_int = ("T_int" in user_overrides) and (user_overrides.get("T_int") is not None)
-        user_provided_T_max = ("T_max" in user_overrides) and (user_overrides.get("T_max") is not None)
-        user_provided_h_init = ("h_init" in user_overrides) and (user_overrides.get("h_init") is not None)
+        user_flags["step"] = ("step" in user_overrides) and (user_overrides.get("step") is not None)
+        user_flags["T_int"] = ("T_int" in user_overrides) and (user_overrides.get("T_int") is not None)
+        user_flags["T_max"] = ("T_max" in user_overrides) and (user_overrides.get("T_max") is not None)
+        user_flags["h_init"] = ("h_init" in user_overrides) and (user_overrides.get("h_init") is not None)
 
         base = defaults
         base.update(user_overrides)
@@ -2276,30 +2435,7 @@ def run_simulation(
         raw = {k: raw[k] for k in allowed if k in raw}
 
     coerced = _coerce_scalar_types_for_simulation(raw)
-
-    # Keep the time grid consistent with YAML overrides:
-    # If the user set T_max and/or h_init (or T_int) but did not explicitly set `step`,
-    # derive `step = ceil(T_max / h_init)` and normalise T_int accordingly.
-    if (not user_provided_step) and (user_provided_T_max or user_provided_h_init or user_provided_T_int):
-        try:
-            if coerced.get("T_int") is not None:
-                # Convention: T_int = (0.0, T_max)
-                t0, t1 = coerced["T_int"]
-                T_max_eff = float(t1) - float(t0)
-                if T_max_eff <= 0.0:
-                    T_max_eff = float(coerced.get("T_max", 0.4))
-            else:
-                T_max_eff = float(coerced.get("T_max", 0.4))
-                coerced["T_int"] = (0.0, T_max_eff)
-
-            h = float(coerced.get("h_init", 1e-4))
-            if h > 0.0 and T_max_eff > 0.0:
-                coerced["T_max"] = float(T_max_eff)
-                coerced["T_int"] = (0.0, float(T_max_eff))
-                coerced["step"] = int(np.ceil(T_max_eff / h))
-        except Exception:
-            # Never fail a run because of an auxiliary consistency correction
-            pass
+    coerced = normalize_simulation_params(coerced, defaults, user_flags)
 
     # Optional consistency check: if k_train is provided in YAML,
     # verify it matches the implied elastic stiffness fy/uy.
@@ -2432,6 +2568,8 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
         "newton_tol",
         "h_init",
         "T_max",
+        "damping_zeta",
+        "damping_target",
     ]
 
     

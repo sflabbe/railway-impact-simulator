@@ -1243,6 +1243,7 @@ class ImpactSimulator:
                     "z_friction": z_new,
                     "contact_active": contact_active_new,
                     "v0_contact": v0_eff,
+                    "force_rhs": force,  # RHS for residual scaling reference
                 }
                 return r, state
 
@@ -1259,7 +1260,13 @@ class ImpactSimulator:
                 self.total_iters += 1
 
                 rnorm = float(np.linalg.norm(r0))
-                ref = float(np.linalg.norm(R_total_old) + 1.0)
+                # Robust reference: use max of old forces and current RHS
+                # This prevents pathologically small ref when the system starts
+                # in equilibrium (R_total_old ≈ 0, e.g., at step 0 with stiffness damping)
+                force_rhs = state0.get("force_rhs")
+                ref_rhs = float(np.linalg.norm(force_rhs)) if force_rhs is not None else 0.0
+                ref_R = float(np.linalg.norm(R_total_old))
+                ref = max(ref_R, ref_rhs, 1.0)
                 err = rnorm / ref
                 if err > self.max_residual:
                     self.max_residual = err

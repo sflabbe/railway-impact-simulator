@@ -1,8 +1,8 @@
 param(
   [switch]$IncludeUI,
-  [string]$PythonVersion = "3.12.8",
+  [string]$PythonVersion = "3.12.12",
   [ValidateSet("amd64","win32","arm64")] [string]$Arch = "amd64",
-  [string]$OutputDir = "dist",
+  [string]$OutputDir = "dist_portable",
   [string]$UiHost = "127.0.0.1",
   [int]$UiPort = 8501
 )
@@ -115,7 +115,16 @@ try {
 }
 
 Write-Section "Copy runtime assets (configs + docs)"
-$copyTargets = @("configs","examples","README.md","PROJECT_SUMMARY.md","CITATION_REFERENCE.md","VALIDATION_Pioneer.md","LICENSE")
+$copyTargets = @(
+  "configs",
+  "examples",
+  "docs",
+  "README.md",
+  "PROJECT_SUMMARY.md",
+  "CITATION_REFERENCE.md",
+  "VALIDATION_Pioneer.md",
+  "LICENSE"
+)
 foreach ($t in $copyTargets) {
   $src = Join-Path $RepoRoot $t
   if (Test-Path $src) {

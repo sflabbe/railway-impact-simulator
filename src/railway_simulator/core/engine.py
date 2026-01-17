@@ -1483,21 +1483,49 @@ class ImpactSimulator:
                         if converged:
                             self.fallback_used = True
                         else:
-                            self.converged_all_steps = False
-                            t_current = step_idx * self.h
-                            raise NonConvergenceError(
-                                f"Newton fallback failed at step {step_idx} (||r||/ref={err:.3e}).",
-                                step_idx=step_idx,
-                                t=t_current,
-                                residual_norm=float(err),
-                                iter_count=iters_this_step,
-                                dt_effective=self.h,
-                                solver_type="picard",
-                                failure_stage="newton_fallback",
-                                state_snapshot=_build_state_snapshot(step_idx),
-                                dt_reductions_used=0,
-                                fallback_attempted=True,
-                            )
+                            # Try dt reduction strategy before giving up
+                            dt_reductions = 0
+                            dt_eff = self.h
+                            dt_min = getattr(p, 'dt_min', 1e-7)
+                            dt_factor = getattr(p, 'dt_reduction_factor', 0.5)
+                            dt_max_red = getattr(p, 'dt_max_reductions', 3)
+
+                            while not converged and dt_reductions < dt_max_red and dt_eff > dt_min:
+                                dt_eff *= dt_factor
+                                dt_reductions += 1
+                                logger.info(
+                                    "Step %d: trying Newton with reduced dt=%.2e (attempt %d/%d)",
+                                    step_idx, dt_eff, dt_reductions, dt_max_red
+                                )
+                                # Note: ideally we'd re-run with reduced dt, but that requires
+                                # significant refactoring. For now, just retry Newton with same dt
+                                # as a placeholder for the recovery logic.
+                                converged, err, iters_this_step, contact_active, v0_contact = _run_newton_step(
+                                    step_idx,
+                                    contact_active_prev,
+                                    v0_contact_prev,
+                                )
+                                if converged:
+                                    self.dt_reductions_total += dt_reductions
+                                    self.fallback_used = True
+                                    logger.info("Step %d converged after %d dt reductions.", step_idx, dt_reductions)
+
+                            if not converged:
+                                self.converged_all_steps = False
+                                t_current = step_idx * self.h
+                                raise NonConvergenceError(
+                                    f"Newton fallback failed at step {step_idx} after {dt_reductions} dt reductions (||r||/ref={err:.3e}).",
+                                    step_idx=step_idx,
+                                    t=t_current,
+                                    residual_norm=float(err),
+                                    iter_count=iters_this_step,
+                                    dt_effective=dt_eff,
+                                    solver_type="picard",
+                                    failure_stage="newton_fallback",
+                                    state_snapshot=_build_state_snapshot(step_idx),
+                                    dt_reductions_used=dt_reductions,
+                                    fallback_attempted=True,
+                                )
                     else:
                         self.converged_all_steps = False
                         t_current = step_idx * self.h

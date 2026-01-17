@@ -26,7 +26,6 @@ import json
 import logging
 import sys
 import time
-import shutil
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -76,11 +75,6 @@ PLAUSIBILITY_CHECKS = {
     "force_plateau_tolerance": 0.3,    # 30% tolerance on fy
 }
 
-# Retry policy for entire cases (dt reduction at case level)
-MAX_CASE_RETRIES = 2
-CASE_DT_REDUCTION_FACTOR = 0.5
-CASE_DT_MIN = 1e-7
-
 
 @dataclass
 class SimulationCase:
@@ -98,28 +92,15 @@ def load_config(path: Path) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def get_case_dir(
-    output_dir: Path,
-    case: SimulationCase,
-    attempt_dir_name: Optional[str] = None,
-) -> Path:
-    """Resolve the case directory, optionally nested for a given attempt."""
-    case_dir = output_dir / case.section / case.name
-    if attempt_dir_name:
-        case_dir = case_dir / attempt_dir_name
-    case_dir.mkdir(parents=True, exist_ok=True)
-    return case_dir
-
-
 def save_results(
     df: pd.DataFrame,
     case: SimulationCase,
     output_dir: Path,
     metrics: Dict[str, Any],
-    attempt_dir_name: Optional[str] = None,
 ) -> Path:
     """Save simulation results to CSV and metrics to JSON."""
-    case_dir = get_case_dir(output_dir, case, attempt_dir_name)
+    case_dir = output_dir / case.section / case.name
+    case_dir.mkdir(parents=True, exist_ok=True)
 
     # Save time history
     csv_path = case_dir / "results.csv"
@@ -238,57 +219,22 @@ def check_plausibility(metrics: Dict[str, Any]) -> Tuple[bool, List[str]]:
 
 def save_diagnostics(case: SimulationCase, output_dir: Path, diagnostics: Dict[str, Any]) -> Path:
     """Save diagnostics for a failed case."""
-    case_dir = get_case_dir(output_dir, case)
+    case_dir = output_dir / case.section / case.name
+    case_dir.mkdir(parents=True, exist_ok=True)
     diag_path = case_dir / "diagnostics.json"
     with open(diag_path, "w", encoding="utf-8") as f:
         json.dump(diagnostics, f, indent=2, default=str)
     return diag_path
 
 
-def save_failed_metrics(
-    case: SimulationCase,
-    output_dir: Path,
-    metrics: Dict[str, Any],
-    attempt_dir_name: Optional[str] = None,
-) -> Path:
+def save_failed_metrics(case: SimulationCase, output_dir: Path, metrics: Dict[str, Any]) -> Path:
     """Save metrics.json for a failed case."""
-    case_dir = get_case_dir(output_dir, case, attempt_dir_name)
+    case_dir = output_dir / case.section / case.name
+    case_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = case_dir / "metrics.json"
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, default=str)
     return metrics_path
-
-
-def save_diagnostics_attempt(
-    case: SimulationCase,
-    output_dir: Path,
-    diagnostics: Dict[str, Any],
-    attempt_dir_name: Optional[str] = None,
-) -> Path:
-    """Save diagnostics for a failed case attempt."""
-    case_dir = get_case_dir(output_dir, case, attempt_dir_name)
-    diag_path = case_dir / "diagnostics.json"
-    with open(diag_path, "w", encoding="utf-8") as f:
-        json.dump(diagnostics, f, indent=2, default=str)
-    return diag_path
-
-
-def recommended_action_from_error(error: NonConvergenceError, params: Dict[str, Any]) -> str:
-    """Recommend next action based on error snapshot and solver params."""
-    snapshot = error.state_snapshot
-    if snapshot.get("in_contact", False):
-        if str(params.get("newton_jacobian_mode", "per_step")).lower() != "each_iter":
-            return "enable newton_jacobian_mode each_iter"
-        max_iters = params.get("newton_max_iters")
-        if max_iters is not None and error.iter_count >= int(max_iters):
-            return "increase max_iter"
-        return "reduce h_init"
-    if snapshot.get("x_front_last", 0) > 0:
-        v_front = snapshot.get("v_front_last", 0.0)
-        if abs(v_front) < 1e-3:
-            return "damping too high"
-        return "check initial conditions"
-    return "check initial conditions"
 
 
 def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, Any]]:
@@ -304,237 +250,139 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
         return None
 
     # Load and modify config
-    base_params = load_config(case.base_config)
-    base_params.update(case.overrides)
+    params = load_config(case.base_config)
+    params.update(case.overrides)
 
-    t_max = float(base_params.get("T_max", 0.0))
-    t_int = base_params.get("T_int")
-    if t_max <= 0.0 and isinstance(t_int, (list, tuple)) and len(t_int) == 2:
-        t_max = float(t_int[1]) - float(t_int[0])
+    # Run simulation
+    start_time = time.time()
+    try:
+        df = run_simulation(params)
+        elapsed = time.time() - start_time
 
-    max_case_retries = MAX_CASE_RETRIES
-    dt_factor = CASE_DT_REDUCTION_FACTOR
-    dt_min = CASE_DT_MIN
+        # Compute metrics
+        metrics = compute_metrics(df, params)
+        metrics["status"] = "success"
+        metrics["wall_time_s"] = elapsed
+        metrics["case_name"] = case.name
+        metrics["section"] = case.section
+        metrics.update(case.meta)
 
-    attempt_records: List[Dict[str, Any]] = []
-    last_error_snapshot: Optional[Dict[str, Any]] = None
-    h_init_used = float(base_params.get("h_init", 1e-4))
-    success_attempt_index: Optional[int] = None
-    success_metrics: Optional[Dict[str, Any]] = None
-    success_attempt_dir: Optional[Path] = None
+        # Check plausibility
+        passed, warnings = check_plausibility(metrics)
+        metrics["plausibility_passed"] = passed
+        metrics["plausibility_warnings"] = warnings
 
-    for attempt_index in range(max_case_retries + 1):
-        attempt_dir_name = f"attempt_{attempt_index}"
-        attempt_params = deepcopy(base_params)
+        if warnings:
+            for w in warnings:
+                logger.warning(f"  {w}")
 
-        if attempt_index > 0:
-            attempt_params["solver"] = "newton"
-            attempt_params["h_init"] = h_init_used
-            step_used = int(np.ceil(t_max / h_init_used)) if t_max > 0.0 else int(attempt_params.get("step", 0))
-            attempt_params["step"] = step_used
-            attempt_params["T_int"] = (0.0, float(t_max))
+        # Save results
+        save_results(df, case, RESULTS_DIR, metrics)
 
-            base_max_iters = attempt_params.get("newton_max_iters")
-            if base_max_iters is not None:
-                attempt_params["newton_max_iters"] = int(np.ceil(float(base_max_iters) * 1.5))
-
-            if last_error_snapshot and last_error_snapshot.get("in_contact", False):
-                attempt_params["newton_jacobian_mode"] = "each_iter"
-        else:
-            step_used = int(attempt_params.get("step", np.ceil(t_max / h_init_used))) if t_max > 0.0 else int(
-                attempt_params.get("step", 0)
-            )
-            attempt_params["step"] = step_used
-            attempt_params["h_init"] = h_init_used
-
-        rerun_with_reduced_dt = attempt_index > 0
         logger.info(
-            "  Attempt %d/%d | h_init=%.3e | step=%d | rerun_with_reduced_dt=%s",
-            attempt_index + 1,
-            max_case_retries + 1,
-            h_init_used,
-            step_used,
-            rerun_with_reduced_dt,
+            f"  Completed in {elapsed:.1f}s | "
+            f"Peak force: {metrics.get('peak_force_MN', 0):.2f} MN | "
+            f"DAF: {metrics.get('DAF', 0):.2f}"
         )
 
-        start_time = time.time()
-        try:
-            df = run_simulation(attempt_params)
-            elapsed = time.time() - start_time
+        return metrics
 
-            metrics = compute_metrics(df, attempt_params)
-            metrics["status"] = "success"
-            metrics["wall_time_s"] = elapsed
-            metrics["case_name"] = case.name
-            metrics["section"] = case.section
-            metrics["attempt_index"] = attempt_index
-            metrics["h_init_used"] = h_init_used
-            metrics["step_used"] = step_used
-            metrics["rerun_with_reduced_dt"] = rerun_with_reduced_dt
-            metrics.update(case.meta)
+    except NonConvergenceError as e:
+        elapsed = time.time() - start_time
+        logger.error(f"  NON-CONVERGENCE at step {e.step_idx}, t={e.t:.4f}s: {e}")
 
-            passed, warnings = check_plausibility(metrics)
-            metrics["plausibility_passed"] = passed
-            metrics["plausibility_warnings"] = warnings
+        # Build failed metrics with all available diagnostic info
+        metrics = {
+            "status": "failed",
+            "case_name": case.name,
+            "section": case.section,
+            "wall_time_s": elapsed,
+            "error_type": "NonConvergenceError",
+            "error_message": str(e)[:500],  # Truncate long messages
+            "failure_stage": e.failure_stage,
+            "last_step_index": e.step_idx,
+            "t_last": e.t,
+            "residual_norm": e.residual_norm,
+            "iter_count": e.iter_count,
+            "dt_effective": e.dt_effective,
+            "dt_reductions_used": e.dt_reductions_used,
+            "fallback_attempted": e.fallback_attempted,
+            # NaN for metrics that don't exist
+            "peak_force_MN": float('nan'),
+            "peak_penetration_mm": float('nan'),
+            "peak_acceleration_g": float('nan'),
+            "contact_duration_s": float('nan'),
+            "DAF": float('nan'),
+            "plausibility_passed": False,
+            "plausibility_warnings": ["Case failed to converge"],
+        }
+        metrics.update(case.meta)
 
-            if warnings:
-                for w in warnings:
-                    logger.warning(f"  {w}")
+        # Add state snapshot info
+        for key, val in e.state_snapshot.items():
+            metrics[f"snapshot_{key}"] = val
 
-            results_path = save_results(df, case, RESULTS_DIR, metrics, attempt_dir_name)
-            metrics_path = results_path.with_name("metrics.json")
-            attempt_records.append({"metrics": metrics, "metrics_path": metrics_path})
+        # Diagnose why it failed
+        diagnostics = e.to_diagnostics_dict()
+        diagnostics["case_name"] = case.name
+        diagnostics["section"] = case.section
+        diagnostics["params_used"] = {k: str(v) for k, v in case.overrides.items()}
 
-            logger.info(
-                f"  Completed in {elapsed:.1f}s | "
-                f"Peak force: {metrics.get('peak_force_MN', 0):.2f} MN | "
-                f"DAF: {metrics.get('DAF', 0):.2f}"
-            )
+        # Analyze failure reason
+        if e.state_snapshot.get("in_contact", False):
+            diagnostics["diagnosis"] = "Failed during contact phase - may need smaller dt or relaxed tol"
+        elif e.state_snapshot.get("x_front_last", 0) > 0:
+            diagnostics["diagnosis"] = "Failed before impact - check initial conditions"
+        elif e.dt_reductions_used >= 3:
+            diagnostics["diagnosis"] = "Failed after max dt reductions - numerical stiffness issue"
+        else:
+            diagnostics["diagnosis"] = "Unknown - check residual norm and iter count"
 
-            success_attempt_index = attempt_index
-            success_metrics = metrics
-            success_attempt_dir = results_path.parent
-            break
+        # Save diagnostics and failed metrics
+        save_diagnostics(case, RESULTS_DIR, diagnostics)
+        save_failed_metrics(case, RESULTS_DIR, metrics)
 
-        except NonConvergenceError as e:
-            elapsed = time.time() - start_time
-            logger.error(f"  NON-CONVERGENCE at step {e.step_idx}, t={e.t:.4f}s: {e}")
+        return metrics
 
-            metrics = {
-                "status": "failed",
-                "case_name": case.name,
-                "section": case.section,
-                "wall_time_s": elapsed,
-                "error_type": "NonConvergenceError",
-                "error_message": str(e)[:500],
-                "failure_stage": e.failure_stage,
-                "last_step_index": e.step_idx,
-                "t_last": e.t,
-                "residual_norm": e.residual_norm,
-                "iter_count": e.iter_count,
-                "dt_effective": e.dt_effective,
-                "dt_reductions_used": e.dt_reductions_used,
-                "fallback_attempted": e.fallback_attempted,
-                "attempt_index": attempt_index,
-                "h_init_used": h_init_used,
-                "step_used": step_used,
-                "rerun_with_reduced_dt": rerun_with_reduced_dt,
-                "peak_force_MN": float('nan'),
-                "peak_penetration_mm": float('nan'),
-                "peak_acceleration_g": float('nan'),
-                "contact_duration_s": float('nan'),
-                "DAF": float('nan'),
-                "plausibility_passed": False,
-                "plausibility_warnings": ["Case failed to converge"],
-            }
-            metrics.update(case.meta)
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"  FAILED (unexpected): {type(e).__name__}: {e}")
 
-            for key, val in e.state_snapshot.items():
-                metrics[f"snapshot_{key}"] = val
+        # Build minimal failed metrics for unexpected errors
+        metrics = {
+            "status": "failed",
+            "case_name": case.name,
+            "section": case.section,
+            "wall_time_s": elapsed,
+            "error_type": type(e).__name__,
+            "error_message": str(e)[:500],
+            "failure_stage": "unknown",
+            "last_step_index": -1,
+            "t_last": 0.0,
+            "fallback_attempted": False,
+            "peak_force_MN": float('nan'),
+            "peak_penetration_mm": float('nan'),
+            "peak_acceleration_g": float('nan'),
+            "contact_duration_s": float('nan'),
+            "DAF": float('nan'),
+            "plausibility_passed": False,
+            "plausibility_warnings": [f"Case failed: {type(e).__name__}"],
+        }
+        metrics.update(case.meta)
 
-            diagnostics = e.to_diagnostics_dict()
-            diagnostics["case_name"] = case.name
-            diagnostics["section"] = case.section
-            diagnostics["attempt_index"] = attempt_index
-            diagnostics["params_used"] = {
-                "solver": attempt_params.get("solver"),
-                "h_init": attempt_params.get("h_init"),
-                "step": attempt_params.get("step"),
-                "newton_max_iters": attempt_params.get("newton_max_iters"),
-                "newton_jacobian_mode": attempt_params.get("newton_jacobian_mode"),
-                "newton_tol": attempt_params.get("newton_tol"),
-            }
+        # Save diagnostics
+        diagnostics = {
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "case_name": case.name,
+            "section": case.section,
+            "params_used": {k: str(v) for k, v in case.overrides.items()},
+            "diagnosis": "Unexpected error - check logs for stack trace",
+        }
+        save_diagnostics(case, RESULTS_DIR, diagnostics)
+        save_failed_metrics(case, RESULTS_DIR, metrics)
 
-            if e.state_snapshot.get("in_contact", False):
-                diagnostics["diagnosis"] = "Failed during contact phase - may need smaller dt or higher max_iter"
-            elif e.state_snapshot.get("x_front_last", 0) > 0:
-                diagnostics["diagnosis"] = "Failed before impact - check initial conditions or damping"
-            else:
-                diagnostics["diagnosis"] = "Unknown - check residual norm and iter count"
-
-            diagnostics["recommended_action"] = recommended_action_from_error(e, attempt_params)
-
-            save_diagnostics_attempt(case, RESULTS_DIR, diagnostics, attempt_dir_name)
-            metrics_path = save_failed_metrics(case, RESULTS_DIR, metrics, attempt_dir_name)
-            attempt_records.append({"metrics": metrics, "metrics_path": metrics_path})
-
-            last_error_snapshot = e.state_snapshot
-
-            next_h_init = h_init_used * dt_factor
-            if attempt_index >= max_case_retries or next_h_init < dt_min:
-                break
-            h_init_used = next_h_init
-
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(f"  FAILED (unexpected): {type(e).__name__}: {e}")
-
-            metrics = {
-                "status": "failed",
-                "case_name": case.name,
-                "section": case.section,
-                "wall_time_s": elapsed,
-                "error_type": type(e).__name__,
-                "error_message": str(e)[:500],
-                "failure_stage": "unknown",
-                "last_step_index": -1,
-                "t_last": 0.0,
-                "fallback_attempted": False,
-                "attempt_index": attempt_index,
-                "h_init_used": h_init_used,
-                "step_used": step_used,
-                "rerun_with_reduced_dt": rerun_with_reduced_dt,
-                "peak_force_MN": float('nan'),
-                "peak_penetration_mm": float('nan'),
-                "peak_acceleration_g": float('nan'),
-                "contact_duration_s": float('nan'),
-                "DAF": float('nan'),
-                "plausibility_passed": False,
-                "plausibility_warnings": [f"Case failed: {type(e).__name__}"],
-            }
-            metrics.update(case.meta)
-
-            diagnostics = {
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-                "case_name": case.name,
-                "section": case.section,
-                "attempt_index": attempt_index,
-                "params_used": {
-                    "solver": attempt_params.get("solver"),
-                    "h_init": attempt_params.get("h_init"),
-                    "step": attempt_params.get("step"),
-                },
-                "diagnosis": "Unexpected error - check logs for stack trace",
-                "recommended_action": "check logs",
-            }
-            save_diagnostics_attempt(case, RESULTS_DIR, diagnostics, attempt_dir_name)
-            metrics_path = save_failed_metrics(case, RESULTS_DIR, metrics, attempt_dir_name)
-            attempt_records.append({"metrics": metrics, "metrics_path": metrics_path})
-            break
-
-    n_attempts_total = len(attempt_records)
-    for record in attempt_records:
-        record["metrics"]["n_attempts_total"] = n_attempts_total
-        record["metrics"]["converged_after_attempt"] = success_attempt_index
-        with open(record["metrics_path"], "w", encoding="utf-8") as f:
-            json.dump(record["metrics"], f, indent=2, default=str)
-
-    case_dir = get_case_dir(RESULTS_DIR, case)
-    if success_attempt_index is not None and success_attempt_dir:
-        shutil.copy2(success_attempt_dir / "results.csv", case_dir / "results.csv")
-        shutil.copy2(success_attempt_dir / "metrics.json", case_dir / "metrics.json")
-        return success_metrics
-
-    if attempt_records:
-        last_attempt_dir = Path(attempt_records[-1]["metrics_path"]).parent
-        if (last_attempt_dir / "metrics.json").exists():
-            shutil.copy2(last_attempt_dir / "metrics.json", case_dir / "metrics.json")
-        if (last_attempt_dir / "diagnostics.json").exists():
-            shutil.copy2(last_attempt_dir / "diagnostics.json", case_dir / "diagnostics.json")
-        return attempt_records[-1]["metrics"]
-
-    return None
+        return metrics
 
 
 # =============================================================================

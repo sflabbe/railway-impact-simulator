@@ -175,6 +175,13 @@ def resolve_collision(
     if isinstance(interface_spec, PiecewiseLinearLaw):
         interface_meta["tabulated_energy_J"] = compute_absorbed_energy(interface_spec.points)
 
+    for key, value in list(interface_meta.items()):
+        if isinstance(value, str):
+            try:
+                interface_meta[key] = float(value)
+            except ValueError:
+                continue
+
     return {
         "partner": _obj_to_dict(partner),
         "interface": interface_spec.model_dump() if interface_spec is not None else None,

@@ -1,6 +1,6 @@
 param(
   [switch]$IncludeUI,
-  [string]$PythonVersion = "3.12.12",
+  [string]$PythonVersion = "3.12.10",
   [ValidateSet("amd64","win32","arm64")] [string]$Arch = "amd64",
   [string]$OutputDir = "dist_portable",
   [string]$UiHost = "127.0.0.1",
@@ -42,7 +42,23 @@ if (!(Test-Path $PyZipPath)) {
   try {
     Invoke-WebRequest -Uri $PyUrl -OutFile $PyZipPath -UseBasicParsing
   } catch {
-    throw "Failed to download $PyUrl. Check -PythonVersion/-Arch. Error: $($_.Exception.Message)"
+    $statusCode = $null
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+      $statusCode = [int]$_.Exception.Response.StatusCode
+    }
+    $hint = ""
+    if ($statusCode -eq 404) {
+      $parsedVersion = $null
+      try {
+        $parsedVersion = [version]$PythonVersion
+      } catch {
+        $parsedVersion = $null
+      }
+      if ($parsedVersion -and $parsedVersion.Major -eq 3 -and $parsedVersion.Minor -eq 12 -and $parsedVersion.Build -ge 11) {
+        $hint = " Note: Python 3.12.11+ are source-only releases and do not publish Windows embeddable ZIPs. Use 3.12.10 or switch to Python 3.13+ for current Windows binaries."
+      }
+    }
+    throw "Failed to download $PyUrl. Check -PythonVersion/-Arch. Error: $($_.Exception.Message)$hint"
   }
 } else {
   Write-Host "Using existing $PyZipPath"

@@ -271,10 +271,10 @@ def create_results_plots(df: pd.DataFrame) -> go.Figure:
         height=2000,  # Increased for 6th subplot
         showlegend=True,
         legend=dict(
-            orientation="h",   # leyenda horizontal
-            x=0.5,             # centrada horizontalmente
+            orientation="h",   # horizontal legend
+            x=0.5,             # centered horizontally
             xanchor="center",
-            y=-0.05,           # un poco debajo del último subplot
+            y=-0.05,           # slightly below the last subplot
             yanchor="top",
         ),
         margin=dict(t=60, b=100, l=60, r=80),

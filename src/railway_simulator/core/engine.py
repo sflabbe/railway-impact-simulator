@@ -2374,7 +2374,7 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
                     f"Parameter '{name}' expects a float-compatible value, "
                     f"got {val!r} (type {type(val).__name__})."
                 ) from exc
-        # Para cualquier cosa exótica, fallar fuerte y claro
+        # For any exotic type, fail fast and loudly.
         raise TypeError(
             f"Parameter '{name}' expects a scalar float, got {val!r} "
             f"(type {type(val).__name__})."

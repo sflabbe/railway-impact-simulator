@@ -524,33 +524,33 @@ def create_building_animation(
     # --- Impact height default (1/3–1/2 of train height, h_train≈3 m) ---
     if impact_height_m is None:
         h_train = 3.0  # m
-        h_imp_std = h_train * 5.0 / 12.0  # promedio 1/3–1/2 ≈ 1.25 m
+        h_imp_std = h_train * 5.0 / 12.0  # average 1/3–1/2 ≈ 1.25 m
         impact_height_m = min(h_imp_std, height_m - 0.1)
 
-    # Clamp por seguridad
+    # Safety clamp
     impact_height_m = float(np.clip(impact_height_m, 0.1, height_m - 1e-3))
 
     # Vertical coordinates
     y_coords = np.linspace(0.0, height_m, n_shape_points)
 
-    # ---- MODO RÁPIDO: forma estática de voladizo escalada con u_top(t) ----
-    # (Aquí es donde luego puedes enganchar el “beam element” dinámico si quieres.)
+    # ---- FAST MODE: static cantilever shape scaled with u_top(t) ----
+    # (You can hook in the dynamic “beam element” here later if needed.)
     phi = _cantilever_shape_with_point_load(
         y_coords, L=height_m, a=impact_height_m
     )
 
-    # Para la escala del eje x
+    # X-axis scale
     max_disp = float(np.max(np.abs(u_scaled))) if np.any(u_scaled) else 0.05
     x_lim = max(0.05, 1.2 * max_disp)
 
     frames = []
     for idx in range(0, n, stride):
         if not use_beam_element:
-            # Rápido: forma estática φ(y) * u_top(t)
+            # Fast: static shape φ(y) * u_top(t)
             x_frame = phi * u_scaled[idx]
         else:
-            # FUTURO: aquí podrías meter la solución de un beam element dinámico
-            # w(y, t_idx) calculado con M, C, K y F(t). Por ahora, usamos lo mismo.
+            # FUTURE: you could insert a dynamic beam element solution here
+            # w(y, t_idx) computed with M, C, K, and F(t). For now, use the same.
             x_frame = phi * u_scaled[idx]
 
         frames.append(
@@ -851,5 +851,4 @@ def create_response_spectrum_plot(
 
     fig.update_layout(height=500, showlegend=True)
     return fig
-
 

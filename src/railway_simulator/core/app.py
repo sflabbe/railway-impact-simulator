@@ -270,14 +270,13 @@ def main():
     st.set_page_config(
         layout="wide",
         page_title="Railway Impact Simulator - DZSF Research",
-        page_icon="🚂",
     )
 
     # Sidebar parameter UI is shared across all tabs
     params = build_parameter_ui()
 
     tab_sim, tab_param, tab_about = st.tabs(
-        ["🚂 Simulator", "🧪 Parametric Studies", "📖 About / Documentation"]
+        ["Simulator", "Parametric Studies", "About / Documentation"]
     )
 
     # --------------------------------------------------------------
@@ -290,7 +289,7 @@ def main():
         col1, col2 = st.columns([1, 2])
 
         with col1:
-            st.subheader("📊 Configuration")
+            st.subheader("Configuration")
             try:
                 st.metric("Velocity", f"{-float(params['v0_init']) * 3.6:.1f} km/h")
             except (ValueError, KeyError, TypeError):
@@ -302,7 +301,7 @@ def main():
                 st.caption(f"case_name: **{params['case_name']}**")
             st.markdown("---")
             run_btn = safe_button(st, 
-                "▶️ **Run Simulation**",
+                "**Run Simulation**",
                 type="primary",
                 width="stretch",
             )
@@ -316,7 +315,7 @@ def main():
                 execute_simulation(params, run_new=False)
             else:
                 st.info(
-                    "👈 Configure parameters in the sidebar and press **Run Simulation**"
+                    "Configure parameters in the sidebar and press **Run Simulation**"
                 )
 
     # --------------------------------------------------------------
@@ -330,12 +329,12 @@ def main():
 
         sub_env, sub_contact, sub_friction, sub_sens, sub_dif, sub_solver = st.tabs(
             [
-                "🚄 Speed envelope",
-                "💥 Contact force models",
-                "🛞 Friction / restitution",
-                "🧮 Numerics sensitivity",
-                "⚡ Strain-rate (DIF)",
-                "🔁 Solver comparison",
+                "Speed envelope",
+                "Contact force models",
+                "Friction / restitution",
+                "Numerics sensitivity",
+                "Strain-rate (DIF)",
+                "Solver comparison",
             ]
         )
 
@@ -681,7 +680,7 @@ def main():
 
                     safe_download_button(
                         st,
-                        label="📦 Export speed-envelope bundle (ZIP)",
+                        label="Export speed-envelope bundle (ZIP)",
                         data=bundle,
                         file_name=f"speed_envelope__{sanitize_filename(str(q))}__{utc_timestamp()}.zip",
                         mime="application/zip",
@@ -1082,7 +1081,7 @@ def main():
                         )
                         safe_download_button(
                             st,
-                            "📦 Export contact-model bundle (ZIP)",
+                            "Export contact-model bundle (ZIP)",
                             bundle,
                             f"contact_models__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",
@@ -1507,7 +1506,7 @@ def main():
                         )
                         safe_download_button(
                             st,
-                            "📦 Export friction/restitution bundle (ZIP)",
+                            "Export friction/restitution bundle (ZIP)",
                             bundle,
                             f"friction_sweep__{sanitize_filename(str(sweep_kind))}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",
@@ -1587,7 +1586,7 @@ def main():
                 else:
                     st.markdown("#### Summary")
                     st.info(
-                        "📊 **Baseline:** Relative errors are computed with respect to the finest "
+                        "**Baseline:** Relative errors are computed with respect to the finest "
                         "resolution case (smallest Δt, most negative α, tightest tolerance). "
                         "This shows numerical error vs. the most accurate result."
                     )
@@ -1770,7 +1769,7 @@ def main():
                         )
                         safe_download_button(
                             st,
-                            "📦 Export numerics-sensitivity bundle (ZIP)",
+                            "Export numerics-sensitivity bundle (ZIP)",
                             bundle,
                             f"numerics_sensitivity__{sanitize_filename(str(q_label))}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",
@@ -1955,7 +1954,7 @@ def main():
                             )
                             safe_download_button(
                                 st,
-                                "📦 Export DIF bundle (ZIP)",
+                                "Export DIF bundle (ZIP)",
                                 bundle,
                                 f"dif_study__{sanitize_filename(k_path.strip())}__v{_cfg_speed_kmh(params) or 0:.0f}kmh__{utc_timestamp()}.zip",
                                 "application/zip",
@@ -2229,7 +2228,7 @@ def main():
 
                         safe_download_button(
                             st,
-                            "📦 Export solver-comparison bundle (ZIP)",
+                            "Export solver-comparison bundle (ZIP)",
                             bundle,
                             f"solver_comparison__{sanitize_filename(str(q_label))}__{vmin:.0f}-{vmax:.0f}kmh__{utc_timestamp()}.zip",
                             "application/zip",

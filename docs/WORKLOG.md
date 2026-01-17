@@ -17,6 +17,25 @@ The live monitor already exists in the CLI, so the README now explains how to in
 #### Risks and pending work
 1. Live monitor still depends on curses and a TTY, so Windows native terminals may need WSL or a compatible environment.
 
+### 12:53 UTC
+
+#### What changed
+1. Removed emoji glyphs from Streamlit UI labels and messages to align with a production-ready tone.
+2. Updated docs/TASKS.md to track the production-readiness task and added follow-up TODOs.
+
+#### Why
+User-facing UI labels and outputs should remain technically neutral and consistent with the documentation tone.
+
+#### How it was verified
+1. python -m pip install -e .
+2. python -c "import railway_simulator; print('import ok')"
+3. railway-sim --help
+4. pytest -q
+5. rg -n "[\x{1F300}-\x{1FAFF}]" README.md docs || echo "no emoji matches"
+
+#### Risks and pending work
+1. pip install failed due to proxy restrictions, so the import and CLI checks could not run with an installed package.
+
 ### What changed
 1. Added the missing process documents required by the project workflow.
 2. Seeded an initial task list with the current known priorities.

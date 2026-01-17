@@ -250,9 +250,9 @@ def build_parameter_ui() -> Dict[str, Any]:
 
         # Time & Integration
         time_lock = yaml_active and (apply_full or use_time)
-        with st.expander("🕐 Time & Integration", expanded=True):
+        with st.expander("Time and Integration", expanded=True):
             if time_lock:
-                st.caption("🔒 Locked by YAML (Time & Integration)")
+                st.caption("Locked by YAML (Time and Integration)")
 
             v0_kmh = st.slider(
                 "Impact Velocity (km/h)",
@@ -488,7 +488,7 @@ def build_train_geometry_ui() -> Dict[str, Any]:
       - Built-in parametric presets
       - YAML example configs from ./configs/*.yml
     """
-    with st.expander("🚃 Train Geometry", expanded=True):
+    with st.expander("Train Geometry", expanded=True):
         config_mode = st.radio(
             "Configuration mode",
             ("Research locomotive model", "Example trains", "YAML example configs"),
@@ -823,10 +823,10 @@ def build_example_train_ui() -> TrainConfig:
 
 def build_material_ui(n_masses: int) -> Dict[str, Any]:
     """Build Bouc-Wen material parameters UI."""
-    with st.expander("🔧 Bouc-Wen Material", expanded=True):
+    with st.expander("Bouc-Wen Material", expanded=True):
 
         st.markdown("---")
-        st.markdown("### 📋 Train Material Presets (Chapter 7.5)")
+        st.markdown("### Train Material Presets (Chapter 7.5)")
 
         show_presets_info = st.checkbox("Show material comparison info", value=False)
 
@@ -872,15 +872,15 @@ def build_material_ui(n_masses: int) -> Dict[str, Any]:
             )
 
             if "Aluminum" in material_type:
-                st.info("📘 **Aluminum Train Properties** (Modern, lightweight construction)")
+                st.info("**Aluminum Train Properties** (Modern, lightweight construction)")
                 fy_default = 8.0
                 uy_default = 100.0
             elif "Steel" in material_type:
-                st.info("🔩 **Steel S355 Train Properties** (Older generation, stiffer)")
+                st.info("**Steel S355 Train Properties** (Older generation, stiffer)")
                 fy_default = 18.0
                 uy_default = 40.0
             else:
-                st.info("🔧 **Custom Material Properties**")
+                st.info("**Custom Material Properties**")
                 fy_default = 15.0
                 uy_default = 200.0
 
@@ -920,10 +920,10 @@ def build_contact_friction_ui() -> Dict[str, Any]:
     """Build contact and friction parameters UI (incl. building SDOF)."""
     params: Dict[str, Any] = {}
 
-    with st.expander("💥 Contact", expanded=True):
+    with st.expander("Contact", expanded=True):
 
         st.markdown("---")
-        st.markdown("### 🧮 Wall Stiffness Calculator (Cantilever Method - Eq. 5.10)")
+        st.markdown("### Wall Stiffness Calculator (Cantilever Method - Eq. 5.10)")
 
         show_calculator_info = st.checkbox("Show calculator formula", value=False)
 
@@ -976,7 +976,7 @@ def build_contact_friction_ui() -> Dict[str, Any]:
 
             st.success(f"**Calculated k_eff = {k_eff_MN_m:.2f} MN/m**")
 
-            if st.button("✓ Use this value"):
+            if st.button("Use this value"):
                 params["k_wall"] = k_eff
             else:
                 params["k_wall"] = (
@@ -992,7 +992,7 @@ def build_contact_friction_ui() -> Dict[str, Any]:
 
         st.markdown("---")
 
-        st.markdown("### ℹ️ Coefficient of Restitution Reference (Table 5.4)")
+        st.markdown("### Coefficient of Restitution Reference (Table 5.4)")
 
         show_cr_reference = st.checkbox(
             "Show coefficient of restitution table", value=False
@@ -1026,7 +1026,7 @@ def build_contact_friction_ui() -> Dict[str, Any]:
             ),
         )
 
-        st.markdown("### 📖 Contact model recommendations")
+        st.markdown("### Contact model recommendations")
         st.info(
             "For **hard impacts of trains against stiff walls/abutments** "
             "(crushing dominated by the vehicle), a **Hertz-type model with "
@@ -1089,7 +1089,7 @@ def build_contact_friction_ui() -> Dict[str, Any]:
 
         # Building SDOF configuration
         st.markdown("---")
-        st.markdown("### 🏢 Building SDOF (pier/abutment response)")
+        st.markdown("### Building SDOF (pier/abutment response)")
 
         params["building_enable"] = st.checkbox(
             "Compute equivalent building (SDOF) response",
@@ -1227,7 +1227,7 @@ def build_contact_friction_ui() -> Dict[str, Any]:
             params["building_alpha"] = 0.05
             params["building_gamma"] = 0.4
 
-    with st.expander("🛞 Friction", expanded=True):
+    with st.expander("Friction", expanded=True):
         params["friction_model"] = st.selectbox(
             "Friction model",
             ["lugre", "dahl", "coulomb", "brown-mcphee"],
@@ -1283,5 +1283,4 @@ def build_contact_friction_ui() -> Dict[str, Any]:
         params["sigma_2"] = st.number_input("σ₂ (viscous) [N·s/m]", 0.0, 2.0, 0.4, 0.1)
 
     return params
-
 

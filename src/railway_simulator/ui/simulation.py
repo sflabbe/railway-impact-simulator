@@ -167,12 +167,12 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
     # ------------------------------------------------------
     tab_global, tab_batch, tab_building, tab_train, tab_springs, tab_nodal = st.tabs(
         [
-            "📈 Global Results",
-            "🧪 Batch Compare",
-            "🏢 Building Response (SDOF)",
-            "🚃 Train Configuration",
-            "🧷 Springs & Masses",
-            "🧊 Nodal Fields",
+            "Global Results",
+            "Batch Compare",
+            "Building Response (SDOF)",
+            "Train Configuration",
+            "Springs and Masses",
+            "Nodal Fields",
         ]
     )
 
@@ -198,7 +198,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
         safe_plotly_chart(st, fig, width="stretch")
 
         # Optional deeper energy / dissipation breakdown
-        with st.expander("🔬 Advanced energy breakdown", expanded=False):
+        with st.expander("Advanced energy breakdown", expanded=False):
             cols = [
                 "E_kin_J",
                 "E_pot_contact_J",
@@ -289,8 +289,8 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
             )
 
             col_run, col_clear, col_dl = st.columns([1, 1, 1])
-            run_batch = col_run.button("▶️ Run batch", use_container_width=True)
-            if col_clear.button("🧹 Clear batch cache", use_container_width=True):
+            run_batch = col_run.button("Run batch", use_container_width=True)
+            if col_clear.button("Clear batch cache", use_container_width=True):
                 st.session_state.pop("batch_results", None)
                 st.session_state.pop("batch_meta", None)
                 st.session_state.pop("batch_fp", None)
@@ -444,7 +444,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 safe_plotly_chart(st, fig_o, width="stretch")
 
                 # Zip download (CSV per run)
-                if col_dl.button("📦 Download batch CSV zip", use_container_width=True):
+                if col_dl.button("Download batch CSV zip", use_container_width=True):
                     buf = io.BytesIO()
                     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
                         for label, dfi in batch_results.items():
@@ -456,11 +456,11 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
             else:
                 st.info("Select some YAML files and click **Run batch** to generate overlay plots.")
 
-        st.subheader("📥 Export")
+        st.subheader("Export")
         e1, e2, e3 = st.columns(3)
 
         safe_download_button(e1, 
-            "📄 CSV",
+            "CSV",
             df.to_csv(index=False).encode(),
             "results.csv",
             "text/csv",
@@ -468,7 +468,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
         )
 
         safe_download_button(e2, 
-            "📝 TXT",
+            "TXT",
             df.to_string(index=False).encode(),
             "results.txt",
             "text/plain",
@@ -476,7 +476,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
         )
 
         safe_download_button(e3, 
-            "📊 XLSX",
+            "XLSX",
             to_excel(df),
             "results.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -494,7 +494,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 "This view shows the response of an equivalent **SDOF building/pier** "
                 "excited by the simulated contact force. Stiffness is taken from "
                 "`k_wall`; effective mass, damping and – optionally – a **Takeda "
-                "degrading hysteresis** are defined in the 💥 Contact section."
+                "degrading hysteresis** are defined in the Contact section."
             )
 
             fig_b = create_building_response_plots(df)
@@ -646,7 +646,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 st.warning(f"Response spectrum could not be computed: {e}")
         else:
             st.info(
-                "Enable **Building SDOF response** under 💥 Contact to compute "
+                "Enable **Building SDOF response** under Contact to compute "
                 "and visualise building accelerations and hysteresis."
             )
 
@@ -1100,7 +1100,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 if png_bytes is not None:
                     safe_download_button(
                         export_col1,
-                        "🖼️ Export PNG (300 dpi)",
+                        "Export PNG (300 dpi)",
                         png_bytes,
                         f"{base}.png",
                         "image/png",
@@ -1112,7 +1112,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 if svg_bytes is not None:
                     safe_download_button(
                         export_col2,
-                        "🧾 Export SVG",
+                        "Export SVG",
                         svg_bytes,
                         f"{base}.svg",
                         "image/svg+xml",
@@ -1120,4 +1120,3 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                     )
                 else:
                     export_col2.info("SVG export not available (missing nodal data).")
-

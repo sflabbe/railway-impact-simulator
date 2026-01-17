@@ -982,7 +982,7 @@ class ImpactSimulator:
             except Exception:
                 pass
 
-        def _build_state_snapshot(step_idx: int, newton_diag: Optional[Dict[str, float]] = None) -> dict:
+        def _build_state_snapshot(step_idx: int) -> dict:
             """Build a state snapshot dict for diagnostics."""
             snapshot = {}
             try:
@@ -990,8 +990,6 @@ class ImpactSimulator:
                 snapshot["qp_norm"] = float(np.linalg.norm(qp[:, step_idx]))
                 snapshot["x_front_last"] = float(q[0, step_idx])
                 snapshot["v_front_last"] = float(qp[0, step_idx])
-                snapshot["t"] = float(self.t[step_idx])
-                snapshot["h"] = float(self.h)
                 # Contact state
                 snapshot["gap_min"] = float(np.min(q[:n, step_idx]))
                 snapshot["in_contact"] = bool(np.any(q[:n, step_idx] < 0))
@@ -1003,26 +1001,9 @@ class ImpactSimulator:
                 # Energy if available
                 if step_idx < len(E_mech):
                     snapshot["E_mech"] = float(E_mech[step_idx])
-                if newton_diag:
-                    snapshot.update(newton_diag)
             except Exception:
                 pass
             return snapshot
-
-        def _log_failure_diagnostics(step_idx: int, err: float, newton_diag: Optional[Dict[str, float]]) -> None:
-            snapshot = _build_state_snapshot(step_idx, newton_diag=newton_diag)
-            logger.error(
-                "Non-convergence diagnostics: t=%.6e h=%.3e in_contact=%s gap_min=%.6e "
-                "contact_force_norm=%.6e rnorm=%.6e ref=%.6e err=%.6e",
-                snapshot.get("t", float("nan")),
-                snapshot.get("h", float("nan")),
-                snapshot.get("in_contact", False),
-                snapshot.get("gap_min", float("nan")),
-                snapshot.get("contact_force_norm", float("nan")),
-                snapshot.get("rnorm", float("nan")),
-                snapshot.get("ref", float("nan")),
-                err,
-            )
 
         def _run_newton_step(
             step_idx: int,
@@ -1287,13 +1268,6 @@ class ImpactSimulator:
                 ref_R = float(np.linalg.norm(R_total_old))
                 ref = max(ref_R, ref_rhs, 1.0)
                 err = rnorm / ref
-                last_newton_diag.update(
-                    {
-                        "rnorm": rnorm,
-                        "ref": ref,
-                        "err": err,
-                    }
-                )
                 if err > self.max_residual:
                     self.max_residual = err
 
@@ -1377,13 +1351,11 @@ class ImpactSimulator:
         # Time stepping
         solver = str(getattr(p, "solver", "newton")).lower()
         solver_fail_policy = str(getattr(p, "solver_fail_policy", "switch")).lower()
-        last_newton_diag: Dict[str, float] = {}
         for step_idx in range(p.step):
 
             converged = False
             err = np.inf
             iters_this_step = 0
-            last_newton_diag.clear()
 
             if solver in ("newton", "nr", "newton-raphson", "newton_raphson"):
                 converged, err, iters_this_step, contact_active, v0_contact = _run_newton_step(
@@ -1552,7 +1524,6 @@ class ImpactSimulator:
                         else:
                             self.converged_all_steps = False
                             t_current = step_idx * self.h
-                            _log_failure_diagnostics(step_idx, err, last_newton_diag)
                             raise NonConvergenceError(
                                 f"Newton fallback failed at step {step_idx} (||r||/ref={err:.3e}).",
                                 step_idx=step_idx,
@@ -1562,14 +1533,13 @@ class ImpactSimulator:
                                 dt_effective=self.h,
                                 solver_type="picard",
                                 failure_stage="newton_fallback",
-                                state_snapshot=_build_state_snapshot(step_idx, newton_diag=last_newton_diag),
+                                state_snapshot=_build_state_snapshot(step_idx),
                                 dt_reductions_used=0,
                                 fallback_attempted=True,
                             )
                     else:
                         self.converged_all_steps = False
                         t_current = step_idx * self.h
-                        _log_failure_diagnostics(step_idx, err, last_newton_diag)
                         raise NonConvergenceError(
                             f"Picard solver failed at step {step_idx} (policy={solver_fail_policy}).",
                             step_idx=step_idx,
@@ -1579,7 +1549,7 @@ class ImpactSimulator:
                             dt_effective=self.h,
                             solver_type="picard",
                             failure_stage="picard",
-                            state_snapshot=_build_state_snapshot(step_idx, newton_diag=last_newton_diag),
+                            state_snapshot=_build_state_snapshot(step_idx),
                             dt_reductions_used=0,
                             fallback_attempted=False,
                         )
@@ -1587,7 +1557,6 @@ class ImpactSimulator:
             if not converged:
                 self.converged_all_steps = False
                 t_current = step_idx * self.h
-                _log_failure_diagnostics(step_idx, err, last_newton_diag)
                 raise NonConvergenceError(
                     f"Solver '{solver}' did not converge at step {step_idx} (err={err:.3e}).",
                     step_idx=step_idx,
@@ -1597,7 +1566,7 @@ class ImpactSimulator:
                     dt_effective=self.h,
                     solver_type=solver,
                     failure_stage="newton" if "newton" in solver else "picard",
-                    state_snapshot=_build_state_snapshot(step_idx, newton_diag=last_newton_diag),
+                    state_snapshot=_build_state_snapshot(step_idx),
                     dt_reductions_used=0,
                     fallback_attempted=False,
                 )

@@ -327,9 +327,6 @@ class SimulationParams:
     dt_max_reductions: int = 3  # Max dt reductions per step before failing
     picard_max_iters: int = 25  # Max Picard iterations (if using legacy solver)
     picard_tol: float = 1e-6  # Picard convergence tolerance
-    picard_relaxation: float = 0.25  # Picard under-relaxation factor (0, 1]
-    newton_soft_tol: float = 3.0e-2  # Soft acceptance threshold near contact
-    newton_soft_contact_only: bool = True  # Allow soft acceptance only in contact
 
 @dataclass
 class TrainConfig:
@@ -655,7 +652,6 @@ class ImpactSimulator:
         self.total_iters: int = 0  # renamed (no "newton" in the name)
         self.max_iters_per_step: int = 0  # max iterations needed for any timestep
         self.max_residual: float = 0.0  # max residual seen across all iterations
-        self.soft_converged_steps: int = 0
 
         self.setup()
 
@@ -1370,27 +1366,6 @@ class ImpactSimulator:
             v0_contact_out = state_last["v0_contact"]
 
             if not converged:
-                newton_soft_tol = float(getattr(p, "newton_soft_tol", self.params.newton_tol))
-                newton_soft_contact_only = bool(getattr(p, "newton_soft_contact_only", True))
-                soft_contact_ok = contact_active_out or (not newton_soft_contact_only)
-                if err < newton_soft_tol and soft_contact_ok:
-                    converged = True
-                    self.soft_converged_steps += 1
-                    last_newton_diag.update(
-                        {
-                            "soft_accepted": True,
-                            "soft_tol": newton_soft_tol,
-                        }
-                    )
-                    logger.info(
-                        "Newton soft-accepted step %d (||r||/ref=%.3e <= %.3e, contact_active=%s).",
-                        step_idx,
-                        err,
-                        newton_soft_tol,
-                        contact_active_out,
-                    )
-
-            if not converged:
                 logger.warning(
                     "Newton solver did not converge at step %d (||r||/ref = %.3e)",
                     step_idx,
@@ -1430,11 +1405,6 @@ class ImpactSimulator:
 
                 picard_max_iters = int(getattr(p, 'picard_max_iters', p.max_iter))
                 picard_tol = float(getattr(p, 'picard_tol', self.params.newton_tol))
-                picard_relaxation = float(getattr(p, "picard_relaxation", 1.0))
-                if not (0.0 < picard_relaxation <= 1.0):
-                    raise ValueError(
-                        f"picard_relaxation must be in (0, 1], got {picard_relaxation}."
-                    )
 
                 for it in range(picard_max_iters):
                     # Reset forces for this iteration
@@ -1537,7 +1507,7 @@ class ImpactSimulator:
                     # --- Corrector: update acceleration ---
                     qpp_old = qpp[:, step_idx + 1].copy()
 
-                    qpp_raw = self.integrator.compute_acceleration(
+                    qpp[:, step_idx + 1] = self.integrator.compute_acceleration(
                         self.M,
                         R_internal[:, step_idx + 1], R_internal[:, step_idx],
                         R_contact[:, step_idx + 1], R_contact[:, step_idx],
@@ -1553,15 +1523,13 @@ class ImpactSimulator:
                     iters_this_step += 1
 
                     # Convergence check
-                    err = self._check_convergence(qpp_raw, qpp_old)
+                    err = self._check_convergence(qpp[:, step_idx + 1], qpp_old)
                     if err > self.max_residual:
                         self.max_residual = err
 
                     if err < picard_tol:
-                        qpp[:, step_idx + 1] = qpp_raw
                         converged = True
                         break
-                    qpp[:, step_idx + 1] = qpp_old + picard_relaxation * (qpp_raw - qpp_old)
 
                 iters_this_step = max(iters_this_step, 1)
 
@@ -2425,7 +2393,6 @@ class ImpactSimulator:
             df.attrs["max_residual_seen"] = float(self.max_residual)
             df.attrs["max_iters_step"] = int(self.max_iters_per_step)
             df.attrs["converged_all_steps"] = bool(getattr(self, "converged_all_steps", True))
-            df.attrs["soft_converged_steps"] = int(getattr(self, "soft_converged_steps", 0))
             # Store actual timestep used (not requested h_init, but effective dt)
             df.attrs["dt_eff"] = self.h
             df.attrs["h_requested"] = self.params.h_init
@@ -2551,9 +2518,6 @@ def get_default_simulation_params() -> dict:
         "dt_max_reductions": 3,  # Max dt reductions per step
         "picard_max_iters": 25,  # Max Picard iterations
         "picard_tol": 1e-6,      # Picard convergence tolerance
-        "picard_relaxation": 0.25,  # Picard under-relaxation factor
-        "newton_soft_tol": 3.0e-2,  # Soft acceptance threshold near contact
-        "newton_soft_contact_only": True,  # Allow soft acceptance only in contact
     }
 
 
@@ -2824,19 +2788,16 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
         # HHT and solver
         "alpha_hht",
         "newton_tol",
-        "newton_soft_tol",
         "h_init",
         "T_max",
         "damping_zeta",
         "damping_target",
-        "picard_relaxation",
     ]
 
     
     # --- Scalars that should be bools ------------------------------------
     bool_keys = [
         'lugre_paper_grade',
-        "newton_soft_contact_only",
     ]
 
     for key in bool_keys:

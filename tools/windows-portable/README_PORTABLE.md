@@ -28,7 +28,8 @@ Output:
 
 ## Notes
 
-- Default embeddable Python version: **3.12.12** (change in the PS1 if desired).
+- Default embeddable Python version: **3.12.10** (change in the PS1 if desired).
+- Python 3.12.11+ are source-only releases and do not provide Windows embeddable ZIPs.
 - If the build machine has restricted internet, you can pre-download:
   - `python-<ver>-embed-<arch>.zip` into `dist_portable\`
   - `get-pip.py` into `dist_portable\`

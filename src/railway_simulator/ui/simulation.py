@@ -60,22 +60,22 @@ from .train_geometry import create_train_geometry_plot
 
 def execute_simulation(params: Dict[str, Any], run_new: bool = False):
     """
-    Ejecuta la simulación y gestiona el caché tanto de la física (core)
-    como del post-proceso (edificio/SDOF) para evitar recargas innecesarias.
+    Run the simulation and manage caching for both core physics
+    and post-processing (building/SDOF) to avoid unnecessary reruns.
 
-    - Core physics (impacto tren-muro) se ejecuta solo cuando:
-        * run_new=True (botón), o
-        * no hay resultados cacheados.
-    - Building SDOF se cachea por parámetros para que cambiar widgets
-      (p.ej. selectbox de masa / resorte) no dispare CPU innecesaria.
+    - Core physics (train-wall impact) runs only when:
+        * run_new=True (button), or
+        * no cached results exist.
+    - Building SDOF is cached by parameters so UI widget changes
+      (e.g., mass/spring selectboxes) do not trigger unnecessary CPU work.
     """
     # ------------------------------------------------------
-    # 1) Simulación base de impacto (Core Physics)
+    # 1) Base impact simulation (core physics)
     # ------------------------------------------------------
     df_core = st.session_state.get("sim_results", None)
 
-    # Si se pide run_new, forzamos la ejecución.
-    # Si df_core no existe, forzamos la ejecución.
+    # If run_new is requested, force execution.
+    # If df_core does not exist, force execution.
     if run_new or df_core is None:
         with st.spinner("Running HHT-α simulation..."):
             try:
@@ -84,21 +84,21 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 st.error(f"Simulation error: {e}")
                 return
 
-        # Guardamos resultados y parámetros en Session State
+        # Store results and parameters in session state.
         st.session_state["sim_results"] = df_core
         st.session_state["sim_params_core"] = params
 
-        # Reset de notificación (para no spamear en reruns)
+        # Reset notification flag (avoid spamming on reruns).
         st.session_state["sim_results_notified"] = False
 
-        # IMPORTANTE: invalidamos el caché del edificio porque la física cambió
+        # IMPORTANT: invalidate the building cache because the physics changed.
         for k in ("sim_building_results", "last_building_params"):
             if k in st.session_state:
                 del st.session_state[k]
 
         st.success("✅ Complete!")
     else:
-        # Aquí entra cuando cambias selectboxes/sliders de UI.
+        # Runs when UI selectboxes/sliders change.
         if not st.session_state.get("sim_results_notified", False):
             st.info("Using cached impact history.")
             st.session_state["sim_results_notified"] = True
@@ -108,7 +108,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
         return
 
     # ------------------------------------------------------
-    # 2) SDOF del edificio (Optimizado con Caché)
+    # 2) Building SDOF (optimized with caching)
     # ------------------------------------------------------
     building_enabled = (
         params.get("building_enable", False)
@@ -119,7 +119,7 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
     building_df = None
 
     if building_enabled:
-        # Clave única para el estado actual de los parámetros del edificio
+        # Unique key for the current building parameter state.
         current_build_params = {
             "k_wall": float(params.get("k_wall", 0.0)),
             "m_build": float(params.get("building_mass", 0.0)),
@@ -128,18 +128,18 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
             "uy_mm": float(params.get("building_uy_mm", 10.0)),
             "alpha": float(params.get("building_alpha", 0.05)),
             "gamma": float(params.get("building_gamma", 0.4)),
-            # Incluimos la longitud para asegurar que es la misma simulación
+            # Include length to ensure it is the same simulation.
             "core_len": int(len(df_core)),
         }
 
         cached_build_df = st.session_state.get("sim_building_results", None)
         cached_build_params = st.session_state.get("last_building_params", {})
 
-        # Comparamos: ¿Tenemos datos cacheados Y son los mismos parámetros?
+        # Compare: do we have cached data AND the same parameters?
         if (cached_build_df is not None) and (cached_build_params == current_build_params):
             building_df = cached_build_df
         else:
-            # Si no coincide, recalculamos (solo aquí se gasta CPU)
+            # If not, recompute (only here we spend CPU).
             try:
                 building_df = compute_building_sdof_response(
                     df_core,
@@ -157,13 +157,13 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
                 st.warning(f"Building SDOF response could not be computed: {e}")
                 building_df = None
 
-    # Unimos los dataframes para visualización
+    # Merge dataframes for visualization.
     df = df_core.copy()
     if building_df is not None and not building_df.empty:
         df = pd.concat([df_core, building_df], axis=1)
 
     # ------------------------------------------------------
-    # 3) Tabs de resultados
+    # 3) Results tabs
     # ------------------------------------------------------
     tab_global, tab_batch, tab_building, tab_train, tab_springs, tab_nodal = st.tabs(
         [

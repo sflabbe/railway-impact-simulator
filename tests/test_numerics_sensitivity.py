@@ -30,9 +30,13 @@ class TestNumericsSensitivity(unittest.TestCase):
             simulate_func=fake_simulation,
         )
         self.assertEqual(len(summary), 2 * 2 * 1)
-        # Baseline is first row -> rel = 0.0
-        first_rel = summary.loc[0, "peak_force_rel_to_baseline_pct"]
-        self.assertTrue(first_rel == 0.0 or np.isclose(first_rel, 0.0))
+        baseline = summary[
+            (summary["dt_requested"] == 1e-4)
+            & (summary["alpha_hht"] == -0.15)
+            & (summary["newton_tol"] == 1e-4)
+        ].iloc[0]
+        rel = baseline["peak_force_rel_to_baseline_pct"]
+        self.assertTrue(rel == 0.0 or np.isclose(rel, 0.0))
 
 if __name__ == "__main__":
     unittest.main()

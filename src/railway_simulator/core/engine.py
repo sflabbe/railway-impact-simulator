@@ -252,6 +252,8 @@ class SimulationParams:
     # Nonlinear solver selection
     solver: str = "newton"  # "newton" (Newton–Raphson) or "picard" (legacy)
     newton_jacobian_mode: str = "per_step"  # "per_step" (fast) or "each_iter" (pure/slow)
+    picard_max_iters: int = 25
+    picard_tol: float = 1.0e-6
 
 @dataclass
 class TrainConfig:
@@ -2196,6 +2198,8 @@ def get_default_simulation_params() -> dict:
         "alpha_hht": -0.15,      # HHT-α parameter
         "newton_tol": 1e-6,
         "max_iter": 25,
+        "picard_max_iters": 25,
+        "picard_tol": 1e-6,
         "solver": "newton",     # "newton" (NR) or "picard" (legacy)
         "newton_jacobian_mode": "per_step",  # "per_step" (fast) or "each_iter" (pure/slow)
         "h_init": h_init,        # [s]
@@ -2442,6 +2446,7 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
         # HHT and solver
         "alpha_hht",
         "newton_tol",
+        "picard_tol",
         "h_init",
         "T_max",
     ]
@@ -2464,6 +2469,7 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
     int_keys = [
         "n_masses",
         "max_iter",
+        "picard_max_iters",
         "step",
         "bw_n",
     ]

@@ -39,7 +39,7 @@ import yaml
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from railway_simulator.core.engine import run_simulation, NonConvergenceError
+from railway_simulator.core.engine import run_simulation
 from railway_simulator.core.contact import ContactModels
 
 # Configure logging
@@ -217,32 +217,8 @@ def check_plausibility(metrics: Dict[str, Any]) -> Tuple[bool, List[str]]:
     return passed, warnings
 
 
-def save_diagnostics(case: SimulationCase, output_dir: Path, diagnostics: Dict[str, Any]) -> Path:
-    """Save diagnostics for a failed case."""
-    case_dir = output_dir / case.section / case.name
-    case_dir.mkdir(parents=True, exist_ok=True)
-    diag_path = case_dir / "diagnostics.json"
-    with open(diag_path, "w", encoding="utf-8") as f:
-        json.dump(diagnostics, f, indent=2, default=str)
-    return diag_path
-
-
-def save_failed_metrics(case: SimulationCase, output_dir: Path, metrics: Dict[str, Any]) -> Path:
-    """Save metrics.json for a failed case."""
-    case_dir = output_dir / case.section / case.name
-    case_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = case_dir / "metrics.json"
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, default=str)
-    return metrics_path
-
-
 def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, Any]]:
-    """Run a single simulation case.
-
-    Returns metrics dict on success, or a dict with status='failed' on failure.
-    Never raises exceptions - all errors are captured and returned as failed cases.
-    """
+    """Run a single simulation case."""
     logger.info(f"Running case: {case.section}/{case.name}")
 
     if dry_run:
@@ -261,7 +237,6 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
 
         # Compute metrics
         metrics = compute_metrics(df, params)
-        metrics["status"] = "success"
         metrics["wall_time_s"] = elapsed
         metrics["case_name"] = case.name
         metrics["section"] = case.section
@@ -287,102 +262,9 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
 
         return metrics
 
-    except NonConvergenceError as e:
-        elapsed = time.time() - start_time
-        logger.error(f"  NON-CONVERGENCE at step {e.step_idx}, t={e.t:.4f}s: {e}")
-
-        # Build failed metrics with all available diagnostic info
-        metrics = {
-            "status": "failed",
-            "case_name": case.name,
-            "section": case.section,
-            "wall_time_s": elapsed,
-            "error_type": "NonConvergenceError",
-            "error_message": str(e)[:500],  # Truncate long messages
-            "failure_stage": e.failure_stage,
-            "last_step_index": e.step_idx,
-            "t_last": e.t,
-            "residual_norm": e.residual_norm,
-            "iter_count": e.iter_count,
-            "dt_effective": e.dt_effective,
-            "dt_reductions_used": e.dt_reductions_used,
-            "fallback_attempted": e.fallback_attempted,
-            # NaN for metrics that don't exist
-            "peak_force_MN": float('nan'),
-            "peak_penetration_mm": float('nan'),
-            "peak_acceleration_g": float('nan'),
-            "contact_duration_s": float('nan'),
-            "DAF": float('nan'),
-            "plausibility_passed": False,
-            "plausibility_warnings": ["Case failed to converge"],
-        }
-        metrics.update(case.meta)
-
-        # Add state snapshot info
-        for key, val in e.state_snapshot.items():
-            metrics[f"snapshot_{key}"] = val
-
-        # Diagnose why it failed
-        diagnostics = e.to_diagnostics_dict()
-        diagnostics["case_name"] = case.name
-        diagnostics["section"] = case.section
-        diagnostics["params_used"] = {k: str(v) for k, v in case.overrides.items()}
-
-        # Analyze failure reason
-        if e.state_snapshot.get("in_contact", False):
-            diagnostics["diagnosis"] = "Failed during contact phase - may need smaller dt or relaxed tol"
-        elif e.state_snapshot.get("x_front_last", 0) > 0:
-            diagnostics["diagnosis"] = "Failed before impact - check initial conditions"
-        elif e.dt_reductions_used >= 3:
-            diagnostics["diagnosis"] = "Failed after max dt reductions - numerical stiffness issue"
-        else:
-            diagnostics["diagnosis"] = "Unknown - check residual norm and iter count"
-
-        # Save diagnostics and failed metrics
-        save_diagnostics(case, RESULTS_DIR, diagnostics)
-        save_failed_metrics(case, RESULTS_DIR, metrics)
-
-        return metrics
-
     except Exception as e:
-        elapsed = time.time() - start_time
-        logger.error(f"  FAILED (unexpected): {type(e).__name__}: {e}")
-
-        # Build minimal failed metrics for unexpected errors
-        metrics = {
-            "status": "failed",
-            "case_name": case.name,
-            "section": case.section,
-            "wall_time_s": elapsed,
-            "error_type": type(e).__name__,
-            "error_message": str(e)[:500],
-            "failure_stage": "unknown",
-            "last_step_index": -1,
-            "t_last": 0.0,
-            "fallback_attempted": False,
-            "peak_force_MN": float('nan'),
-            "peak_penetration_mm": float('nan'),
-            "peak_acceleration_g": float('nan'),
-            "contact_duration_s": float('nan'),
-            "DAF": float('nan'),
-            "plausibility_passed": False,
-            "plausibility_warnings": [f"Case failed: {type(e).__name__}"],
-        }
-        metrics.update(case.meta)
-
-        # Save diagnostics
-        diagnostics = {
-            "error_type": type(e).__name__,
-            "error_message": str(e),
-            "case_name": case.name,
-            "section": case.section,
-            "params_used": {k: str(v) for k, v in case.overrides.items()},
-            "diagnosis": "Unexpected error - check logs for stack trace",
-        }
-        save_diagnostics(case, RESULTS_DIR, diagnostics)
-        save_failed_metrics(case, RESULTS_DIR, metrics)
-
-        return metrics
+        logger.error(f"  FAILED: {e}")
+        return {"error": str(e), "case_name": case.name, "section": case.section}
 
 
 # =============================================================================
@@ -697,21 +579,8 @@ def run_study(
     sections: Optional[List[str]] = None,
     dry_run: bool = False,
     resume_from: Optional[str] = None,
-    max_cases: Optional[int] = None,
-    seed: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Run parametric study for specified sections.
-
-    Args:
-        sections: List of section IDs to run (e.g., ["8.1", "8.3"]).
-        dry_run: If True, only print what would be run.
-        resume_from: If set, resume from previous partial run.
-        max_cases: If set, limit to this many cases (for quick testing).
-        seed: Random seed for shuffling cases when using max_cases.
-
-    Returns:
-        Summary DataFrame with all results (including failed cases).
-    """
+    """Run parametric study for specified sections."""
 
     # Generate cases
     if sections is None or "all" in sections:
@@ -723,15 +592,6 @@ def run_study(
                 cases.extend(SECTION_GENERATORS[sec]())
             else:
                 logger.warning(f"Unknown section: {sec}")
-
-    # Apply max_cases limit with optional shuffle
-    if max_cases is not None and max_cases > 0 and max_cases < len(cases):
-        if seed is not None:
-            import random
-            random.seed(seed)
-            random.shuffle(cases)
-        cases = cases[:max_cases]
-        logger.info(f"Limited to {max_cases} cases (seed={seed})")
 
     logger.info(f"Total cases to run: {len(cases)}")
 
@@ -775,39 +635,17 @@ def run_study(
         summary_df.to_csv(summary_path, index=False)
         logger.info(f"Summary saved to: {summary_path}")
 
-        # Compute statistics
-        n_total = len(results)
-        n_converged = sum(1 for r in results if r.get("status") == "success")
-        n_failed = sum(1 for r in results if r.get("status") == "failed")
-        failed_cases = [r.get("case_name") for r in results if r.get("status") == "failed"]
-
         # Print statistics
         logger.info("\n" + "=" * 60)
         logger.info("STUDY COMPLETE")
         logger.info("=" * 60)
-        logger.info(f"Total runs: {n_total}")
-        logger.info(f"Converged: {n_converged}")
-        logger.info(f"Failed: {n_failed}")
-
-        if failed_cases:
-            logger.info(f"Failed cases: {failed_cases}")
+        logger.info(f"Total runs: {len(results)}")
+        logger.info(f"Successful: {sum(1 for r in results if 'error' not in r)}")
+        logger.info(f"Failed: {sum(1 for r in results if 'error' in r)}")
 
         if "plausibility_passed" in summary_df.columns:
             passed = summary_df["plausibility_passed"].sum()
-            logger.info(f"Plausibility passed: {passed}/{n_total}")
-
-        # Save extended summary with convergence info
-        summary_meta = {
-            "n_total": n_total,
-            "n_converged": n_converged,
-            "n_failed": n_failed,
-            "failed_cases": failed_cases,
-            "sections_run": sections or ["all"],
-        }
-        summary_meta_path = RESULTS_DIR / "summary_meta.json"
-        with open(summary_meta_path, "w") as f:
-            json.dump(summary_meta, f, indent=2)
-        logger.info(f"Summary metadata saved to: {summary_meta_path}")
+            logger.info(f"Plausibility passed: {passed}/{len(results)}")
 
         return summary_df
 
@@ -833,7 +671,6 @@ Examples:
   python run_parametric_study.py --section 8.1 8.6
   python run_parametric_study.py --section 8.6 --dry-run
   python run_parametric_study.py --all --resume
-  python run_parametric_study.py --section 8.3 --max-cases 8 --seed 42
         """,
     )
 
@@ -857,14 +694,6 @@ Examples:
         "--list", action="store_true",
         help="List all cases without running"
     )
-    parser.add_argument(
-        "--max-cases", type=int, default=None,
-        help="Limit to N cases (for quick testing)"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=None,
-        help="Random seed for shuffling when using --max-cases"
-    )
 
     args = parser.parse_args()
 
@@ -887,13 +716,7 @@ Examples:
     sections = None if args.all else args.section
     resume = "partial" if args.resume else None
 
-    run_study(
-        sections=sections,
-        dry_run=args.dry_run,
-        resume_from=resume,
-        max_cases=args.max_cases,
-        seed=args.seed,
-    )
+    run_study(sections=sections, dry_run=args.dry_run, resume_from=resume)
 
 
 if __name__ == "__main__":

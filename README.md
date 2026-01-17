@@ -135,6 +135,48 @@ railway-sim convergence \
   --out results_parametric/convergence
 ```
 
+### 3.4 Live terminal monitor
+
+The live terminal monitor provides a full-screen progress view with live plots while a simulation runs.
+It is designed for headless terminals, including SSH sessions.
+
+Requirements:
+
+- A TTY for stdin and stdout.
+- Python curses support (available on Linux, macOS, and WSL; Windows Python may not ship with curses).
+
+Run it by adding `--live-monitor`:
+
+```bash
+railway-sim run \
+  --config configs/ice1_aluminum.yml \
+  --speed-kmh 80 \
+  --output-dir results/ice1_80_live \
+  --live-monitor
+```
+
+Useful flags:
+
+- `--live-refresh-s 0.05` controls how often the UI refreshes.
+- `--live-sample-s 0.02` controls how often the solver emits progress samples.
+- `--live-hold` keeps the monitor open until you press `q`.
+- `--live-auto-close` exits the monitor automatically on completion.
+
+Expected output (first lines of the full screen view):
+
+```
+Railway impact simulator  status running
+step 120/400  30.0%   t   0.0120 s   dt 1.00e-04   wall     1.2 s
+solver newton   iters 3   max resid 1.20e-06   contact 1
+F    12.345 MN   pen     1.234 mm   v   -22.220 m/s   a     0.500 g   Eb 1.234e-05
+```
+
+Troubleshooting:
+
+If you request `--live-monitor` in a non-interactive shell, the CLI runs without the monitor and logs a warning.
+If your terminal does not support Unicode, the UI falls back to ASCII sparklines.
+Press `q` to quit, `p` to pause, `v` to switch views, and `s` to save a text snapshot in the output directory.
+
 ---
 
 ## 4. Solver knobs (YAML keys)

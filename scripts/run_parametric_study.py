@@ -139,24 +139,8 @@ def compute_metrics(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
             first_contact = df.loc[in_contact, "Time_s"].min()
             last_contact = df.loc[in_contact, "Time_s"].max()
             metrics["contact_duration_s"] = float(last_contact - first_contact)
-            metrics["t_contact_start"] = float(first_contact)
-            metrics["t_contact_end"] = float(last_contact)
-            if "Velocity_m_s" in df.columns:
-                metrics["v_front_at_contact_start"] = float(df.loc[in_contact, "Velocity_m_s"].iloc[0])
         else:
             metrics["contact_duration_s"] = 0.0
-            metrics["t_contact_start"] = None
-            metrics["t_contact_end"] = None
-            metrics["v_front_at_contact_start"] = None
-
-    # Front position metrics
-    if "Position_x_m" in df.columns:
-        x_front_min = float(df["Position_x_m"].min())
-        metrics["x_front_min"] = x_front_min
-        impact_occurred = x_front_min <= 0.0
-        metrics["impact_occurred"] = bool(impact_occurred)
-        if not impact_occurred:
-            metrics["no_impact_reason"] = "x_front_min>0"
 
     # Energy metrics
     if "E_num_ratio" in df.columns:
@@ -171,10 +155,6 @@ def compute_metrics(df: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
         fy_arr = np.array(params["fy"])
         fy_MN = fy_arr[0] / 1e6 if len(fy_arr) > 0 else 15.0
         metrics["DAF"] = metrics.get("peak_force_MN", 0) / fy_MN
-
-    for key in ("fallback_used", "max_residual_seen", "max_iters_step", "converged_all_steps"):
-        if key in df.attrs:
-            metrics[key] = df.attrs[key]
 
     return metrics
 

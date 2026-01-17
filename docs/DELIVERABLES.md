@@ -8,8 +8,9 @@
 
 ## Documentation deliverables
 1. README quickstart commands that reference files that exist in the repo.
-2. docs/config_schema.md describing the configuration schema.
-3. Process docs in docs folder:
+2. README documentation for the live terminal monitor usage and troubleshooting.
+3. docs/config_schema.md describing the configuration schema.
+4. Process docs in docs folder:
    1. PLANNING describes the workflow and quality gates
    2. TASKS tracks work items and status
    3. WORKLOG records changes with verification

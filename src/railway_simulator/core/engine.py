@@ -788,7 +788,6 @@ class ImpactSimulator:
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         progress_min_period_s: float = 0.10,
         emit_peak_diagnostics: bool = True,
-        initial_state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> pd.DataFrame:
         """
         Execute time-stepping simulation with full HHT-α fixed-point / Newton iteration.
@@ -803,9 +802,6 @@ class ImpactSimulator:
         emit_peak_diagnostics
             If True, prints a 10-line diagnostic about the worst energy-balance
             residual after the run. Disable this when running a curses monitor.
-        initial_state_callback
-            Optional callable receiving a dict snapshot of the t0 state before
-            the time-stepping loop begins.
         """
         p = self.params
         n = p.n_masses
@@ -953,34 +949,6 @@ class ImpactSimulator:
         self.fallback_used = False
         self.converged_all_steps = True
         self.dt_reductions_total = 0  # Track total dt reductions used
-
-        if initial_state_callback is not None:
-            try:
-                gap_min = float(np.min(q[:n, 0]))
-                in_contact = bool(np.any(q[:n, 0] < 0.0))
-                snapshot = {
-                    "engine_id": id(self),
-                    "integrator_id": id(self.integrator),
-                    "q_id": id(q),
-                    "qp_id": id(qp),
-                    "x_front": float(q[0, 0]),
-                    "v_front": float(qp[0, 0]),
-                    "gap_min": gap_min,
-                    "in_contact": in_contact,
-                    "q_norm": float(np.linalg.norm(q[:, 0])),
-                    "qp_norm": float(np.linalg.norm(qp[:, 0])),
-                    "h_init": float(self.h),
-                    "step": int(p.step),
-                    "t0": float(self.t[0]),
-                    "d0": float(p.d0),
-                }
-                if in_contact:
-                    snapshot["initial_contact_warning"] = (
-                        "Initial penetration detected at t0; check d0/x_init for consistency."
-                    )
-                initial_state_callback(snapshot)
-            except Exception:
-                pass
 
         def _build_state_snapshot(step_idx: int) -> dict:
             """Build a state snapshot dict for diagnostics."""
@@ -2537,7 +2505,6 @@ def run_simulation(
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     progress_min_period_s: float = 0.10,
     emit_peak_diagnostics: bool = True,
-    initial_state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> pd.DataFrame:
     """
     High-level convenience wrapper.
@@ -2650,7 +2617,6 @@ def run_simulation(
         progress_callback=progress_callback,
         progress_min_period_s=progress_min_period_s,
         emit_peak_diagnostics=emit_peak_diagnostics,
-        initial_state_callback=initial_state_callback,
     )
 
 def _coerce_scalar_types_for_simulation(base: dict) -> dict:

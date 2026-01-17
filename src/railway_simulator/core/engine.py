@@ -143,32 +143,6 @@ class SimulationConstants:
 # STRAIN-RATE METRICS
 # ====================================================================
 
-def should_accept_contact_inexact(
-    err: float,
-    dq_rel: float,
-    contact_active: bool,
-    contact_only: bool,
-    contact_tol: float,
-    dq_rel_tol: float,
-    soft_reject_err: float,
-    mech_energy: float | None = None,
-    contact_force_norm: float | None = None,
-    force_cap: float | None = None,
-) -> bool:
-    """Evaluate inexact Newton acceptance criteria for contact steps."""
-    if contact_only and (not contact_active):
-        return False
-    if np.isnan(err) or np.isnan(dq_rel):
-        return False
-    if err > soft_reject_err:
-        return False
-    if mech_energy is not None and (not np.isfinite(mech_energy)):
-        return False
-    if force_cap is not None and contact_force_norm is not None:
-        if contact_force_norm > force_cap:
-            return False
-    return (err <= contact_tol) and (dq_rel <= dq_rel_tol)
-
 def strain_rate_metrics(
     df: pd.DataFrame,
     t_col: str = "Time_s",
@@ -354,10 +328,8 @@ class SimulationParams:
     picard_max_iters: int = 25  # Max Picard iterations (if using legacy solver)
     picard_tol: float = 1e-6  # Picard convergence tolerance
     picard_relaxation: float = 0.25  # Picard under-relaxation factor (0, 1]
-    newton_contact_tol: float = 5.0e-2  # Soft acceptance threshold near contact
-    newton_contact_inc_tol: float = 1.0e-6  # Relative increment threshold for soft acceptance
-    newton_contact_only: bool = True  # Allow soft acceptance only in contact
-    newton_soft_reject_err: float = 2.0e-1  # Never accept when err exceeds this
+    newton_soft_tol: float = 3.0e-2  # Soft acceptance threshold near contact
+    newton_soft_contact_only: bool = True  # Allow soft acceptance only in contact
 
 @dataclass
 class TrainConfig:
@@ -683,9 +655,7 @@ class ImpactSimulator:
         self.total_iters: int = 0  # renamed (no "newton" in the name)
         self.max_iters_per_step: int = 0  # max iterations needed for any timestep
         self.max_residual: float = 0.0  # max residual seen across all iterations
-        self.contact_inexact_steps: int = 0
-        self.max_err_contact: float = 0.0
-        self.max_dq_rel_contact: float = 0.0
+        self.soft_converged_steps: int = 0
 
         self.setup()
 
@@ -1305,7 +1275,6 @@ class ImpactSimulator:
             jac_mode = str(getattr(p, "newton_jacobian_mode", "per_step")).lower()
             J_cache: np.ndarray | None = None
             contact_cache: bool | None = None
-            dq_rel_last = float("nan")
             for it in range(p.max_iter):
                 r0, state0 = _eval_state(q_guess)
                 state_last = state0
@@ -1379,38 +1348,11 @@ class ImpactSimulator:
                     lam *= 0.5
                     q_next = q_guess + lam * dq_vec
 
-                dq = q_next - q_guess
-                dq_norm = float(np.linalg.norm(dq))
-                q_norm = float(np.linalg.norm(q_next))
-                dq_rel_last = dq_norm / (q_norm + SimulationConstants.ZERO_TOL)
-                last_newton_diag.update(
-                    {
-                        "dq_norm": dq_norm,
-                        "q_norm": q_norm,
-                        "dq_rel": dq_rel_last,
-                    }
-                )
-
                 q_guess = q_next
 
             # Commit last iterate (converged or best-effort)
-            if state_last is None or (not converged):
-                r_final, state_last = _eval_state(q_guess)
-                rnorm_final = float(np.linalg.norm(r_final))
-                force_rhs = state_last.get("force_rhs")
-                ref_rhs = float(np.linalg.norm(force_rhs)) if force_rhs is not None else 0.0
-                ref_R = float(np.linalg.norm(R_total_old))
-                ref = max(ref_R, ref_rhs, 1.0)
-                err = rnorm_final / ref
-                last_newton_diag.update(
-                    {
-                        "rnorm": rnorm_final,
-                        "ref": ref,
-                        "err": err,
-                    }
-                )
-                if err > self.max_residual:
-                    self.max_residual = err
+            if state_last is None:
+                _, state_last = _eval_state(q_guess)
 
             q[:, step_idx + 1] = state_last["q"]
             qp[:, step_idx + 1] = state_last["v"]
@@ -1424,87 +1366,27 @@ class ImpactSimulator:
             X_bw[:, step_idx + 1] = state_last["X_bw"]
             z_friction[:, step_idx + 1] = state_last["z_friction"]
 
-            gap_min_out = float(np.min(state_last["q"][:n]))
-            contact_active_out = bool(state_last["contact_active"]) or (gap_min_out < 0.0)
+            contact_active_out = bool(state_last["contact_active"])
             v0_contact_out = state_last["v0_contact"]
 
             if not converged:
-                newton_contact_tol = float(getattr(p, "newton_contact_tol", self.params.newton_tol))
-                newton_contact_inc_tol = float(getattr(p, "newton_contact_inc_tol", 1.0e-6))
-                newton_contact_only = bool(getattr(p, "newton_contact_only", True))
-                newton_soft_reject_err = float(getattr(p, "newton_soft_reject_err", 2.0e-1))
-
-                if p.bw_a > SimulationConstants.ZERO_TOL:
-                    E_pot_spring = 0.5 * p.bw_a * float(
-                        np.sum(self.k_lin * state_last["u_spring"] ** 2)
-                    )
-                else:
-                    E_pot_spring = 0.0
-
-                delta = np.maximum(-state_last["u_contact"][:n], 0.0)
-                model = self.params.contact_model.lower()
-                contact_law = self.params.contact_law
-                if contact_law is not None:
-                    if np.any(delta > 0.0):
-                        E_pot_contact = float(
-                            np.sum([contact_law.absorbed_energy(float(dval)) for dval in delta])
-                        )
-                    else:
-                        E_pot_contact = 0.0
-                else:
-                    if model in ["hooke", "ye", "pant-wijeyewickrema", "anagnostopoulos"]:
-                        exp = 1.0
-                    else:
-                        exp = 1.5
-
-                    if np.any(delta > 0.0):
-                        if exp == 1.0:
-                            E_pot_contact = 0.5 * self.params.k_wall * float(np.sum(delta ** 2))
-                        else:
-                            E_pot_contact = (
-                                self.params.k_wall / (exp + 1.0) * float(np.sum(delta ** (exp + 1.0)))
-                            )
-                    else:
-                        E_pot_contact = 0.0
-
-                v_trial = state_last["v"]
-                E_kin = 0.5 * float(v_trial.T @ self.M @ v_trial)
-                E_mech_trial = E_kin + E_pot_spring + E_pot_contact
-
-                soft_accept = should_accept_contact_inexact(
-                    err=err,
-                    dq_rel=dq_rel_last,
-                    contact_active=contact_active_out,
-                    contact_only=newton_contact_only,
-                    contact_tol=newton_contact_tol,
-                    dq_rel_tol=newton_contact_inc_tol,
-                    soft_reject_err=newton_soft_reject_err,
-                    mech_energy=E_mech_trial,
-                )
-
-                if soft_accept:
+                newton_soft_tol = float(getattr(p, "newton_soft_tol", self.params.newton_tol))
+                newton_soft_contact_only = bool(getattr(p, "newton_soft_contact_only", True))
+                soft_contact_ok = contact_active_out or (not newton_soft_contact_only)
+                if err < newton_soft_tol and soft_contact_ok:
                     converged = True
-                    self.contact_inexact_steps += 1
-                    self.max_err_contact = max(self.max_err_contact, float(err))
-                    self.max_dq_rel_contact = max(self.max_dq_rel_contact, float(dq_rel_last))
+                    self.soft_converged_steps += 1
                     last_newton_diag.update(
                         {
                             "soft_accepted": True,
-                            "soft_reason": "contact_inexact",
-                            "err": float(err),
-                            "newton_contact_tol": float(newton_contact_tol),
-                            "dq_rel": float(dq_rel_last),
-                            "newton_contact_inc_tol": float(newton_contact_inc_tol),
+                            "soft_tol": newton_soft_tol,
                         }
                     )
                     logger.info(
-                        "Newton contact-inexact accepted step %d "
-                        "(||r||/ref=%.3e, tol=%.3e, dq_rel=%.3e, inc_tol=%.3e, contact_active=%s).",
+                        "Newton soft-accepted step %d (||r||/ref=%.3e <= %.3e, contact_active=%s).",
                         step_idx,
                         err,
-                        newton_contact_tol,
-                        dq_rel_last,
-                        newton_contact_inc_tol,
+                        newton_soft_tol,
                         contact_active_out,
                     )
 
@@ -2543,9 +2425,7 @@ class ImpactSimulator:
             df.attrs["max_residual_seen"] = float(self.max_residual)
             df.attrs["max_iters_step"] = int(self.max_iters_per_step)
             df.attrs["converged_all_steps"] = bool(getattr(self, "converged_all_steps", True))
-            df.attrs["contact_inexact_steps"] = int(getattr(self, "contact_inexact_steps", 0))
-            df.attrs["max_err_contact"] = float(getattr(self, "max_err_contact", 0.0))
-            df.attrs["max_dq_rel_contact"] = float(getattr(self, "max_dq_rel_contact", 0.0))
+            df.attrs["soft_converged_steps"] = int(getattr(self, "soft_converged_steps", 0))
             # Store actual timestep used (not requested h_init, but effective dt)
             df.attrs["dt_eff"] = self.h
             df.attrs["h_requested"] = self.params.h_init
@@ -2651,10 +2531,6 @@ def get_default_simulation_params() -> dict:
         # ------------------------------------------------------------------
         "alpha_hht": -0.15,      # HHT-α parameter
         "newton_tol": 1e-6,
-        "newton_contact_tol": 5.0e-2,
-        "newton_contact_inc_tol": 1.0e-6,
-        "newton_contact_only": True,
-        "newton_soft_reject_err": 2.0e-1,
         "max_iter": 25,
         "solver": "newton",     # "newton" (NR) or "picard" (legacy)
         "newton_jacobian_mode": "per_step",  # "per_step" (fast) or "each_iter" (pure/slow)
@@ -2676,6 +2552,8 @@ def get_default_simulation_params() -> dict:
         "picard_max_iters": 25,  # Max Picard iterations
         "picard_tol": 1e-6,      # Picard convergence tolerance
         "picard_relaxation": 0.25,  # Picard under-relaxation factor
+        "newton_soft_tol": 3.0e-2,  # Soft acceptance threshold near contact
+        "newton_soft_contact_only": True,  # Allow soft acceptance only in contact
     }
 
 
@@ -2946,9 +2824,7 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
         # HHT and solver
         "alpha_hht",
         "newton_tol",
-        "newton_contact_tol",
-        "newton_contact_inc_tol",
-        "newton_soft_reject_err",
+        "newton_soft_tol",
         "h_init",
         "T_max",
         "damping_zeta",
@@ -2960,7 +2836,7 @@ def _coerce_scalar_types_for_simulation(base: dict) -> dict:
     # --- Scalars that should be bools ------------------------------------
     bool_keys = [
         'lugre_paper_grade',
-        "newton_contact_only",
+        "newton_soft_contact_only",
     ]
 
     for key in bool_keys:

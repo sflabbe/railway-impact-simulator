@@ -273,20 +273,6 @@ def save_diagnostics_attempt(
     return diag_path
 
 
-def save_initial_state_snapshot(
-    case: SimulationCase,
-    output_dir: Path,
-    snapshot: Dict[str, Any],
-    attempt_dir_name: Optional[str] = None,
-) -> Path:
-    """Save initial-state snapshot for a case attempt."""
-    case_dir = get_case_dir(output_dir, case, attempt_dir_name)
-    snapshot_path = case_dir / "initial_state.json"
-    with open(snapshot_path, "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, indent=2, default=str)
-    return snapshot_path
-
-
 def recommended_action_from_error(error: NonConvergenceError, params: Dict[str, Any]) -> str:
     """Recommend next action based on error snapshot and solver params."""
     snapshot = error.state_snapshot
@@ -331,6 +317,7 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
     dt_min = CASE_DT_MIN
 
     attempt_records: List[Dict[str, Any]] = []
+    last_error_snapshot: Optional[Dict[str, Any]] = None
     h_init_used = float(base_params.get("h_init", 1e-4))
     success_attempt_index: Optional[int] = None
     success_metrics: Optional[Dict[str, Any]] = None
@@ -339,16 +326,20 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
     for attempt_index in range(max_case_retries + 1):
         attempt_dir_name = f"attempt_{attempt_index}"
         attempt_params = deepcopy(base_params)
-        attempt_initial_snapshot: Dict[str, Any] = {}
-
-        def capture_initial_state(snapshot: Dict[str, Any]) -> None:
-            attempt_initial_snapshot.update(snapshot)
 
         if attempt_index > 0:
+            attempt_params["solver"] = "newton"
             attempt_params["h_init"] = h_init_used
             step_used = int(np.ceil(t_max / h_init_used)) if t_max > 0.0 else int(attempt_params.get("step", 0))
             attempt_params["step"] = step_used
             attempt_params["T_int"] = (0.0, float(t_max))
+
+            base_max_iters = attempt_params.get("newton_max_iters")
+            if base_max_iters is not None:
+                attempt_params["newton_max_iters"] = int(np.ceil(float(base_max_iters) * 1.5))
+
+            if last_error_snapshot and last_error_snapshot.get("in_contact", False):
+                attempt_params["newton_jacobian_mode"] = "each_iter"
         else:
             step_used = int(attempt_params.get("step", np.ceil(t_max / h_init_used))) if t_max > 0.0 else int(
                 attempt_params.get("step", 0)
@@ -368,17 +359,8 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
 
         start_time = time.time()
         try:
-            df = run_simulation(attempt_params, initial_state_callback=capture_initial_state)
+            df = run_simulation(attempt_params)
             elapsed = time.time() - start_time
-            if attempt_initial_snapshot:
-                save_initial_state_snapshot(case, RESULTS_DIR, attempt_initial_snapshot, attempt_dir_name)
-                logger.info(
-                    "  Initial state snapshot saved (engine=%s integrator=%s q=%s qp=%s)",
-                    attempt_initial_snapshot.get("engine_id"),
-                    attempt_initial_snapshot.get("integrator_id"),
-                    attempt_initial_snapshot.get("q_id"),
-                    attempt_initial_snapshot.get("qp_id"),
-                )
 
             metrics = compute_metrics(df, attempt_params)
             metrics["status"] = "success"
@@ -462,9 +444,6 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
                 "newton_jacobian_mode": attempt_params.get("newton_jacobian_mode"),
                 "newton_tol": attempt_params.get("newton_tol"),
             }
-            if attempt_initial_snapshot:
-                diagnostics["initial_state_snapshot"] = attempt_initial_snapshot
-                save_initial_state_snapshot(case, RESULTS_DIR, attempt_initial_snapshot, attempt_dir_name)
 
             if e.state_snapshot.get("in_contact", False):
                 diagnostics["diagnosis"] = "Failed during contact phase - may need smaller dt or higher max_iter"
@@ -478,6 +457,8 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
             save_diagnostics_attempt(case, RESULTS_DIR, diagnostics, attempt_dir_name)
             metrics_path = save_failed_metrics(case, RESULTS_DIR, metrics, attempt_dir_name)
             attempt_records.append({"metrics": metrics, "metrics_path": metrics_path})
+
+            last_error_snapshot = e.state_snapshot
 
             next_h_init = h_init_used * dt_factor
             if attempt_index >= max_case_retries or next_h_init < dt_min:
@@ -527,9 +508,6 @@ def run_case(case: SimulationCase, dry_run: bool = False) -> Optional[Dict[str, 
                 "diagnosis": "Unexpected error - check logs for stack trace",
                 "recommended_action": "check logs",
             }
-            if attempt_initial_snapshot:
-                diagnostics["initial_state_snapshot"] = attempt_initial_snapshot
-                save_initial_state_snapshot(case, RESULTS_DIR, attempt_initial_snapshot, attempt_dir_name)
             save_diagnostics_attempt(case, RESULTS_DIR, diagnostics, attempt_dir_name)
             metrics_path = save_failed_metrics(case, RESULTS_DIR, metrics, attempt_dir_name)
             attempt_records.append({"metrics": metrics, "metrics_path": metrics_path})

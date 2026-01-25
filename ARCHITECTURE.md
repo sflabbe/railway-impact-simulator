@@ -651,5 +651,5 @@ CMD ["railway-sim", "ui"]
 ---
 
 **Architecture Version:** 1.0
-**Last Updated:** 2024-12-20
-**Maintained By:** Railway Impact Simulator Team
+**Last Updated:** 2025-12-20
+**Maintained By:** Sebastián Labbé

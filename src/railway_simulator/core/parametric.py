@@ -266,7 +266,7 @@ def make_envelope_figure(
     if not PLOTLY_AVAILABLE:
         raise ImportError(
             "Plotly is required for make_envelope_figure. "
-            "Install with: pip install plotly"
+            "Install/sync project dependencies, e.g. uv sync --all-extras --dev"
         )
 
     # Resolve column name

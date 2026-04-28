@@ -295,9 +295,8 @@ class BoucWenModel:
     def integrate_rk4(x0: float, u: float, h: float, A: float,
                       beta: float, gamma: float, n: int, uy: float) -> float:
         """4th-order Runge-Kutta integration for Bouc-Wen model."""
-        evolve = lambda x_val: BoucWenModel.evolution_rate(
-            x_val, u, A, beta, gamma, n, uy
-        )
+        def evolve(x_val: float) -> float:
+            return BoucWenModel.evolution_rate(x_val, u, A, beta, gamma, n, uy)
 
         k1 = evolve(x0)
         k2 = evolve(x0 + 0.5 * h * k1)
@@ -1319,8 +1318,6 @@ class ImpactSimulator:
             # IMPORTANT: energies are stored at *end* time levels t_{n+1}.
             # We still integrate power using the HHT-α evaluation point
             # (forces at t_{n+α}, velocities consistent with that).
-            q_new = q[:, step_idx + 1]
-            q_old = q[:, step_idx]
             v_new = qp[:, step_idx + 1]
             v_old = qp[:, step_idx]
 

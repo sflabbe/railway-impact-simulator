@@ -15,58 +15,100 @@ It provides:
 
 ---
 
-## 1. Installation
+## 1. Development setup
 
-### 1.1 Clone the repository
+This repository is managed with **uv**. The source of truth for dependencies is:
 
-```bash
-git clone https://github.com/sflabbe/railway-impact-simulator.git
-cd railway-impact-simulator
-```
+- `pyproject.toml` for declared runtime, optional UI, and development dependencies.
+- `uv.lock` for the resolved dependency set.
 
-### 1.2 Create a virtual environment (recommended)
+There is currently no `requirements.txt` source of truth in this repository. If a legacy requirements export is added later, it should be treated as a generated compatibility artifact, not as the primary dependency declaration.
+
+### 1.1 Install uv
 
 Linux / macOS / WSL:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Windows (PowerShell):
+Windows PowerShell:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Upgrade packaging tools:
+### 1.2 Clone and synchronize the development environment
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
+git clone https://github.com/sflabbe/railway-impact-simulator.git
+cd railway-impact-simulator
+uv sync --all-extras --dev
 ```
 
-### 1.3 Install the core package
+This creates and synchronizes the local `.venv` from `pyproject.toml` and `uv.lock`.
+
+### 1.3 Run basic checks
 
 ```bash
-python -m pip install .
+uv run railway-sim --help
+uv run pytest
+uv run ruff check .
 ```
 
-Check that the entry point is available:
+Equivalent Make targets are provided:
 
 ```bash
-railway-sim --help
+make sync
+make test
+make lint
+make smoke
 ```
 
-### 1.4 Install with UI extras
+`make typecheck` is intentionally only a notice target at the moment: `mypy` is not configured for this repo, so no strong typing gate is claimed.
 
-The UI dependencies are bundled as an extra named `ui`:
+### 1.4 Run the CLI
 
 ```bash
-python -m pip install ".[ui]"
+uv run railway-sim run \
+  --config configs/ice1_aluminum.yml \
+  --speed-kmh 80 \
+  --output-dir results/ice1_80 \
+  --ascii-plot
 ```
 
----
+### 1.5 Run the Streamlit UI
+
+The UI dependencies are installed by `uv sync --all-extras --dev` because the `ui` extra is included. Start the UI with:
+
+```bash
+uv run railway-sim ui
+```
+
+Open `http://127.0.0.1:8501` in your browser.
+
+### 1.6 Update dependencies
+
+Add runtime dependency:
+
+```bash
+uv add package-name
+```
+
+Add development dependency:
+
+```bash
+uv add --dev package-name
+```
+
+Update or regenerate the lockfile:
+
+```bash
+uv lock
+uv lock --check
+```
+
+Portable Windows bundle note: `tools/windows-portable/Build_Portable_Bundle.ps1` still bootstraps the Python embeddable distribution with pip. That path is retained as a legacy packaging fallback and is not the dependency source of truth.
 
 ## 2. Quickstart
 
@@ -236,10 +278,10 @@ The Streamlit app entry point is:
 
 - `src/railway_simulator/core/app.py`
 
-Start the UI after installing `.[ui]`:
+Start the UI after synchronizing the `ui` extra with uv:
 
 ```bash
-railway-sim ui
+uv run railway-sim ui
 ```
 
 Open `http://127.0.0.1:8501` (default) in your browser.

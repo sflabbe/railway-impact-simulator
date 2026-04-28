@@ -20,7 +20,6 @@ from railway_simulator.ui.st_compat import safe_button, safe_download_button, sa
 from railway_simulator.core.engine import run_simulation
 from railway_simulator.core.parametric import (
     build_speed_scenarios,
-    make_envelope_figure,
     run_parametric_envelope,
 )
 from railway_simulator.studies import parse_floats_csv

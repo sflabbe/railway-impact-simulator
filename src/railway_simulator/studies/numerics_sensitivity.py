@@ -11,7 +11,7 @@ This helps justify numerical choices in a thesis/report.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd

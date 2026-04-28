@@ -28,13 +28,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
-from matplotlib.backends.backend_pdf import PdfPages
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -482,12 +481,12 @@ def generate_comparison_contact_models():
     x = np.arange(len(model_names))
     colors = [COLORS.get(m, "#333333") for m in model_names]
 
-    bars1 = ax3.bar(x, peak_forces, color=colors)
+    ax3.bar(x, peak_forces, color=colors)
     ax3.set_xticks(x)
     ax3.set_xticklabels(model_names, rotation=45, ha="right", fontsize=8)
     ax3.set_ylabel("Peak Force [MN]")
 
-    bars2 = ax4.bar(x, durations, color=colors)
+    ax4.bar(x, durations, color=colors)
     ax4.set_xticks(x)
     ax4.set_xticklabels(model_names, rotation=45, ha="right", fontsize=8)
     ax4.set_ylabel("Contact Duration [ms]")

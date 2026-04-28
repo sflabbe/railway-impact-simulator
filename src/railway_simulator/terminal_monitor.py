@@ -1388,7 +1388,6 @@ class HtopLikeMonitor:
 
         # Footer
         win_txt = self._window_label()
-        view_txt = f"view {view_name}"
         contact_txt = "contact on" if self.show_contact_markers else "contact off"
         energy_txt = "norm" if self.energy_normalize else "abs"
         toast = self._maybe_toast(now)

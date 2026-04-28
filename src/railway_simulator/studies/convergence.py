@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from . import harmonize_time_grid, merge_with_engine_defaults, save_study_metadata, set_by_path
+from . import harmonize_time_grid, merge_with_engine_defaults, save_study_metadata
 
 
 SimFunc = Callable[[Dict[str, Any]], pd.DataFrame]

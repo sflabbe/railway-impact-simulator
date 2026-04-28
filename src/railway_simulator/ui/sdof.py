@@ -11,7 +11,6 @@ This module provides functions for:
 
 from __future__ import annotations
 
-from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
@@ -280,6 +279,8 @@ def compute_building_sdof_response(
     n_cycles_total = T_total / T_n if T_n > 0.0 else np.inf
     if n_cycles_total < 5.0:
         try:
+            import streamlit as st
+
             st.info(
                 f"Building SDOF: current simulation covers only "
                 f"{n_cycles_total:.1f} natural periods (Tₙ = {T_n:.2f} s). "

@@ -547,12 +547,15 @@ PyYAML          # Configuration files
 
 ### Development Dependencies
 
+Development tools are declared in `[dependency-groups].dev` in `pyproject.toml` and resolved in `uv.lock`.
+
 ```
 pytest          # Testing
-black           # Code formatting
-mypy            # Type checking
-ruff            # Linting
+pytest-cov      # Coverage reporting
+ruff            # Linting and formatting
 ```
+
+`mypy` is not currently configured as a repository gate; treat static typing as manual review until a baseline exists.
 
 ---
 
@@ -615,20 +618,25 @@ Large system (14 cars, 2s, dt=1e-4):
 ### Packaging
 
 ```bash
-# Build distribution
-python -m build
+# Synchronize local development environment
+uv sync --all-extras --dev
 
-# Install from wheel
-pip install dist/railway_simulator-1.0.0-py3-none-any.whl
+# Build distribution when a release artifact is needed
+uv build
+
+# Inspect/run from the locked environment
+uv run railway-sim --help
 ```
 
 ### Docker (Future)
 
 ```dockerfile
-FROM python:3.10-slim
-COPY . /app
-RUN pip install /app
-CMD ["railway-sim", "ui"]
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --all-extras --no-dev
+COPY . .
+CMD ["uv", "run", "--frozen", "railway-sim", "ui"]
 ```
 
 ---

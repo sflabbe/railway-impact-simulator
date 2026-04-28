@@ -25,47 +25,54 @@ This guide is for developers who want to contribute to, extend, or understand th
 git clone https://github.com/yourusername/railway-impact-simulator.git
 cd railway-impact-simulator
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install in editable mode with all dependencies
-pip install -e ".[ui,dev]"
+# Synchronize runtime, UI extras, and development tools from uv.lock
+uv sync --all-extras --dev
 ```
 
 ### Running Tests
 
 ```bash
 # Run all tests
-pytest tests/ -v
+uv run pytest tests/ -v
 
 # Run with coverage
-pytest tests/ --cov=src/railway_simulator --cov-report=html
+uv run pytest tests/ --cov=src/railway_simulator --cov-report=html
 
-# Run specific test file
-pytest tests/test_engine.py -v
+# Run a specific test file
+uv run pytest tests/test_config_loader.py -v
 
 # Run with live logging
-pytest tests/ -v --log-cli-level=INFO
+uv run pytest tests/ -v --log-cli-level=INFO
+```
+
+Equivalent Make target:
+
+```bash
+make test
 ```
 
 ### Code Quality Tools
 
 ```bash
-# Format code with black
-black src/ tests/
+# Lint
+uv run ruff check .
 
-# Sort imports
-isort src/ tests/
+# Format
+uv run ruff format .
 
-# Type checking
-mypy src/
+# Lockfile consistency
+uv lock --check
+```
 
-# Linting
-ruff check src/
+Equivalent Make targets:
 
-# All quality checks
-black src/ tests/ && isort src/ tests/ && mypy src/ && ruff check src/
+```bash
+make lint
+make format
+make lock-check
+```
+
+Type checking is not currently a configured gate. `make typecheck` prints a manual-review notice instead of pretending that a mypy baseline exists.
 ```
 
 ---
@@ -165,9 +172,8 @@ railway-impact-simulator/
 
 4. **Run tests and quality checks:**
    ```bash
-   pytest tests/ -v
-   black src/ tests/
-   mypy src/
+   uv run pytest tests/ -v
+   uv run ruff check .
    ```
 
 5. **Commit and push:**
@@ -192,7 +198,7 @@ railway-impact-simulator/
 
 3. **Verify no regressions:**
    ```bash
-   pytest tests/ -v  # All tests should pass
+   uv run pytest tests/ -v  # All tests should pass
    ```
 
 4. **Document the fix:**
@@ -211,7 +217,7 @@ We follow **PEP 8** with some modifications:
 - **Line length:** 100 characters (not 79)
 - **Docstring format:** NumPy style
 - **Type hints:** Required for all public APIs
-- **Imports:** Organized with `isort`
+- **Imports:** Keep imports organized; current automated gate is `ruff`, not a separate `isort` command
 
 ### Naming Conventions
 

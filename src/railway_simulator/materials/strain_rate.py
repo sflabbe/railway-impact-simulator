@@ -12,7 +12,6 @@ Concrete DIFs below follow the conservative empirical laws used in your
 """
 from __future__ import annotations
 
-import math
 
 
 def concrete_dif_compression(strain_rate_s: float) -> float:

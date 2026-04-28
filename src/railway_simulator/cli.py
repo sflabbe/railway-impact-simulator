@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -38,7 +37,7 @@ app = typer.Typer(
 )
 
 # Studies commands (convergence / sensitivity / fixed DIF, etc.)
-from .studies.cli import register_study_commands
+from .studies.cli import register_study_commands  # noqa: E402
 register_study_commands(app)
 
 # ----------------------------------------------------------------------
@@ -64,7 +63,7 @@ def ui(
     except Exception:
         raise typer.BadParameter(
             "Streamlit is not installed. Install UI extras with:\n\n"
-            "  pip install 'railway-impact-simulator[ui]'\n"
+            "  uv sync --extra ui\n\nOr, for development, run:\n\n  uv sync --all-extras --dev\n"
         )
 
     cmd = [

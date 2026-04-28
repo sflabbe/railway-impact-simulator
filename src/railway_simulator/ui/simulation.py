@@ -10,7 +10,6 @@ Provides the main simulation execution logic and results visualization including
 
 from __future__ import annotations
 
-import time
 from typing import Any, Dict
 
 import numpy as np
@@ -25,14 +24,6 @@ from railway_simulator.config.presets import (
     resolve_partner_preset,
     resolve_interface_preset,
 )
-from railway_simulator.core.parametric import (
-    build_speed_scenarios,
-    make_envelope_figure,
-    run_parametric_envelope,
-)
-from railway_simulator.studies import parse_floats_csv
-from railway_simulator.studies.numerics_sensitivity import run_numerics_sensitivity
-from railway_simulator.studies.strain_rate_sensitivity import run_fixed_dif_sensitivity
 
 # Import from other UI modules
 from .export import to_excel
@@ -702,7 +693,6 @@ def execute_simulation(params: Dict[str, Any], run_new: bool = False):
 
                         # Energy (area under curve)
                         try:
-                            import numpy as _np
                             E = 0.0
                             for (x0, f0), (x1, f1) in zip(pts[:-1], pts[1:]):
                                 E += 0.5 * (float(f0) + float(f1)) * (float(x1) - float(x0))

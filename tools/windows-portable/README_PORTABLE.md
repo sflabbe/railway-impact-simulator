@@ -33,3 +33,8 @@ Output:
 - If the build machine has restricted internet, you can pre-download:
   - `python-<ver>-embed-<arch>.zip` into `dist_portable\`
   - `get-pip.py` into `dist_portable\`
+
+
+## Dependency source of truth
+
+The normal development workflow uses uv (`pyproject.toml` + `uv.lock`). This portable builder still uses pip internally because it bootstraps the Windows Python embeddable distribution. Treat it as a legacy packaging fallback; do not edit it as the primary dependency declaration.

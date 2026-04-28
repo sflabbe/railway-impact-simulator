@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
-import pandas as pd
 import streamlit as st
 import yaml
 
@@ -710,21 +709,21 @@ def build_train_geometry_ui() -> Dict[str, Any]:
             on_change=_invalidate_sim_cache,
         )
 
-        use_time = st.checkbox(
+        st.checkbox(
             "Use time/integration values from YAML (v0_init, T_max, h_init, α, tol, ...)",
             value=bool(st.session_state.get("yaml_use_time", True)),
             disabled=apply_full,
             key="yaml_use_time",
             on_change=_invalidate_sim_cache,
         )
-        use_material = st.checkbox(
+        st.checkbox(
             "Use train material values from YAML (fy/uy/Bouc–Wen)",
             value=bool(st.session_state.get("yaml_use_material", True)),
             disabled=apply_full,
             key="yaml_use_material",
             on_change=_invalidate_sim_cache,
         )
-        use_contact = st.checkbox(
+        st.checkbox(
             "Use contact/friction values from YAML (k_wall/contact model/μ)",
             value=bool(st.session_state.get("yaml_use_contact", True)),
             disabled=apply_full,
@@ -967,11 +966,11 @@ def build_contact_friction_ui() -> Dict[str, Any]:
                     "Height (m)", 0.1, 5.0, 0.5, 0.1, help="Rectangular section height"
                 )
 
-                I = (width_m * height_m ** 3) / 12.0
-                st.write(f"I = bh³/12 = {I:.6e} m⁴")
+                second_moment_area = (width_m * height_m ** 3) / 12.0
+                st.write(f"I = bh³/12 = {second_moment_area:.6e} m⁴")
 
             E_Pa = E_GPa * 1e9
-            k_eff = (6 * E_Pa * I) / (x_m ** 2 * (3 * a_m - x_m))
+            k_eff = (6 * E_Pa * second_moment_area) / (x_m ** 2 * (3 * a_m - x_m))
             k_eff_MN_m = k_eff / 1e6
 
             st.success(f"**Calculated k_eff = {k_eff_MN_m:.2f} MN/m**")

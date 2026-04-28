@@ -4,6 +4,7 @@ Plotting utilities for the Railway Impact Simulator UI.
 Provides comprehensive visualization functions for simulation results.
 """
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots

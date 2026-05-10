@@ -27,6 +27,11 @@ from .sdof import (
     termination_ratio,
     force_history_is_terminated,
 )
+from .engine_bridge import (
+    build_one_mass_hooke_engine_params,
+    extract_engine_force_history,
+    equivalent_static_force_from_engine_df,
+)
 
 __all__ = [
     "kmh_to_ms",
@@ -49,4 +54,7 @@ __all__ = [
     "compute_response_spectrum",
     "termination_ratio",
     "force_history_is_terminated",
+    "build_one_mass_hooke_engine_params",
+    "extract_engine_force_history",
+    "equivalent_static_force_from_engine_df",
 ]

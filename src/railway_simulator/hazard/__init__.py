@@ -32,6 +32,12 @@ from .engine_bridge import (
     extract_engine_force_history,
     equivalent_static_force_from_engine_df,
 )
+from .montecarlo import (
+    MCParams,
+    forward_mc,
+    inverse_iso_demand_region,
+    sample_mc_scenarios,
+)
 
 __all__ = [
     "kmh_to_ms",
@@ -57,4 +63,8 @@ __all__ = [
     "build_one_mass_hooke_engine_params",
     "extract_engine_force_history",
     "equivalent_static_force_from_engine_df",
+    "MCParams",
+    "forward_mc",
+    "inverse_iso_demand_region",
+    "sample_mc_scenarios",
 ]

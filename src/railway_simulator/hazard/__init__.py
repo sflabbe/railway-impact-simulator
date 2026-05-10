@@ -21,6 +21,12 @@ from .metamodel import (
     fit_power_law,
     PowerLawCoeffs,
 )
+from .sdof import (
+    equivalent_static_force_sdof,
+    compute_response_spectrum,
+    termination_ratio,
+    force_history_is_terminated,
+)
 
 __all__ = [
     "kmh_to_ms",
@@ -39,4 +45,8 @@ __all__ = [
     "power_law_feq",
     "fit_power_law",
     "PowerLawCoeffs",
+    "equivalent_static_force_sdof",
+    "compute_response_spectrum",
+    "termination_ratio",
+    "force_history_is_terminated",
 ]

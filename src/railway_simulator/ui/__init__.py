@@ -1,48 +1,49 @@
+"""UI package for the Railway Impact Simulator Streamlit application.
+
+The package intentionally uses lazy attribute imports.  Some modules require the
+optional ``streamlit`` dependency, while lightweight helpers such as SRS plotting
+are useful in tests and non-UI contexts.
 """
-UI package for the Railway Impact Simulator Streamlit application.
 
-This package provides modular components for the web-based user interface,
-organized by functionality for better maintainability and testing.
-"""
+from __future__ import annotations
 
-from .about import display_citation, display_header
-from .export import to_excel
-from .parameters import build_parameter_ui
-from .plotting import create_results_plots
-from .sdof import (
-    compute_building_sdof_response,
-    compute_force_response_spectrum,
-    compute_multi_damping_force_response_spectrum,
-    create_building_animation,
-    create_building_hysteresis_plot,
-    create_building_response_plots,
-    create_multi_damping_response_spectrum_plot,
-    create_response_spectrum_plot,
-)
-from .simulation import execute_simulation
-from .train_geometry import create_train_geometry_plot
+from importlib import import_module
+from typing import Any
 
-__all__ = [
+_LAZY_EXPORTS = {
     # About page
-    "display_header",
-    "display_citation",
+    "display_header": (".about", "display_header"),
+    "display_citation": (".about", "display_citation"),
     # Export
-    "to_excel",
+    "to_excel": (".export", "to_excel"),
     # Plotting
-    "create_results_plots",
+    "create_results_plots": (".plotting", "create_results_plots"),
     # SDOF
-    "compute_building_sdof_response",
-    "compute_force_response_spectrum",
-    "compute_multi_damping_force_response_spectrum",
-    "create_building_animation",
-    "create_building_hysteresis_plot",
-    "create_building_response_plots",
-    "create_multi_damping_response_spectrum_plot",
-    "create_response_spectrum_plot",
+    "compute_building_sdof_response": (".sdof", "compute_building_sdof_response"),
+    "compute_force_response_spectrum": (".sdof", "compute_force_response_spectrum"),
+    "compute_multi_damping_force_response_spectrum": (".sdof", "compute_multi_damping_force_response_spectrum"),
+    "create_building_animation": (".sdof", "create_building_animation"),
+    "create_building_hysteresis_plot": (".sdof", "create_building_hysteresis_plot"),
+    "create_building_response_plots": (".sdof", "create_building_response_plots"),
+    "create_multi_damping_response_spectrum_plot": (".sdof", "create_multi_damping_response_spectrum_plot"),
+    "create_response_spectrum_plot": (".sdof", "create_response_spectrum_plot"),
     # Train geometry
-    "create_train_geometry_plot",
+    "create_train_geometry_plot": (".train_geometry", "create_train_geometry_plot"),
     # Parameters
-    "build_parameter_ui",
+    "build_parameter_ui": (".parameters", "build_parameter_ui"),
     # Simulation
-    "execute_simulation",
-]
+    "execute_simulation": (".simulation", "execute_simulation"),
+}
+
+__all__ = list(_LAZY_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        module_name, attr_name = _LAZY_EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    module = import_module(module_name, __name__)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value

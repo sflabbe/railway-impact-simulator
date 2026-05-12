@@ -39,6 +39,8 @@ app = typer.Typer(
 # Studies commands (convergence / sensitivity / fixed DIF, etc.)
 from .studies.cli import register_study_commands  # noqa: E402
 register_study_commands(app)
+from .workbench_cli import register_workbench_commands  # noqa: E402
+register_workbench_commands(app)
 
 # ----------------------------------------------------------------------
 # Constants
@@ -55,7 +57,7 @@ def ui(
     headless: bool = typer.Option(False, help="Run Streamlit in headless mode."),
 ) -> None:
     """Launch the Streamlit UI (requires the optional 'ui' dependencies)."""
-    app_py = Path(__file__).resolve().parent / "core" / "app.py"
+    app_py = Path(__file__).resolve().parent / "ui" / "app.py"
 
     # Provide a friendly error if streamlit isn't installed
     try:

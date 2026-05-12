@@ -142,7 +142,7 @@ class ContactModels:
             Typical values: 0.3-0.8 for structural impacts.
         model : str
             Name of the contact model to use. Must be one of the keys in
-            ContactModels.MODELS. Default fallback is "anagnostopoulos".
+            ContactModels.MODELS. Unknown names raise ValueError.
 
         Returns
         -------
@@ -186,15 +186,19 @@ class ContactModels:
             return R
 
         d = delta[mask]
-        dv = du[mask]
-        v0m = v0_arr[mask]
+
+        # Damping models are written in terms of signed penetration rate
+        # and positive approach speed.  With the engine convention
+        # u_contact = q_x < 0 in contact, the signed penetration rate is
+        # delta_dot = -qdot_x = -du_contact.  It is positive during approach
+        # and negative during restitution, so dissipative models can reduce
+        # the force on rebound.  Only the final force is clamped to enforce
+        # unilateral compression.
+        dv = -du[mask]
+        v0m = np.abs(v0_arr[mask])
 
         # Prevent division by zero in damping terms
-        v0m = np.where(
-            np.abs(v0m) < 1e-8,
-            np.sign(v0m) * 1e-8 + (v0m == 0) * 1e-8,
-            v0m,
-        )
+        v0m = np.where(v0m < 1e-8, 1e-8, v0m)
 
         model_lower = model.lower()
 
@@ -206,11 +210,10 @@ class ContactModels:
                 R_tab[idx] = -contact_law.evaluate(float(dval))
             return R_tab
 
-        # Get model function (default to anagnostopoulos if not found)
-        model_func = ContactModels.MODELS.get(
-            model_lower,
-            ContactModels.MODELS["anagnostopoulos"],
-        )
+        if model_lower not in ContactModels.MODELS:
+            raise ValueError(f"Unknown contact model: {model}")
+
+        model_func = ContactModels.MODELS[model_lower]
 
         # Raw model force: negative = compression, positive = tension
         R_raw = model_func(k_wall, d, cr_wall, dv, v0m)

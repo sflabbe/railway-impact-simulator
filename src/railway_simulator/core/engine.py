@@ -35,6 +35,7 @@ import pandas as pd
 from scipy.constants import g as GRAVITY
 
 from .contact import ContactModels
+from .contact_state import ContactState
 from .friction import FrictionModels
 from .integrator import HHTAlphaIntegrator
 
@@ -707,7 +708,7 @@ class ImpactSimulator:
         z_friction = np.zeros((n, p.step + 1))
 
         # Contact tracking
-        contact_active = False
+        contact_active = np.zeros(n, dtype=bool)
         v0_contact = np.ones(dof)
 
         # Normal forces for friction (per node)
@@ -766,9 +767,10 @@ class ImpactSimulator:
             # Initialize v0_contact for approaching x-DOFs that are in contact
             mask = (q[:n, 0] < 0.0) & (qp[:n, 0] < 0.0)
             if np.any(mask):
-                contact_active = True
-                v0_contact[:n] = np.where(mask, qp[:n, 0], 1.0)
+                contact_active[mask] = True
+                v0_contact[:n] = np.where(mask, np.abs(qp[:n, 0]), 1.0)
                 v0_contact[:n][v0_contact[:n] == 0.0] = 1.0
+            du_contact0[:n] = np.where(u_contact[:n, 0] < 0.0, qp[:n, 0], 0.0)
             R0 = ContactModels.compute_force(
                 u_contact[:, 0],
                 du_contact0,
@@ -864,7 +866,7 @@ class ImpactSimulator:
                 )
                 Cv_old = self.C @ v_n
 
-                contact_active_prev = bool(contact_active)
+                contact_active_prev = np.asarray(contact_active, dtype=bool).copy()
                 v0_contact_prev = v0_contact.copy()
 
                 def _av_from_q(q_trial: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -977,17 +979,21 @@ class ImpactSimulator:
                     # --- Wall contact (unilateral) ---
                     u_c_new = np.zeros_like(u_c_old)
                     u_c_new[:n] = np.where(q_trial[:n] < 0.0, q_trial[:n], 0.0)
-                    du_c = (u_c_new - u_c_old) / h
+                    # Use the converged/trial velocity state as contact velocity.
+                    # Since u_contact = q_x, du_contact = qdot_x.  ContactModels
+                    # converts this to positive penetration rate internally.
+                    du_c = np.zeros_like(u_c_new)
+                    du_c[:n] = np.where(u_c_new[:n] < 0.0, v_trial[:n], 0.0)
 
-                    v0_eff = v0_contact_prev.copy()
-                    contact_active_new = contact_active_prev
+                    state_prev = ContactState.coerce(
+                        contact_active_prev,
+                        v0_contact_prev,
+                        n_masses=n,
+                    )
+                    state_new = state_prev.update(q_trial, v_trial, n_masses=n)
+                    v0_eff = state_new.v0_contact
+                    contact_active_new = state_new.active
                     if np.any(u_c_new[:n] < 0.0):
-                        if (not contact_active_prev) and np.any(du_c[:n] < 0.0):
-                            contact_active_new = True
-                            mask = du_c[:n] < 0.0
-                            v0_eff[:n] = np.where(mask, du_c[:n], 1.0)
-                            v0_eff[:n][v0_eff[:n] == 0.0] = 1.0
-
                         R_raw = ContactModels.compute_force(
                             u_c_new,
                             du_c,
@@ -999,10 +1005,6 @@ class ImpactSimulator:
                         )
                         R_cont_new = -R_raw
                     else:
-                        # Loss of contact
-                        if np.any(u_c_old[:n] < 0.0):
-                            contact_active_new = False
-                            v0_eff = np.ones_like(v0_eff)
                         R_cont_new = np.zeros(dof)
 
                     # --- Mass-to-mass contact (penalty) ---
@@ -1092,7 +1094,7 @@ class ImpactSimulator:
                     # newton_jacobian_mode:
                     #   - 'per_step': build once per time step (modified Newton; fast)
                     #   - 'each_iter': rebuild each Newton iteration (pure FD Newton; slow)
-                    contact_now = bool(state0.get("contact_active", False))
+                    contact_now = bool(np.any(state0.get("contact_active", False)))
                     if contact_cache is None:
                         contact_cache = contact_now
                     elif contact_now != contact_cache:
@@ -1149,7 +1151,7 @@ class ImpactSimulator:
                 u_contact[:, step_idx + 1] = state_last["u_contact"]
                 X_bw[:, step_idx + 1] = state_last["X_bw"]
                 z_friction[:, step_idx + 1] = state_last["z_friction"]
-                contact_active = bool(state_last["contact_active"])
+                contact_active = np.asarray(state_last["contact_active"], dtype=bool).copy()
                 v0_contact = state_last["v0_contact"]
 
                 if not converged:
@@ -1580,7 +1582,7 @@ class ImpactSimulator:
                                 "solver": str(getattr(p, "solver", "newton")),
                                 "iters": int(iters_hist[step_idx]),
                                 "max_residual": float(self.max_residual),
-                                "contact_active": bool(contact_active),
+                                "contact_active": bool(np.any(contact_active)),
                                 "impact_force_MN": float(F0 / 1e6),
                                 "penetration_mm": float(-u0 * 1000.0),
                                 "velocity_m_s": float(qp[0, step_idx + 1]),
@@ -1783,63 +1785,39 @@ class ImpactSimulator:
             qp: np.ndarray,
             u_contact: np.ndarray,
             R_contact: np.ndarray,
-            contact_active: bool,
+            contact_active: np.ndarray,
             v0_contact: np.ndarray,
-        ) -> Tuple[bool, np.ndarray]:
-            """Compute contact forces at wall and update contact state."""
+        ) -> Tuple[np.ndarray, np.ndarray]:
+            """Compute wall contact forces and update per-mass contact state.
+
+            Contact state and initial approach speed are tracked per x-DOF.
+            The dissipative contact laws are evaluated with the converged
+            velocity state, not with a finite difference of penetration.
+            """
             p = self.params
             n = p.n_masses
             dof = 2 * n
 
-            u_contact[:, step_idx + 1] = 0.0
+            state_prev = ContactState.coerce(contact_active, v0_contact, n_masses=n)
+            state_new = state_prev.update(q, qp, n_masses=n)
+            kinematics = ContactState.kinematics(q, qp, n_masses=n)
 
-            # Always define R to avoid unbound-local errors when contact persists
-            R = np.zeros(dof)
+            u_contact[:, step_idx + 1] = kinematics.u_contact
+            R_contact[:, step_idx + 1] = 0.0
 
-            # Check for contact (x < 0)
-            if np.any(q[:n] < 0.0):
-                for i in range(n):
-                    if q[i] < 0.0:
-                        u_contact[i, step_idx + 1] = q[i]
-
-                if step_idx > 0:
-                    du_contact = (u_contact[:, step_idx + 1] -
-                                  u_contact[:, step_idx]) / self.h
-                else:
-                    du_contact = np.zeros(dof)
-
-                # Engage contact as soon as penetration exists.
-                # Capture v0 on the *first* approach into contact.
-                if (not contact_active) and np.any(du_contact[:n] < 0.0):
-                    contact_active = True
-                    # Only set v0 for x-DOFs that are actually approaching
-                    mask_contact_x = du_contact[:n] < 0.0
-                    v0_contact[:n] = np.where(mask_contact_x, du_contact[:n], 1.0)
-                    v0_contact[:n][v0_contact[:n] == 0.0] = 1.0
-                elif not contact_active:
-                    # Penetration with zero/positive du (e.g., initial penetration)
-                    # should still be treated as active contact.
-                    contact_active = True
-
-                # Compute contact forces on every step during penetration
+            if np.any(kinematics.u_contact[:n] < 0.0):
                 R = ContactModels.compute_force(
                     u_contact[:, step_idx + 1],
-                    du_contact,
-                    v0_contact,
+                    kinematics.du_contact,
+                    state_new.v0_contact,
                     p.k_wall,
                     p.cr_wall,
                     p.contact_model,
                     contact_law=p.contact_law,
                 )
-
                 R_contact[:, step_idx + 1] = -R
 
-            # Loss of contact
-            elif step_idx > 0 and np.any(u_contact[:n, step_idx] < 0.0):
-                contact_active = False
-                v0_contact = np.ones_like(v0_contact)
-
-            return contact_active, v0_contact
+            return state_new.active, state_new.v0_contact
 
     def _compute_mass_contact(
         self,

@@ -32,6 +32,8 @@ from railway_simulator.ui import (
     execute_simulation,
 )
 
+from railway_simulator.ui.project_workbench import render_project_workbench
+
 from railway_simulator.ui.export import (
     make_bundle_zip,
     sanitize_filename,
@@ -274,8 +276,8 @@ def main():
     # Sidebar parameter UI is shared across all tabs
     params = build_parameter_ui()
 
-    tab_sim, tab_param, tab_about = st.tabs(
-        ["Simulator", "Parametric Studies", "About / Documentation"]
+    tab_sim, tab_param, tab_project, tab_about = st.tabs(
+        ["Simulator", "Parametric Studies", "Project Workbench", "About / Documentation"]
     )
 
     # --------------------------------------------------------------
@@ -2237,7 +2239,15 @@ def main():
                         st.warning(f"Bundle export not available: {exc}")
 
 
-# ABOUT / DOCUMENTATION TAB
+    # --------------------------------------------------------------
+    # PROJECT WORKBENCH TAB
+    # --------------------------------------------------------------
+    with tab_project:
+        render_project_workbench(params)
+
+
+    # --------------------------------------------------------------
+    # ABOUT / DOCUMENTATION TAB
     # --------------------------------------------------------------
     with tab_about:
         display_header()

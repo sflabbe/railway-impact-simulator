@@ -51,6 +51,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+railway_simulator = ["persistence/schema.sql"]
+
 
 [dependency-groups]
 dev = [

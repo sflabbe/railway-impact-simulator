@@ -25,8 +25,6 @@ from railway_simulator.core.engine import run_simulation
 
 from .parametric_grid import (
     ParametricScenario,
-    apply_scenario_to_config,
-    build_parametric_scenarios,
     preview_parametric_grid,
     run_parametric_grid_in_memory,
 )

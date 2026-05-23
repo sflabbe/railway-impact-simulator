@@ -23,7 +23,6 @@ from railway_simulator.config.loader import (
     load_simulation_config,
 )
 from railway_simulator.domain.scenario import Scenario
-from railway_simulator.domain.spectrum import SRSSettings
 from railway_simulator.domain.study import StudyDefinition
 from railway_simulator.persistence.database import ProjectDatabase, initialize_project_database
 from railway_simulator.persistence.repositories import (

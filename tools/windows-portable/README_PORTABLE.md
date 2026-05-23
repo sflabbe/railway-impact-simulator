@@ -25,6 +25,27 @@ Output:
    - `Example_Run_ICE1_80kmh.bat` (one example run)
    - `Run_CLI.bat` (opens a terminal with the right PATH)
    - `Run_UI.bat` (Streamlit UI at http://127.0.0.1:8501) — only if you built with UI
+## Smoke-test the portable bundle
+
+After building, run from the repo root:
+
+```powershell
+.\TEST_PORTABLE_BUNDLE.cmd
+```
+
+or directly:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\windows-portable\Test_Portable_Bundle.ps1
+```
+
+This does **not** run pytest inside `dist_portable\RIS_Portable\python\Lib\site-packages`.
+That directory contains third-party package test suites, which require their own optional
+test dependencies and upstream fixtures. The portable smoke test instead verifies the
+actual distribution contract: embedded Python starts, runtime packages import,
+`railway-sim --help` works, one bundled example simulation runs, and the parametric
+grid dry-run works.
+
 
 ## Notes
 

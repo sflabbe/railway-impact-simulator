@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from railway_simulator.domain.spectrum import SRSSettings
 from railway_simulator.persistence.database import ProjectDatabase, initialize_project_database
 from railway_simulator.persistence.repositories import (
     ConfigSnapshotRepository,

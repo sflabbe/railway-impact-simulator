@@ -1796,8 +1796,6 @@ class ImpactSimulator:
             """
             p = self.params
             n = p.n_masses
-            dof = 2 * n
-
             state_prev = ContactState.coerce(contact_active, v0_contact, n_masses=n)
             state_new = state_prev.update(q, qp, n_masses=n)
             kinematics = ContactState.kinematics(q, qp, n_masses=n)

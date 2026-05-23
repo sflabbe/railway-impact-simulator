@@ -559,7 +559,7 @@ def make_response_grid(df: pd.DataFrame) -> pd.DataFrame:
         zug = sub[sub["mode"] == "Zug_full"]
         if lok.empty or zug.empty:
             continue
-        l = lok.iloc[0]
+        lok_row = lok.iloc[0]
         z = zug.iloc[0]
         rows.append(
             {
@@ -569,9 +569,9 @@ def make_response_grid(df: pd.DataFrame) -> pd.DataFrame:
                 "beta_eff_deg": z["beta_eff_deg"],
                 "vimp_kmh": z["vimp_kmh"],
                 "vn_ms": z["vn_ms"],
-                "Fpeak_Lok_solo_MN": l["Fpeak_MN"],
+                "Fpeak_Lok_solo_MN": lok_row["Fpeak_MN"],
                 "Fpeak_Zug_full_MN": z["Fpeak_MN"],
-                "Feq_100ms_Lok_solo_MN": l["Feq_100ms_MN"],
+                "Feq_100ms_Lok_solo_MN": lok_row["Feq_100ms_MN"],
                 "Feq_100ms_Zug_full_MN": z["Feq_100ms_MN"],
                 "Fpeak_ratio": z["Fpeak_ratio"],
                 "Feq_ratio": z["Feq_ratio"],
@@ -736,7 +736,7 @@ def write_markdown_outputs(
     else:
         max_fpeak_ratio = successful_grid.loc[successful_grid["Fpeak_ratio"].idxmax()]
         max_feq_ratio = successful_grid.loc[successful_grid["Feq_ratio"].idxmax()]
-        sig = successful_grid[successful_grid["significant_train_effect"] == True]
+        sig = successful_grid[successful_grid["significant_train_effect"]]
         summary_lines.append(
             f"- Maximum Fpeak ratio: {max_fpeak_ratio['Fpeak_ratio']:.3f} "
             f"({max_fpeak_ratio['Fahrzeug']}, a={max_fpeak_ratio['a_m']} m, v0={max_fpeak_ratio['v0_kmh']} km/h).\n"

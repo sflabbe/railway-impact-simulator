@@ -6,10 +6,8 @@ from railway_simulator.domain.result import SimulationRun
 from railway_simulator.domain.scenario import Scenario
 from railway_simulator.domain.spectrum import SRSCurve
 from railway_simulator.domain.study import StudyDefinition
-from railway_simulator.persistence.database import initialize_project_database
 from railway_simulator.persistence.repositories import (
     ConfigSnapshotRepository,
-    ProjectRepository,
     SpectrumRepository,
     StudyRepository,
 )

@@ -65,8 +65,40 @@ dev = [
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+extend-exclude = [
+  "dist_portable",
+  "RailwayImpactSimulator_Portable_Windows",
+  # Historical/debug scripts are kept as engineering scratchpads. They are
+  # still covered by compileall, but production linting is scoped to package,
+  # tests, docs, configs, and maintained scripts.
+  "tools/debug_traxx_mass_contact.py",
+  "tools/run_traxx_debug_final.py",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Legacy scripts insert repo paths before importing the package so they remain
+# executable outside an installed environment. Keep that compatibility pattern.
+"scripts/legacy/*.py" = ["E402"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+norecursedirs = [
+  ".git",
+  ".hg",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  "venv",
+  "build",
+  "dist",
+  "dist_portable",
+  "RailwayImpactSimulator_Portable_Windows",
+  "*.egg-info",
+]
 markers = [
   "slow: marks tests as slow (deselect with '-m not slow')",
 ]

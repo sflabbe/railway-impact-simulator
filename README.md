@@ -6,9 +6,10 @@ HHT-α railway impact simulator with Bouc–Wen hysteresis, inspired by the dyna
 It provides:
 
 - A command line interface (**`railway-sim`**) for single runs and studies (speed mixes + envelopes, sensitivity, convergence)
-- CSV output for post‑processing
+- YAML-defined custom parametric grids for reproducible mini studies and chapter studies
+- CSV / JSON output for post‑processing, plus SQLite-backed Project Workbench runs
 - Optional ASCII plots for headless terminals (SSH, Termux, containers)
-- Optional Streamlit-based UI/dashboard (extra deps)
+- Optional Streamlit-based UI/dashboard with Project Workbench and parametric-study launcher (extra deps)
 
 > ⚠️ Python: **≥ 3.10** (project metadata).  
 > ⚠️ On very new Python versions (e.g. 3.13), some scientific wheels may not be available on all platforms yet.
@@ -85,7 +86,13 @@ The UI dependencies are installed by `uv sync --all-extras --dev` because the `u
 uv run railway-sim ui
 ```
 
-Open `http://127.0.0.1:8501` in your browser.
+If you synchronized only the default environment, run with the UI extra explicitly:
+
+```bash
+uv run --extra ui streamlit run src/railway_simulator/core/app.py
+```
+
+Open `http://127.0.0.1:8501` in your browser. The Project Workbench includes a **Parametric studies** section for loading YAML study specs, previewing scenarios, running limited mini grids, inspecting warnings, plotting peak-force summaries, and downloading CSV/HTML outputs.
 
 ### 1.6 Update dependencies
 
@@ -167,7 +174,40 @@ railway-sim parametric \
   --ascii-plot
 ```
 
-### 3.3 Convergence study
+### 3.3 Custom parametric grid from YAML
+
+Custom studies are defined in `configs/studies/*.yml` and can be previewed before running. The minimal smoke-test study is:
+
+```bash
+uv run railway-sim study run-grid \
+  --spec configs/studies/impact_parametric_mini.yml \
+  --dry-run
+```
+
+Run only the first scenario and export a summary:
+
+```bash
+uv run railway-sim study run-grid \
+  --spec configs/studies/impact_parametric_mini.yml \
+  --limit 1 \
+  --out build/parametric_summary.csv
+```
+
+Persist the same run into a Project Workbench SQLite database:
+
+```bash
+uv run railway-sim study run-grid \
+  --spec configs/studies/impact_parametric_mini.yml \
+  --db projects/impact_workbench/project.sqlite \
+  --limit 1 \
+  --out build/parametric_persistent_summary.csv
+```
+
+The summary contains one row per scenario, scenario metadata, extracted peak metrics when available, and a `warnings` column. Solver warnings are intentionally kept visible even when the scenario status is `ok`.
+
+For the full workflow, YAML format, SQLite mapping, UI usage, and CSV/HTML exports, see `docs/PARAMETRIC_STUDIES.md`.
+
+### 3.4 Convergence study
 
 ```bash
 railway-sim convergence \
@@ -177,7 +217,7 @@ railway-sim convergence \
   --out results_parametric/convergence
 ```
 
-### 3.4 Live terminal monitor
+### 3.5 Live terminal monitor
 
 The live terminal monitor provides a full-screen progress view with live plots while a simulation runs.
 It is designed for headless terminals, including SSH sessions.
@@ -262,7 +302,7 @@ h_init: 1.0e-4    # [s] timestep
 
 ```
 .
-├── configs/   # YAML example configs (ICE1, TRAXX, etc.)
+├── configs/   # YAML example configs (ICE1, TRAXX, etc.) and configs/studies/*.yml
 ├── docs/      # Documentation and reports
 ├── examples/  # Scripts and worked examples
 ├── src/       # Library + CLI implementation
@@ -284,7 +324,13 @@ Start the UI after synchronizing the `ui` extra with uv:
 uv run railway-sim ui
 ```
 
-Open `http://127.0.0.1:8501` (default) in your browser.
+Or explicitly request the UI extra:
+
+```bash
+uv run --extra ui streamlit run src/railway_simulator/core/app.py
+```
+
+Open `http://127.0.0.1:8501` (default) in your browser. In **Project Workbench → Parametric studies**, use `configs/studies/impact_parametric_mini.yml` for the first smoke test. The UI supports scenario preview, limited execution, SQLite persistence, summary tables, solver-warning display, peak-force chart data, and CSV/HTML downloads.
 
 ---
 
@@ -293,6 +339,7 @@ Open `http://127.0.0.1:8501` (default) in your browser.
 - `PROJECT_SUMMARY.md` – overview / roadmap
 - `ARCHITECTURE.md` – system design notes
 - `DEVELOPER_GUIDE.md` – developer notes and local workflows
+- `docs/PARAMETRIC_STUDIES.md` – YAML parametric grids, CLI/UI workflows, SQLite persistence, and exports
 - `VALIDATION_Pioneer.md` – validation notes
 - `CITATION_REFERENCE.md` – citation/reference notes
 

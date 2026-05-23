@@ -23,7 +23,10 @@ def extract_run_metrics(df: pd.DataFrame) -> list[tuple[str, float, str]]:
         metrics.append(("Fpeak", float(np.nanmax(force)), "MN"))
         if "Time_s" in df.columns and len(force) >= 2:
             t = df["Time_s"].to_numpy(dtype=float)
-            impulse = float(np.trapz(np.nan_to_num(force), t))
+            integrate_trapezoid = getattr(np, "trapezoid", None)
+            if integrate_trapezoid is None:
+                integrate_trapezoid = np.trapz
+            impulse = float(integrate_trapezoid(np.nan_to_num(force), t))
             metrics.append(("Impulse", impulse, "MN*s"))
     if "Penetration_mm" in df.columns:
         metrics.append(("Penetration_max", float(np.nanmax(df["Penetration_mm"].to_numpy(dtype=float))), "mm"))

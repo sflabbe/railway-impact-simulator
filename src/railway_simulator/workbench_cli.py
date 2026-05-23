@@ -44,6 +44,10 @@ from railway_simulator.studies.parametric_grid_cli import (
     write_records,
 )
 from railway_simulator.studies.parametric_grid_io import ParametricGridYAMLError
+from railway_simulator.studies.parametric_grid_persistence import (
+    preview_parametric_grid_persistent_target,
+    run_parametric_grid_persistent,
+)
 from railway_simulator.reporting import build_latex_chapter
 
 project_app = typer.Typer(help="Create and inspect persistent project workspaces.")
@@ -392,6 +396,17 @@ def study_run_grid(
     limit: int | None = typer.Option(None, "--limit", min=0, help="Run or preview only the first N scenarios."),
     strict: bool = typer.Option(False, "--strict", help="Fail immediately when one scenario fails."),
     out: Path | None = typer.Option(None, "--out", "-o", help="Optional summary/preview output path."),
+    db: Path | None = typer.Option(None, "--db", help="Optional project.sqlite path for persistent runs."),
+    project_name: str | None = typer.Option(
+        None,
+        "--project-name",
+        help="Project name to create or reuse when --db is provided.",
+    ),
+    study_name: str | None = typer.Option(
+        None,
+        "--study-name",
+        help="Study name override when --db is provided.",
+    ),
     output_format: GridExportFormat = typer.Option(
         GridExportFormat.csv,
         "--format",
@@ -405,7 +420,7 @@ def study_run_grid(
         help="Override base.config from the YAML spec.",
     ),
 ) -> None:
-    """Preview or run a YAML-defined in-memory parametric grid."""
+    """Preview or run a YAML-defined parametric grid, optionally persisted."""
 
     try:
         if dry_run:
@@ -415,6 +430,32 @@ def study_run_grid(
                 base_config_override=base_config,
             )
             mode = "Dry run"
+            display_name = study_name or definition.grid.name
+            target = (
+                preview_parametric_grid_persistent_target(
+                    db_path=db,
+                    project_name=project_name,
+                    study_name=display_name,
+                    definition=definition,
+                )
+                if db is not None
+                else None
+            )
+        elif db is not None:
+            result = run_parametric_grid_persistent(
+                spec,
+                db_path=db,
+                base_config_override=base_config,
+                project_name=project_name,
+                study_name=study_name,
+                limit=limit,
+                strict=strict,
+            )
+            rows = result.rows
+            base_config_path = result.base_config_path
+            mode = "Run"
+            display_name = result.study.name
+            target = None
         else:
             definition, base_config_path, rows = run_grid_from_yaml(
                 spec,
@@ -423,15 +464,26 @@ def study_run_grid(
                 strict=strict,
             )
             mode = "Run"
+            display_name = definition.grid.name
+            target = None
     except ParametricGridYAMLError as exc:
         raise typer.BadParameter(str(exc)) from exc
     except Exception as exc:
         raise typer.BadParameter(f"Grid run failed: {exc}") from exc
 
-    typer.echo(f"{mode}: {definition.grid.name}")
+    typer.echo(f"{mode}: {display_name}")
     typer.echo(f"Spec: {Path(spec)}")
     if base_config_path is not None:
         typer.echo(f"Base config: {base_config_path}")
+    if db is not None:
+        typer.echo(f"Database: {Path(db)}")
+        if target is not None:
+            project_suffix = f" ({target.project_id})" if target.project_id is not None else " (new)"
+            typer.echo(f"Project: {target.project_name}{project_suffix}")
+            typer.echo(f"Study: {target.study_name} (dry-run, not written)")
+        elif "result" in locals():
+            typer.echo(f"Project: {result.project.name} ({result.project.id})")
+            typer.echo(f"Study id: {result.study.id}")
     typer.echo(f"Scenarios: {len(rows)}")
     typer.echo(format_records_table(rows))
 

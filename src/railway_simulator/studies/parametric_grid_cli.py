@@ -104,7 +104,7 @@ def run_grid_from_yaml(
     if base_config_path is None:
         raise ParametricGridYAMLError("Pass --base-config or provide base.config in the spec.")
 
-    base_config = _load_base_config(base_config_path)
+    base_config = load_base_config_for_grid(base_config_path)
     case_runner = run_case_fn or _default_run_case
     raw_results = run_parametric_grid_in_memory(
         definition.grid,
@@ -113,7 +113,7 @@ def run_grid_from_yaml(
         strict=strict,
         limit=limit,
     )
-    return definition, base_config_path, [_summary_row(record) for record in raw_results]
+    return definition, base_config_path, [summarize_parametric_grid_record(record) for record in raw_results]
 
 
 def write_records(
@@ -149,7 +149,9 @@ def format_records_table(rows: list[dict[str, Any]]) -> str:
     return pd.DataFrame(rows).to_string(index=False)
 
 
-def _load_base_config(path: Path) -> dict[str, Any]:
+def load_base_config_for_grid(path: Path) -> dict[str, Any]:
+    """Load and normalize the engine config used by a parametric grid."""
+
     try:
         config = load_simulation_config(path)
         return apply_collision_to_params(config, config_path=path)
@@ -171,7 +173,9 @@ def _preview_row(row: dict[str, Any]) -> dict[str, Any]:
     return dict(out)
 
 
-def _summary_row(record: dict[str, Any]) -> dict[str, Any]:
+def summarize_parametric_grid_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the stable summary row shape used by CLI and persistence."""
+
     scenario = record["scenario"]
     out: "OrderedDict[str, Any]" = OrderedDict()
     out["scenario_index"] = scenario.index
@@ -180,7 +184,7 @@ def _summary_row(record: dict[str, Any]) -> dict[str, Any]:
     for key, value in scenario.metadata.items():
         out[key] = value
 
-    metrics = _extract_result_metrics(record.get("result"))
+    metrics = extract_grid_result_metrics(record.get("result"))
     for key in (
         "peak_Impact_Force_MN",
         "peak_Penetration_mm",
@@ -189,13 +193,16 @@ def _summary_row(record: dict[str, Any]) -> dict[str, Any]:
         "n_steps",
     ):
         out[key] = metrics.get(key)
+    out["warnings"] = record.get("warnings") or extract_grid_result_warnings(record.get("result"))
     out["error"] = record.get("error")
     return dict(out)
 
 
-def _extract_result_metrics(result: Any) -> dict[str, Any]:
+def extract_grid_result_metrics(result: Any) -> dict[str, Any]:
+    """Extract peak/time-step metrics from a result object when available."""
+
     metrics: dict[str, Any] = {}
-    df = _find_dataframe(result)
+    df = find_result_dataframe(result)
 
     if isinstance(result, dict):
         for key in (
@@ -229,7 +236,28 @@ def _extract_result_metrics(result: Any) -> dict[str, Any]:
     return metrics
 
 
-def _find_dataframe(result: Any) -> pd.DataFrame | None:
+def extract_grid_result_warnings(result: Any) -> str:
+    """Extract structured warnings if a runner returns or attaches them."""
+
+    warnings_value: Any = None
+    if isinstance(result, dict):
+        warnings_value = result.get("warnings", result.get("solver_warnings"))
+    if warnings_value is None:
+        df = find_result_dataframe(result)
+        if df is not None:
+            warnings_value = df.attrs.get("warnings", df.attrs.get("solver_warnings"))
+    if warnings_value is None:
+        return ""
+    if isinstance(warnings_value, str):
+        return warnings_value
+    if isinstance(warnings_value, (list, tuple)):
+        return "; ".join(str(item) for item in warnings_value)
+    return str(warnings_value)
+
+
+def find_result_dataframe(result: Any) -> pd.DataFrame | None:
+    """Return the first pandas DataFrame embedded in a runner result."""
+
     if isinstance(result, pd.DataFrame):
         return result
     if isinstance(result, dict):
@@ -293,9 +321,14 @@ def _json_default(value: Any) -> Any:
 
 __all__ = [
     "GridExportFormat",
+    "extract_grid_result_metrics",
+    "extract_grid_result_warnings",
+    "find_result_dataframe",
     "format_records_table",
+    "load_base_config_for_grid",
     "load_grid_definition",
     "preview_grid_from_yaml",
     "run_grid_from_yaml",
+    "summarize_parametric_grid_record",
     "write_records",
 ]

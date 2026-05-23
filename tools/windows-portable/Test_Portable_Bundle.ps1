@@ -22,6 +22,10 @@ if (!(Test-Path $PyExe)) { throw "Embedded python.exe not found: $PyExe" }
 if (!(Test-Path $RailwaySimExe)) { throw "railway-sim.exe not found: $RailwaySimExe" }
 
 $env:PATH = "$BundlePath\python;$BundlePath\python\Scripts;$env:PATH"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+$env:NO_COLOR = "1"
+$env:CLICOLOR = "0"
 Push-Location $BundlePath
 try {
   Write-Section "Python/package imports"

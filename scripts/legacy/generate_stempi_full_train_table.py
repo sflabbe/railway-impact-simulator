@@ -576,7 +576,7 @@ def make_response_grid(df: pd.DataFrame) -> pd.DataFrame:
                 "Fpeak_ratio": z["Fpeak_ratio"],
                 "Feq_ratio": z["Feq_ratio"],
                 "significant_train_effect": z["significant_train_effect"],
-                "Lok_status": l["status"],
+                "Lok_status": lok_row["status"],
                 "Zug_status": z["status"],
                 "Zug_max_coupling_force_MN": z["max_coupling_force_N"] / 1.0e6
                 if pd.notna(z["max_coupling_force_N"])

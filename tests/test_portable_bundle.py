@@ -13,6 +13,19 @@ PYTHON_EXE = PORTABLE_ROOT / "python" / "python.exe"
 RAILWAY_SIM_EXE = PORTABLE_ROOT / "python" / "Scripts" / "railway-sim.exe"
 
 
+def _portable_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PATH"] = f"{PORTABLE_ROOT / 'python'};{PORTABLE_ROOT / 'python' / 'Scripts'};{env.get('PATH', '')}"
+    # Windows portable smoke tests may run under cp1252 consoles. Force UTF-8
+    # so Rich/Typer help and any future engineering symbols cannot crash on
+    # encode, while production CLI text is kept ASCII where practical.
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("NO_COLOR", "1")
+    env.setdefault("CLICOLOR", "0")
+    return env
+
+
 def test_portable_smoke_script_is_checked_in() -> None:
     script = ROOT / "tools" / "windows-portable" / "Test_Portable_Bundle.ps1"
     launcher = ROOT / "TEST_PORTABLE_BUNDLE.cmd"
@@ -25,8 +38,7 @@ def test_portable_smoke_script_is_checked_in() -> None:
 
 @pytest.mark.skipif(not PYTHON_EXE.exists(), reason="portable bundle has not been built")
 def test_built_portable_python_imports_runtime_package() -> None:
-    env = os.environ.copy()
-    env["PATH"] = f"{PORTABLE_ROOT / 'python'};{PORTABLE_ROOT / 'python' / 'Scripts'};{env.get('PATH', '')}"
+    env = _portable_env()
     result = subprocess.run(
         [
             str(PYTHON_EXE),
@@ -45,8 +57,7 @@ def test_built_portable_python_imports_runtime_package() -> None:
 
 @pytest.mark.skipif(not RAILWAY_SIM_EXE.exists(), reason="portable bundle has not been built")
 def test_built_portable_cli_help() -> None:
-    env = os.environ.copy()
-    env["PATH"] = f"{PORTABLE_ROOT / 'python'};{PORTABLE_ROOT / 'python' / 'Scripts'};{env.get('PATH', '')}"
+    env = _portable_env()
     result = subprocess.run(
         [str(RAILWAY_SIM_EXE), "--help"],
         cwd=PORTABLE_ROOT,

@@ -30,7 +30,7 @@ app = typer.Typer(
     add_completion=False,
     help=(
         "Railway impact simulator CLI\n\n"
-        "Run HHT-α/Bouc–Wen impact simulations based on DZSF Bericht 53 (2024).\n"
+        "Run HHT-alpha/Bouc-Wen impact simulations based on DZSF Bericht 53 (2024).\n"
         "Use 'run' for a single scenario or 'parametric' for speed mixes\n"
         "with envelopes, performance metrics, and optional PDF reports."
     ),
@@ -254,7 +254,7 @@ def _ascii_plot(
     height: int = 20,
 ) -> str:
     """
-    Very simple ASCII plot: x ∈ [0, max], y ∈ [0, max].
+    Very simple ASCII plot: x in [0, max], y in [0, max].
     """
     if len(x) == 0 or len(y) == 0:
         return ""
@@ -288,7 +288,7 @@ def _ascii_plot(
     lines = [f"# {y_label} envelope"]
     for r in grid:
         lines.append("".join(r).rstrip())
-    lines.append(f"# {x_label} ({int(round(x_min))} – {int(round(x_max))})")
+    lines.append(f"# {x_label} ({int(round(x_min))} - {int(round(x_max))})")
     return "\n".join(lines)
 
 
@@ -475,12 +475,12 @@ def _print_performance_metrics(
     typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
     typer.echo(f"  Simulated time span   : {perf['T_max']:.6f} s")
     typer.echo(f"  Time steps            : {perf['steps']}")
-    typer.echo(f"  Mean Δt               : {perf['dt_mean']:.6e} s")
+    typer.echo(f"  Mean dt               : {perf['dt_mean']:.6e} s")
     typer.echo(
-        f"  Min Δt / max Δt       : {perf['dt_min']:.6e} s / {perf['dt_max']:.6e} s"
+        f"  Min dt / max dt       : {perf['dt_min']:.6e} s / {perf['dt_max']:.6e} s"
     )
     typer.echo(f"  Real-time factor      : {perf['real_time_factor']:.2f}x")
-    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof ≈ {perf['n_dof']}")
+    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof approx {perf['n_dof']}")
     typer.echo(
         f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP"
     )
@@ -728,7 +728,7 @@ def _print_parametric_performance(
     typer.echo("")
     typer.echo("Parametric performance:")
     typer.echo(f"  Wall-clock time       : {perf['wall_time']:.3f} s")
-    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof ≈ {perf['n_dof']}")
+    typer.echo(f"  Linear solves (LU)    : {perf['linear_solves']}, n_dof approx {perf['n_dof']}")
     typer.echo(f"  Estimated FLOPs (LU)  : {perf['mflops']:.2f} MFLOP")
     typer.echo(f"  Estimated rate        : {perf['mflops_per_s']:.2f} MFLOP/s")
 
@@ -1096,7 +1096,7 @@ def parametric(
 ) -> None:
     """
     Run a speed-based parametric study and compute an envelope
-    ('Umhüllende') and a weighted mean history.
+    ('envelope') and a weighted mean history.
 
     Example: TGV / IC / freight line mix
     ------------------------------------
@@ -1143,7 +1143,7 @@ def parametric(
     # Performance output
     _print_parametric_performance(perf, logger)
 
-    # PDF report FIRST – so it exists even if the plot blocks
+    # PDF report FIRST - so it exists even if the plot blocks
     if pdf_report:
         _generate_parametric_pdf_report(
             envelope_df, summary_df, perf, base_params, output_dir, base_name, quantity, logger

@@ -26,6 +26,20 @@ def _portable_env() -> dict[str, str]:
     return env
 
 
+def _run_portable_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a portable command with UTF-8 decoding independent of Windows locale."""
+    return subprocess.run(
+        args,
+        cwd=PORTABLE_ROOT,
+        env=_portable_env(),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_portable_smoke_script_is_checked_in() -> None:
     script = ROOT / "tools" / "windows-portable" / "Test_Portable_Bundle.ps1"
     launcher = ROOT / "TEST_PORTABLE_BUNDLE.cmd"
@@ -38,18 +52,12 @@ def test_portable_smoke_script_is_checked_in() -> None:
 
 @pytest.mark.skipif(not PYTHON_EXE.exists(), reason="portable bundle has not been built")
 def test_built_portable_python_imports_runtime_package() -> None:
-    env = _portable_env()
-    result = subprocess.run(
+    result = _run_portable_command(
         [
             str(PYTHON_EXE),
             "-c",
             "import railway_simulator, numpy, pandas, scipy, yaml; print('imports-ok')",
-        ],
-        cwd=PORTABLE_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
+        ]
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "imports-ok" in result.stdout
@@ -57,14 +65,6 @@ def test_built_portable_python_imports_runtime_package() -> None:
 
 @pytest.mark.skipif(not RAILWAY_SIM_EXE.exists(), reason="portable bundle has not been built")
 def test_built_portable_cli_help() -> None:
-    env = _portable_env()
-    result = subprocess.run(
-        [str(RAILWAY_SIM_EXE), "--help"],
-        cwd=PORTABLE_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    result = _run_portable_command([str(RAILWAY_SIM_EXE), "--help"])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Railway impact simulator" in result.stdout

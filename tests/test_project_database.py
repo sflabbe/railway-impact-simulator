@@ -19,11 +19,11 @@ def test_project_database_roundtrip(tmp_path: Path) -> None:
     configs = ConfigSnapshotRepository(db)
     studies = StudyRepository(db)
 
-    project = Project(name="stempi", root_dir=tmp_path, description="test project")
+    project = Project(name="impact_workbench", root_dir=tmp_path, description="test project")
     projects.create(project)
 
     loaded = projects.get(project.id)
-    assert loaded.name == "stempi"
+    assert loaded.name == "impact_workbench"
     assert loaded.root_dir == tmp_path.resolve()
 
     snapshot = configs.create(project.id, {"v0_init": -10.0, "contact_model": "hooke"})

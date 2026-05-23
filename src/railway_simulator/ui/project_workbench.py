@@ -374,8 +374,8 @@ def render_project_workbench(params: dict[str, Any]) -> None:
 
     with col_new:
         st.markdown("#### Create project")
-        default_root = Path.cwd() / "projects" / "stempi_workbench"
-        project_name = st.text_input("Project name", value="stempi_workbench", key="wb_project_name")
+        default_root = Path.cwd() / "projects" / "impact_workbench"
+        project_name = st.text_input("Project name", value="impact_workbench", key="wb_project_name")
         project_desc = st.text_area("Description", value="Persisted railway-impact study workspace", key="wb_project_desc")
         project_root = st.text_input("Project folder", value=str(default_root), key="wb_project_root")
         if safe_button(st, "Create / initialize project", type="primary", width="stretch", key="wb_create_project"):
@@ -439,7 +439,7 @@ def render_project_workbench(params: dict[str, Any]) -> None:
 
         left, right = st.columns([1, 1])
         with left:
-            study_name = st.text_input("Study name", value="stempi_lok_vs_zug_srs", key="wb_full_train_name")
+            study_name = st.text_input("Study name", value="consist_srs_comparison", key="wb_full_train_name")
             modes = st.multiselect(
                 "Vehicle modes",
                 options=["lok_solo", "zug_full"],

@@ -34,9 +34,9 @@ k_train: [10000000, 10000000]
 
 def test_project_cli_create_list_and_full_train_dry_run(tmp_path: Path) -> None:
     runner = CliRunner()
-    root = tmp_path / "stempi"
+    root = tmp_path / "impact_workbench"
 
-    result = runner.invoke(app, ["project", "create", "--name", "stempi", "--root", str(root)])
+    result = runner.invoke(app, ["project", "create", "--name", "impact_workbench", "--root", str(root)])
     assert result.exit_code == 0, result.output
     assert (root / "project.sqlite").is_file()
     assert (root / "runs").is_dir()
@@ -44,7 +44,7 @@ def test_project_cli_create_list_and_full_train_dry_run(tmp_path: Path) -> None:
 
     result = runner.invoke(app, ["project", "list", "--db", str(root / "project.sqlite")])
     assert result.exit_code == 0, result.output
-    assert "stempi" in result.output
+    assert "impact_workbench" in result.output
 
     cfg = _mini_config(tmp_path / "mini.yml")
     result = runner.invoke(
@@ -75,7 +75,7 @@ def test_project_cli_create_list_and_full_train_dry_run(tmp_path: Path) -> None:
 def test_srs_cli_export_and_compare_from_persisted_curves(tmp_path: Path) -> None:
     runner = CliRunner()
     db = initialize_project_database(tmp_path / "project.sqlite")
-    project = Project(name="stempi", root_dir=tmp_path)
+    project = Project(name="impact_workbench", root_dir=tmp_path)
     ProjectRepository(db).create(project)
     snapshot = ConfigSnapshotRepository(db).create(project.id, {"n_masses": 3})
     study = StudyDefinition(project_id=project.id, name="s", study_type="full_train", base_config_id=snapshot.id)

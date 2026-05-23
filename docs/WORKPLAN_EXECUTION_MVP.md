@@ -65,9 +65,9 @@ New module `studies/full_train.py`:
 - TRAXX locomotive solo vs full freight proxy scenario builder
 - optional SRS computation after each successful run
 
-Also added sample spec:
-
-- `configs/studies/stempi_full_train.yml`
+Study defaults use the neutral name `train_consist_comparison`. A reusable
+`configs/studies/` catalog is intentionally left for a later parametric-grid
+increment.
 
 ## 7. Documentation
 

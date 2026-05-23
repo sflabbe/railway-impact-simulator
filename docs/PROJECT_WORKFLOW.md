@@ -48,9 +48,9 @@ See `docs/WORKPLAN_EXECUTION_CLI_WORKFLOW.md` for the full command sequence.
 Minimal reproducible flow:
 
 ```bash
-railway-sim project create --name stempi --root projects/stempi
-railway-sim study run-full-train --db projects/stempi/project.sqlite --spec configs/studies/stempi_full_train.yml
-railway-sim srs compare --db projects/stempi/project.sqlite --study-id <study_id> --output-dir results/stempi_srs_compare --zeta 0.05
+railway-sim project create --name impact_workbench --root projects/impact_workbench
+railway-sim study run-full-train --db projects/impact_workbench/project.sqlite --base-config configs/traxx_freight.yml --name train_consist_comparison
+railway-sim srs compare --db projects/impact_workbench/project.sqlite --study-id <study_id> --output-dir results/consist_srs_comparison --zeta 0.05
 ```
 
 ## Streamlit report bundle workflow
@@ -61,9 +61,9 @@ CLI command:
 
 ```bash
 railway-sim report build-chapter \
-  --db projects/stempi/project.sqlite \
+  --db projects/impact_workbench/project.sqlite \
   --study-id <study_id> \
-  --output-dir projects/stempi/reports/chapter_stempi
+  --output-dir projects/impact_workbench/reports/chapter_train_consist_comparison
 ```
 
 The UI stores the bundle under `project_root/reports/` by default and offers a

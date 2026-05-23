@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Chunked/cached runner for scripts/generate_stempi_full_train_table.py.
+"""Deprecated legacy chunked/cached runner for the historical consist table.
+
+TODO(legacy): keep this script frozen for reproducibility. New production
+workflows should use the neutral Project Workbench / study services instead.
 
 Useful on CI or hosted notebooks with short command timeouts.  It writes one CSV
 per scenario under results/stempi_full_train/case_rows and can finalize the full
@@ -16,11 +19,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-from scripts.generate_stempi_full_train_table import (  # noqa: E402
+from scripts.legacy.generate_stempi_full_train_table import (  # noqa: E402
     ICE4_GEOM,
     TRAXX_GEOM,
     add_ratios_and_status,

@@ -95,10 +95,10 @@ def test_srs_figures_from_persisted_curve_records(tmp_path) -> None:
 
 def _make_minimal_report_fixture(tmp_path: Path):
     db = initialize_project_database(tmp_path / "project.sqlite")
-    project = Project(name="stempi", root_dir=tmp_path)
+    project = Project(name="impact_workbench", root_dir=tmp_path)
     ProjectRepository(db).create(project)
     snapshot = ConfigSnapshotRepository(db).create(project.id, {"n_masses": 3, "contact_model": "anagnostopoulos"})
-    study = StudyDefinition(project_id=project.id, name="Stempi Full Train", study_type="full_train", base_config_id=snapshot.id)
+    study = StudyDefinition(project_id=project.id, name="Train Consist Comparison", study_type="full_train", base_config_id=snapshot.id)
     studies = StudyRepository(db)
     studies.create_study(study)
 
@@ -137,10 +137,10 @@ def _make_minimal_report_fixture(tmp_path: Path):
 def test_report_bundle_helpers_build_and_zip(tmp_path: Path) -> None:
     db, project, study = _make_minimal_report_fixture(tmp_path)
 
-    assert sanitize_path_component("Stempi Full Train / v0=80") == "stempi_full_train_v0_80"
+    assert sanitize_path_component("Train Consist Comparison / v0=80") == "train_consist_comparison_v0_80"
     default_dir = default_chapter_output_dir(project.normalized_root(), study_name=study.name, study_id=study.id)
     assert default_dir.parent.name == "reports"
-    assert default_dir.name.startswith("chapter_stempi_full_train_")
+    assert default_dir.name.startswith("chapter_train_consist_comparison_")
 
     result = build_workbench_chapter_bundle(
         db=db,

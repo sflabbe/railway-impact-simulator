@@ -1,0 +1,28 @@
+study:
+  name: impact_parametric_mini
+  type: parametric_grid
+  description: Minimal parametric impact study for smoke tests and UI previews.
+
+base:
+  config: ../en15227/traxx_freight__EN15227_C1.yml
+
+dimensions:
+  - name: impact_velocity_mps
+    kind: velocity_mps
+    path: v0_init
+    # Signed m/s values equivalent to 20 and 40 km/h toward the impact wall.
+    values: [-5.5555555556, -11.1111111111]
+
+  - name: contact_law
+    kind: parameter
+    path: contact_model
+    values: [hooke, lankarani-nikravesh]
+
+outputs:
+  quantities:
+    - Impact_Force_MN
+    - Penetration_mm
+    - Acceleration_g
+
+srs:
+  enabled: false

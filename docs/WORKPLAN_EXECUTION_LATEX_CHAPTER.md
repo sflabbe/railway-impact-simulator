@@ -7,9 +7,9 @@ persistent project workbench.
 
 ```bash
 railway-sim report build-chapter \
-  --db projects/stempi/project.sqlite \
+  --db projects/impact_workbench/project.sqlite \
   --study-id <study_id> \
-  --output-dir results/stempi_chapter \
+  --output-dir results/train_consist_chapter \
   --author "S. Labbe" \
   --zeta 0.05
 ```

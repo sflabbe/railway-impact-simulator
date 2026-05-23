@@ -1,8 +1,8 @@
 """Reusable full-train parametric study runner.
 
-This is the package-level version of the Stempi locomotive-solo vs full-consist
-workflow.  It builds scenarios, delegates dynamics to ``SimulationService`` and
-optionally delegates SRS curves to ``SpectrumService``.
+This is the package-level version of the train-consist comparison workflow.  It
+builds scenarios, delegates dynamics to ``SimulationService`` and optionally
+delegates SRS curves to ``SpectrumService``.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ class FullTrainStudySpec:
 
     project_id: str
     base_config_id: str
-    name: str = "stempi_full_train"
+    name: str = "train_consist_comparison"
     vehicles: tuple[str, ...] = ("traxx_br187",)
     modes: tuple[str, ...] = ("lok_solo", "zug_full")
     speeds_kmh: tuple[float, ...] = (10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0)

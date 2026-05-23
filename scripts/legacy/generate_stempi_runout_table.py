@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Generate deterministic runout tables for the structural-dynamics chapter.
+"""Deprecated legacy generator for deterministic clearance-runout tables.
+
+TODO(legacy): keep this script frozen for reproducibility. New production
+workflows should use neutral project/study naming instead.
 
 This script is intentionally not a hazard Monte Carlo.  It evaluates prescribed
 scenarios (v0, wall offset a, friction mu, derailment angle beta_d), computes
@@ -7,7 +10,7 @@ post-runout impact speed and wall-normal velocity, and optionally attaches a
 single-mass response surrogate for F_peak and F_eq.
 
 Example:
-    PYTHONPATH=src python scripts/generate_stempi_runout_table.py \
+    PYTHONPATH=src python scripts/legacy/generate_stempi_runout_table.py \
         --config configs/ice1_powercar.yml \
         --response-model single-mass-surrogate \
         --outdir results/stempi_runout
@@ -26,7 +29,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from railway_simulator.config.loader import load_simulation_config

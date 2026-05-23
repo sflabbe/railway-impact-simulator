@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the Stempi locomotive-solo vs full-train comparison table.
+"""Deprecated legacy generator for the historical locomotive/full-train table.
+
+TODO(legacy): keep this script frozen for reproducibility. New production
+workflows should use the neutral Project Workbench / study services instead.
 
 This script keeps the deterministic runout/geometric filter separate from the
 1D/2D reduced multibody impact model.  The engine receives the wall-normal
@@ -29,7 +32,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from railway_simulator.config.loader import load_simulation_config

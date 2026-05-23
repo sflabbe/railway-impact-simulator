@@ -18,10 +18,10 @@ from railway_simulator.reporting import build_latex_chapter
 
 def _make_report_fixture(tmp_path: Path):
     db = initialize_project_database(tmp_path / "project.sqlite")
-    project = Project(name="stempi", root_dir=tmp_path)
+    project = Project(name="impact_workbench", root_dir=tmp_path)
     ProjectRepository(db).create(project)
     snapshot = ConfigSnapshotRepository(db).create(project.id, {"n_masses": 3, "contact_model": "anagnostopoulos"})
-    study = StudyDefinition(project_id=project.id, name="stempi_full_train", study_type="full_train", base_config_id=snapshot.id)
+    study = StudyDefinition(project_id=project.id, name="train_consist_comparison", study_type="full_train", base_config_id=snapshot.id)
     studies = StudyRepository(db)
     studies.create_study(study)
 

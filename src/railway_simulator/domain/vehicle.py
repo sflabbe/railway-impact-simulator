@@ -80,7 +80,7 @@ def consist_from_engine_config(name: str, cfg: dict[str, Any], *, meta: dict[str
 
 
 def build_traxx_full_freight_proxy(base_cfg: dict[str, Any], *, wagon_count: int = 4) -> VehicleConsist:
-    """Build the TRAXX + freight wagons proxy used by the Stempi study.
+    """Build the TRAXX + freight wagons proxy used by consist comparison studies.
 
     Assumptions are deliberately encoded in metadata so downstream reports can
     flag this as a reduced parametric model, not calibrated crash test data.

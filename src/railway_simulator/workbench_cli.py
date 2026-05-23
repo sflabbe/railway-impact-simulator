@@ -36,6 +36,14 @@ from railway_simulator.services.project_service import ProjectService
 from railway_simulator.services.simulation_service import SimulationService
 from railway_simulator.spectrum.service import SpectrumService
 from railway_simulator.studies.full_train import FullTrainStudyRunner, FullTrainStudySpec
+from railway_simulator.studies.parametric_grid_cli import (
+    GridExportFormat,
+    format_records_table,
+    preview_grid_from_yaml,
+    run_grid_from_yaml,
+    write_records,
+)
+from railway_simulator.studies.parametric_grid_io import ParametricGridYAMLError
 from railway_simulator.reporting import build_latex_chapter
 
 project_app = typer.Typer(help="Create and inspect persistent project workspaces.")
@@ -192,7 +200,7 @@ def _build_full_train_spec(
     spec = FullTrainStudySpec(
         project_id=project_id,
         base_config_id=base_config_id,
-        name=name or str(study_raw.get("name") or "stempi_full_train"),
+        name=name or str(study_raw.get("name") or "train_consist_comparison"),
         vehicles=_parse_str_csv(vehicles, default=raw.get("vehicles") or ("traxx_br187",)),
         modes=_parse_str_csv(modes, default=raw.get("modes") or ("lok_solo", "zug_full")),
         speeds_kmh=_parse_float_csv(speeds) if speeds else _speeds_from_spec(raw.get("speeds_kmh")),
@@ -375,6 +383,62 @@ def study_runs(
                 ]
             )
         )
+
+
+@study_app.command("run-grid")
+def study_run_grid(
+    spec: Path = typer.Option(..., "--spec", "-s", help="Parametric grid YAML spec."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview scenarios without running the solver."),
+    limit: int | None = typer.Option(None, "--limit", min=0, help="Run or preview only the first N scenarios."),
+    strict: bool = typer.Option(False, "--strict", help="Fail immediately when one scenario fails."),
+    out: Path | None = typer.Option(None, "--out", "-o", help="Optional summary/preview output path."),
+    output_format: GridExportFormat = typer.Option(
+        GridExportFormat.csv,
+        "--format",
+        case_sensitive=False,
+        help="Output format when --out is provided: csv, json, or both.",
+    ),
+    base_config: Path | None = typer.Option(
+        None,
+        "--base-config",
+        "-c",
+        help="Override base.config from the YAML spec.",
+    ),
+) -> None:
+    """Preview or run a YAML-defined in-memory parametric grid."""
+
+    try:
+        if dry_run:
+            definition, base_config_path, rows = preview_grid_from_yaml(
+                spec,
+                limit=limit,
+                base_config_override=base_config,
+            )
+            mode = "Dry run"
+        else:
+            definition, base_config_path, rows = run_grid_from_yaml(
+                spec,
+                base_config_override=base_config,
+                limit=limit,
+                strict=strict,
+            )
+            mode = "Run"
+    except ParametricGridYAMLError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except Exception as exc:
+        raise typer.BadParameter(f"Grid run failed: {exc}") from exc
+
+    typer.echo(f"{mode}: {definition.grid.name}")
+    typer.echo(f"Spec: {Path(spec)}")
+    if base_config_path is not None:
+        typer.echo(f"Base config: {base_config_path}")
+    typer.echo(f"Scenarios: {len(rows)}")
+    typer.echo(format_records_table(rows))
+
+    if out is not None:
+        written = write_records(rows, out, export_format=output_format)
+        for path in written:
+            typer.echo(f"Wrote: {path}")
 
 
 @study_app.command("run-full-train")

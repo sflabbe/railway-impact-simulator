@@ -8,34 +8,35 @@ without opening the UI.
 ## Added commands
 
 ```bash
-railway-sim project create --name stempi --root projects/stempi
-railway-sim project list --db projects/stempi/project.sqlite
+railway-sim project create --name impact_workbench --root projects/impact_workbench
+railway-sim project list --db projects/impact_workbench/project.sqlite
 ```
 
 ```bash
 railway-sim study run-full-train \
-  --db projects/stempi/project.sqlite \
-  --spec configs/studies/stempi_full_train.yml
+  --db projects/impact_workbench/project.sqlite \
+  --base-config configs/traxx_freight.yml \
+  --name train_consist_comparison
 ```
 
 ```bash
-railway-sim study list --db projects/stempi/project.sqlite
-railway-sim study runs --db projects/stempi/project.sqlite --study-id <study_id>
+railway-sim study list --db projects/impact_workbench/project.sqlite
+railway-sim study runs --db projects/impact_workbench/project.sqlite --study-id <study_id>
 ```
 
 ```bash
-railway-sim srs list --db projects/stempi/project.sqlite --study-id <study_id>
+railway-sim srs list --db projects/impact_workbench/project.sqlite --study-id <study_id>
 railway-sim srs export \
-  --db projects/stempi/project.sqlite \
+  --db projects/impact_workbench/project.sqlite \
   --study-id <study_id> \
-  --output results/stempi_srs_long.csv
+  --output results/consist_srs_long.csv
 ```
 
 ```bash
 railway-sim srs compare \
-  --db projects/stempi/project.sqlite \
+  --db projects/impact_workbench/project.sqlite \
   --study-id <study_id> \
-  --output-dir results/stempi_srs_compare \
+  --output-dir results/consist_srs_comparison \
   --zeta 0.05
 ```
 
@@ -46,8 +47,9 @@ writing a study or running the solver:
 
 ```bash
 railway-sim study run-full-train \
-  --db projects/stempi/project.sqlite \
-  --spec configs/studies/stempi_full_train.yml \
+  --db projects/impact_workbench/project.sqlite \
+  --base-config configs/traxx_freight.yml \
+  --name train_consist_comparison \
   --dry-run
 ```
 
@@ -55,8 +57,9 @@ CLI overrides can narrow the grid:
 
 ```bash
 railway-sim study run-full-train \
-  --db projects/stempi/project.sqlite \
+  --db projects/impact_workbench/project.sqlite \
   --base-config configs/traxx_freight.yml \
+  --name train_consist_comparison \
   --speeds 10,20,30 \
   --modes lok_solo,zug_full \
   --contact-models anagnostopoulos \

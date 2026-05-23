@@ -29,6 +29,7 @@ from railway_simulator.studies.parametric_grid import (
     build_parametric_scenarios,
 )
 from railway_simulator.studies.parametric_grid_cli import (
+    extract_grid_result_warnings,
     find_result_dataframe,
     load_base_config_for_grid,
     load_grid_definition,
@@ -195,6 +196,10 @@ def run_parametric_grid_persistent(
         runs.append(run)
         if run.status != "ok":
             failed = True
+
+        if warnings_text:
+            scenario.meta["solver_warnings"] = warnings_text
+            study_repo.update_scenario_meta(scenario.id, scenario.meta)
 
         row = summarize_parametric_grid_record(
             {
@@ -429,7 +434,7 @@ def _execute_with_injected_runner(
         if df is not None:
             for name, value, unit in extract_run_metrics(df):
                 study_repo.add_metric(RunMetric(run_id=run.id, name=name, value=value, unit=unit))
-        return run, result, "", None
+        return run, result, extract_grid_result_warnings(result), None
     except Exception as exc:
         elapsed = time.perf_counter() - start
         run = SimulationRun(
@@ -455,10 +460,102 @@ def _read_project_rows_no_write(path: Path) -> list[dict[str, Any]]:
     return [{"id": row["id"], "name": row["name"]} for row in rows]
 
 
+def load_parametric_grid_study_summary(
+    db: ProjectDatabase,
+    study_id: str,
+) -> list[dict[str, Any]]:
+    """Reconstruct a parametric-grid summary from persisted runs.
+
+    The live runner returns a rich summary immediately after execution. This
+    reader rebuilds the same UI-oriented table later from the SQLite metadata
+    and persisted run CSV files, so saved studies can be browsed without
+    re-running the solver. Solver warnings are read from scenario metadata when
+    available. Older studies created before warning persistence simply show an
+    empty warning field.
+    """
+    records = StudyRepository(db).list_run_records_for_study(study_id)
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        row = _summary_row_from_run_record(record)
+        rows.append(row)
+    return rows
+
+
+def _summary_row_from_run_record(record: dict[str, Any]) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "scenario_index": record.get("meta_scenario_index"),
+        "scenario_label": record.get("meta_scenario_label") or record.get("scenario_name"),
+        "status": record.get("run_status"),
+    }
+
+    for key, value in record.items():
+        if not key.startswith("meta_"):
+            continue
+        clean_key = key.removeprefix("meta_")
+        if clean_key in {
+            "scenario_index",
+            "scenario_label",
+            "study_type",
+            "spec_path",
+            "base_config_path",
+            "solver_warnings",
+        }:
+            continue
+        row[clean_key] = value
+
+    result = _read_persisted_result_dataframe(record.get("result_csv_path"))
+    metrics = summarize_parametric_grid_record(
+        {
+            "scenario": _SummaryScenario(
+                index=_coerce_int(row.get("scenario_index")),
+                label=str(row.get("scenario_label") or record.get("scenario_name") or "scenario"),
+                metadata={k: v for k, v in row.items() if k not in {"scenario_index", "scenario_label", "status"}},
+            ),
+            "status": row.get("status"),
+            "result": result,
+            "warnings": record.get("meta_solver_warnings") or "",
+            "error": record.get("error_message"),
+        }
+    )
+    # Preserve DB status/error even if the generic summarizer injected metric keys.
+    metrics["status"] = row.get("status")
+    metrics["error"] = record.get("error_message")
+    return metrics
+
+
+@dataclass(frozen=True)
+class _SummaryScenario:
+    """Minimal scenario shape accepted by summarize_parametric_grid_record."""
+
+    index: int
+    label: str
+    metadata: dict[str, Any]
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return -1
+
+
+def _read_persisted_result_dataframe(path_value: Any) -> pd.DataFrame | None:
+    if not path_value:
+        return None
+    path = Path(str(path_value))
+    if not path.exists():
+        return None
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return None
+
+
 __all__ = [
     "DEFAULT_PROJECT_NAME",
     "PersistentGridRunResult",
     "PersistentGridTargetPreview",
+    "load_parametric_grid_study_summary",
     "preview_parametric_grid_persistent_target",
     "run_parametric_grid_persistent",
 ]

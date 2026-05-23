@@ -18,6 +18,7 @@ from railway_simulator.ui.project_workbench import (
     DEFAULT_PARAMETRIC_DB_PATH,
     build_full_vs_lok_ratio_figure,
     build_parametric_peak_force_figure,
+    load_saved_parametric_grid_summary,
     build_srs_envelope_figure,
     build_srs_overlay_figure,
     build_workbench_chapter_bundle,
@@ -26,6 +27,8 @@ from railway_simulator.ui.project_workbench import (
     load_parametric_grid_ui_spec,
     make_log_period_grid_ms,
     parametric_grid_peak_force_chart_data,
+    parametric_grid_peak_force_csv_bytes,
+    parametric_grid_peak_force_html_bytes,
     parametric_grid_summary_csv_bytes,
     parametric_grid_warning_rows,
     parse_float_csv,
@@ -102,6 +105,12 @@ def test_parametric_grid_ui_run_limit_one_persists_summary_and_warnings(tmp_path
     assert studies[0].name == "impact_parametric_mini"
     assert len(scenarios) == 1
     assert len(runs) == 1
+    assert "solver warning" in scenarios[0].meta["solver_warnings"]
+
+    saved_summary = load_saved_parametric_grid_summary(result.persistent_result.db, result.persistent_result.study.id)
+    assert len(saved_summary) == 1
+    assert saved_summary.loc[0, "peak_Impact_Force_MN"] == 2.5
+    assert "solver warning" in saved_summary.loc[0, "warnings"]
 
 
 def test_parametric_grid_ui_warning_chart_and_csv_helpers() -> None:
@@ -132,13 +141,18 @@ def test_parametric_grid_ui_warning_chart_and_csv_helpers() -> None:
     chart_data = parametric_grid_peak_force_chart_data(summary)
     figure = build_parametric_peak_force_figure(summary)
     csv_bytes = parametric_grid_summary_csv_bytes(summary)
+    chart_csv_bytes = parametric_grid_peak_force_csv_bytes(summary)
+    chart_html_bytes = parametric_grid_peak_force_html_bytes(summary)
     roundtrip = pd.read_csv(io.BytesIO(csv_bytes))
+    chart_roundtrip = pd.read_csv(io.BytesIO(chart_csv_bytes))
 
     assert warnings["scenario_label"].tolist() == ["case_a"]
     assert chart_data["scenario_label"].tolist() == ["case_a"]
     assert figure is not None
     assert len(figure.data) == 1
     assert roundtrip["scenario_label"].tolist() == ["case_a", "case_b"]
+    assert chart_roundtrip["scenario_label"].tolist() == ["case_a"]
+    assert b"Peak impact force by scenario" in chart_html_bytes
 
 
 def test_parametric_grid_ui_helpers_do_not_modify_default_project_db(tmp_path: Path) -> None:

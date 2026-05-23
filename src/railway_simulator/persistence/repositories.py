@@ -233,6 +233,20 @@ class StudyRepository:
             for row in rows
         ]
 
+    def update_scenario_meta(self, scenario_id: str, meta: dict[str, Any]) -> None:
+        """Replace one scenario metadata document.
+
+        This is used by reporting-oriented workflows to attach non-physical
+        execution diagnostics, such as captured solver warnings, without
+        changing the scenario parameters or database schema.
+        """
+        with self.db.connect() as con:
+            con.execute(
+                "UPDATE scenarios SET meta_json = ? WHERE id = ?",
+                (json_dumps_stable(meta), scenario_id),
+            )
+            con.commit()
+
     def add_run(self, run: SimulationRun) -> None:
         with self.db.connect() as con:
             con.execute(

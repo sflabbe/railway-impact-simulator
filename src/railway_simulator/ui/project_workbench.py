@@ -39,6 +39,7 @@ from railway_simulator.studies.parametric_grid_io import (
 )
 from railway_simulator.studies.parametric_grid_persistence import (
     PersistentGridRunResult,
+    load_parametric_grid_study_summary,
     run_parametric_grid_persistent,
 )
 from railway_simulator.reporting import ChapterBuildResult, build_latex_chapter
@@ -456,6 +457,24 @@ def parametric_grid_summary_csv_bytes(summary: pd.DataFrame) -> bytes:
     return summary.to_csv(index=False).encode("utf-8")
 
 
+def parametric_grid_peak_force_csv_bytes(summary: pd.DataFrame) -> bytes:
+    """Generate CSV bytes for the peak-force plot data."""
+    return parametric_grid_peak_force_chart_data(summary).to_csv(index=False).encode("utf-8")
+
+
+def parametric_grid_peak_force_html_bytes(summary: pd.DataFrame) -> bytes:
+    """Generate a standalone Plotly HTML export for the peak-force chart."""
+    fig = build_parametric_peak_force_figure(summary)
+    if fig is None:
+        return b""
+    return fig.to_html(include_plotlyjs=True, full_html=True).encode("utf-8")
+
+
+def load_saved_parametric_grid_summary(db: ProjectDatabase, study_id: str) -> pd.DataFrame:
+    """Load a saved parametric-grid study summary without re-running cases."""
+    return parametric_grid_summary_dataframe(load_parametric_grid_study_summary(db, study_id))
+
+
 def run_parametric_grid_ui_study(
     spec_path: str | Path,
     *,
@@ -595,6 +614,27 @@ def _render_parametric_grid_outputs(st: Any, summary: pd.DataFrame, *, key_prefi
         st.info("No peak force metric available for this run.")
     else:
         safe_plotly_chart(st, fig, width="stretch")
+        col_plot_data, col_plot_html = st.columns(2)
+        with col_plot_data:
+            safe_download_button(
+                st,
+                label="Download peak-force plot data CSV",
+                data=parametric_grid_peak_force_csv_bytes(summary),
+                file_name="parametric_grid_peak_force_data.csv",
+                mime="text/csv",
+                width="stretch",
+                key=f"{key_prefix}_peak_force_data_csv",
+            )
+        with col_plot_html:
+            safe_download_button(
+                st,
+                label="Download peak-force plot HTML",
+                data=parametric_grid_peak_force_html_bytes(summary),
+                file_name="parametric_grid_peak_force.html",
+                mime="text/html",
+                width="stretch",
+                key=f"{key_prefix}_peak_force_html",
+            )
 
     safe_download_button(
         st,
@@ -737,8 +777,14 @@ def _render_custom_parametric_grid_section(
                 key="wb_grid_saved_study",
             )
             selected_study = study_options[label]
-            records = StudyRepository(active_db).list_run_records_for_study(selected_study.id)
-            st.dataframe(_run_records_dataframe(records))
+            summary = load_saved_parametric_grid_summary(active_db, selected_study.id)
+            if summary.empty:
+                st.info("Selected study has no persisted runs yet.")
+            else:
+                _render_parametric_grid_outputs(st, summary, key_prefix=f"wb_grid_saved_{selected_study.id}")
+            with st.expander("Raw persisted run records", expanded=False):
+                records = StudyRepository(active_db).list_run_records_for_study(selected_study.id)
+                st.dataframe(_run_records_dataframe(records))
 
 
 def render_project_workbench(params: dict[str, Any]) -> None:

@@ -10,8 +10,9 @@ from __future__ import annotations
 import io
 import math
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -29,11 +30,49 @@ from railway_simulator.services.project_service import ProjectService
 from railway_simulator.services.simulation_service import SimulationService
 from railway_simulator.spectrum.service import SpectrumService
 from railway_simulator.studies.full_train import FullTrainStudyRunner, FullTrainStudySpec
+from railway_simulator.studies.parametric_grid import ParametricScenario
+from railway_simulator.studies.parametric_grid_cli import run_grid_from_yaml
+from railway_simulator.studies.parametric_grid_io import (
+    ParametricGridDefinition,
+    load_parametric_grid_yaml,
+    parametric_grid_definition_to_preview,
+)
+from railway_simulator.studies.parametric_grid_persistence import (
+    PersistentGridRunResult,
+    run_parametric_grid_persistent,
+)
 from railway_simulator.reporting import ChapterBuildResult, build_latex_chapter
 from railway_simulator.ui.st_compat import safe_button, safe_download_button, safe_plotly_chart
 
 
 DEFAULT_PERIOD_GRID_MS = tuple(float(v) for v in np.logspace(math.log10(10.0), math.log10(3000.0), 30))
+DEFAULT_PARAMETRIC_SPEC_PATH = Path("configs/studies/impact_parametric_mini.yml")
+DEFAULT_PARAMETRIC_DB_PATH = Path("projects/impact_workbench/project.sqlite")
+DEFAULT_PARAMETRIC_PROJECT_NAME = "impact_workbench"
+PARAMETRIC_GRID_SUMMARY_COLUMNS = (
+    "scenario_index",
+    "scenario_label",
+    "status",
+    "peak_Impact_Force_MN",
+    "peak_Penetration_mm",
+    "peak_Acceleration_g",
+    "t_end",
+    "n_steps",
+    "warnings",
+    "error",
+)
+
+ParametricGridRunCaseFn = Callable[[dict[str, Any], ParametricScenario], Any]
+
+
+@dataclass(frozen=True)
+class ParametricGridUIRunResult:
+    """Small UI-facing result bundle for generic parametric grids."""
+
+    summary: pd.DataFrame
+    definition: ParametricGridDefinition
+    base_config_path: Path | None
+    persistent_result: PersistentGridRunResult | None = None
 
 
 def parse_float_csv(text: str, *, default: tuple[float, ...] = ()) -> tuple[float, ...]:
@@ -298,6 +337,186 @@ def _curve_records_dataframe(records: list[dict[str, Any]]) -> pd.DataFrame:
     return df[cols]
 
 
+def normalize_parametric_limit(value: int | None) -> int | None:
+    """Normalize UI limit semantics: None/0 means run every scenario."""
+    if value is None:
+        return None
+    limit = int(value)
+    if limit < 0:
+        raise ValueError("limit scenarios must be non-negative")
+    return None if limit == 0 else limit
+
+
+def load_parametric_grid_ui_spec(spec_path: str | Path) -> ParametricGridDefinition:
+    """Load a YAML parametric grid spec for the Workbench UI."""
+    return load_parametric_grid_yaml(spec_path)
+
+
+def parametric_grid_spec_metadata(definition: ParametricGridDefinition) -> dict[str, Any]:
+    """Return basic display metadata for a loaded parametric grid spec."""
+    return {
+        "study_name": definition.grid.name,
+        "description": definition.grid.description or "",
+        "base_config_path": str(definition.base_config_path) if definition.base_config_path is not None else "",
+        "dimensions": len(definition.grid.dimensions),
+        "quantities": ", ".join(definition.grid.quantities),
+        "srs_enabled": bool(definition.srs.get("enabled", False)),
+    }
+
+
+def preview_parametric_grid_ui_scenarios(spec_path: str | Path) -> pd.DataFrame:
+    """Preview YAML scenarios without executing the solver or touching SQLite."""
+    definition = load_parametric_grid_ui_spec(spec_path)
+    rows = parametric_grid_definition_to_preview(definition)
+    preview_rows = []
+    for row in rows:
+        preview_rows.append(
+            {
+                "scenario_index": row.get("index"),
+                "scenario_label": row.get("label"),
+                **{key: value for key, value in row.items() if key not in {"index", "label"}},
+            }
+        )
+    return pd.DataFrame(preview_rows)
+
+
+def parametric_grid_summary_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build the Workbench summary table with stable front columns."""
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    front = [col for col in PARAMETRIC_GRID_SUMMARY_COLUMNS if col in df.columns]
+    metric_cols = set(PARAMETRIC_GRID_SUMMARY_COLUMNS)
+    metadata_cols = [
+        col
+        for col in df.columns
+        if col not in metric_cols and col not in {"scenario_index", "scenario_label", "status"}
+    ]
+    ordered = [
+        col
+        for col in ("scenario_index", "scenario_label", "status")
+        if col in df.columns
+    ]
+    ordered.extend(metadata_cols)
+    ordered.extend(col for col in front if col not in ordered)
+    ordered.extend(col for col in df.columns if col not in ordered)
+    return df[ordered]
+
+
+def parametric_grid_warning_rows(summary: pd.DataFrame) -> pd.DataFrame:
+    """Return rows with non-empty warnings for prominent UI display."""
+    if summary.empty or "warnings" not in summary.columns:
+        return pd.DataFrame()
+    warnings = summary["warnings"].fillna("").astype(str).str.strip()
+    mask = warnings.ne("") & warnings.str.lower().ne("nan")
+    cols = [
+        col
+        for col in ("scenario_index", "scenario_label", "status", "warnings")
+        if col in summary.columns
+    ]
+    return summary.loc[mask, cols].copy()
+
+
+def parametric_grid_peak_force_chart_data(summary: pd.DataFrame) -> pd.DataFrame:
+    """Return chart-ready peak force data, or an empty frame when unavailable."""
+    required = {"scenario_label", "peak_Impact_Force_MN"}
+    if summary.empty or not required.issubset(summary.columns):
+        return pd.DataFrame(columns=["scenario_label", "peak_Impact_Force_MN"])
+    out = summary[["scenario_label", "peak_Impact_Force_MN"]].copy()
+    out["peak_Impact_Force_MN"] = pd.to_numeric(out["peak_Impact_Force_MN"], errors="coerce")
+    return out.dropna(subset=["peak_Impact_Force_MN"])
+
+
+def build_parametric_peak_force_figure(summary: pd.DataFrame) -> go.Figure | None:
+    """Build the basic peak force bar chart shown after a grid run."""
+    chart_data = parametric_grid_peak_force_chart_data(summary)
+    if chart_data.empty:
+        return None
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=chart_data["scenario_label"],
+                y=chart_data["peak_Impact_Force_MN"],
+                name="Peak force",
+            )
+        ]
+    )
+    fig.update_layout(
+        title="Peak impact force by scenario",
+        xaxis_title="Scenario",
+        yaxis_title="Peak Impact_Force_MN",
+        height=420,
+    )
+    return fig
+
+
+def parametric_grid_summary_csv_bytes(summary: pd.DataFrame) -> bytes:
+    """Generate UTF-8 CSV bytes for the summary download button."""
+    return summary.to_csv(index=False).encode("utf-8")
+
+
+def run_parametric_grid_ui_study(
+    spec_path: str | Path,
+    *,
+    db_path: str | Path | None = None,
+    project_name: str | None = DEFAULT_PARAMETRIC_PROJECT_NAME,
+    study_name: str | None = None,
+    limit: int | None = 1,
+    strict: bool = False,
+    persist_results: bool = True,
+    run_case_fn: ParametricGridRunCaseFn | None = None,
+) -> ParametricGridUIRunResult:
+    """Run a generic parametric grid for the Workbench UI.
+
+    Persistent runs use the same SQLite runner as the CLI. Non-persistent runs
+    use the existing in-memory orchestration.
+    """
+    normalized_limit = normalize_parametric_limit(limit)
+    resolved_study_name = study_name.strip() if isinstance(study_name, str) and study_name.strip() else None
+
+    if persist_results:
+        if db_path is None:
+            raise ValueError("db_path is required when persist_results=True")
+        persistent = run_parametric_grid_persistent(
+            spec_path,
+            db_path=db_path,
+            project_name=project_name or None,
+            study_name=resolved_study_name,
+            limit=normalized_limit,
+            strict=strict,
+            run_case_fn=run_case_fn,
+        )
+        return ParametricGridUIRunResult(
+            summary=parametric_grid_summary_dataframe(persistent.rows),
+            definition=load_parametric_grid_ui_spec(spec_path),
+            base_config_path=persistent.base_config_path,
+            persistent_result=persistent,
+        )
+
+    definition, base_config_path, rows = run_grid_from_yaml(
+        spec_path,
+        limit=normalized_limit,
+        strict=strict,
+        run_case_fn=run_case_fn,
+    )
+    return ParametricGridUIRunResult(
+        summary=parametric_grid_summary_dataframe(rows),
+        definition=definition,
+        base_config_path=base_config_path,
+    )
+
+
+def list_parametric_grid_studies(db: ProjectDatabase, project_id: str) -> list[Any]:
+    """List saved generic parametric grid studies, newest first."""
+    studies = [
+        study
+        for study in StudyRepository(db).list_studies(project_id)
+        if study.study_type == "parametric_grid"
+    ]
+    return list(reversed(studies))
+
+
 def sanitize_path_component(value: str, *, fallback: str = "study") -> str:
     """Return a filesystem-safe, human-readable path component."""
     raw = str(value or "").strip().lower()
@@ -356,6 +575,172 @@ def zip_report_bundle_bytes(output_dir: str | Path) -> bytes:
     return buffer.getvalue()
 
 
+def _render_parametric_grid_outputs(st: Any, summary: pd.DataFrame, *, key_prefix: str) -> None:
+    """Render summary, warnings, chart, and CSV download for a grid result."""
+    if summary.empty:
+        st.info("No summary rows available.")
+        return
+
+    st.markdown("#### Summary")
+    st.dataframe(summary)
+
+    warning_rows = parametric_grid_warning_rows(summary)
+    if not warning_rows.empty:
+        st.warning("Warnings were reported for one or more scenarios.")
+        st.dataframe(warning_rows)
+
+    st.markdown("#### Peak force")
+    fig = build_parametric_peak_force_figure(summary)
+    if fig is None:
+        st.info("No peak force metric available for this run.")
+    else:
+        safe_plotly_chart(st, fig, width="stretch")
+
+    safe_download_button(
+        st,
+        label="Download summary CSV",
+        data=parametric_grid_summary_csv_bytes(summary),
+        file_name="parametric_grid_summary.csv",
+        mime="text/csv",
+        width="stretch",
+        key=f"{key_prefix}_summary_csv",
+    )
+
+
+def _render_custom_parametric_grid_section(
+    *,
+    active_db_path: str | Path | None = None,
+    active_db: ProjectDatabase | None = None,
+    active_project_id: str | None = None,
+) -> None:
+    """Render the generic YAML-defined parametric grid UI."""
+    import streamlit as st
+
+    st.markdown("#### Custom parametric grid")
+
+    default_db = str(active_db_path or DEFAULT_PARAMETRIC_DB_PATH)
+    col_left, col_right = st.columns(2)
+    with col_left:
+        spec_path_text = st.text_input(
+            "Spec path",
+            value=st.session_state.get("wb_grid_spec_path", str(DEFAULT_PARAMETRIC_SPEC_PATH)),
+            key="wb_grid_spec_path_input",
+        )
+        project_name = st.text_input(
+            "Project name",
+            value=st.session_state.get("wb_grid_project_name", DEFAULT_PARAMETRIC_PROJECT_NAME),
+            key="wb_grid_project_name_input",
+        )
+        limit_value = st.number_input(
+            "Limit scenarios",
+            min_value=0,
+            value=1,
+            step=1,
+            key="wb_grid_limit",
+            help="Use 0 to run all scenarios.",
+        )
+    with col_right:
+        db_path_text = st.text_input(
+            "DB path",
+            value=st.session_state.get("wb_grid_db_path", default_db),
+            key="wb_grid_db_path_input",
+        )
+        study_name = st.text_input(
+            "Study name",
+            value=st.session_state.get("wb_grid_study_name", ""),
+            key="wb_grid_study_name_input",
+            help="Leave blank to use study.name from YAML.",
+        )
+        strict_mode = st.checkbox("Strict mode", value=False, key="wb_grid_strict")
+        persist_results = st.checkbox("Persist results", value=True, key="wb_grid_persist")
+
+    col_load, col_preview, col_run = st.columns(3)
+    with col_load:
+        load_clicked = safe_button(st, "Load spec", width="stretch", key="wb_grid_load")
+    with col_preview:
+        preview_clicked = safe_button(st, "Preview scenarios", width="stretch", key="wb_grid_preview")
+    with col_run:
+        run_clicked = safe_button(st, "Run study", type="primary", width="stretch", key="wb_grid_run")
+
+    if load_clicked:
+        try:
+            definition = load_parametric_grid_ui_spec(spec_path_text)
+            st.session_state["wb_grid_metadata"] = parametric_grid_spec_metadata(definition)
+            st.session_state["wb_grid_spec_path"] = spec_path_text
+            st.success(f"Loaded spec: {definition.grid.name}")
+        except Exception as exc:
+            st.session_state.pop("wb_grid_metadata", None)
+            st.error(f"Could not load parametric grid spec: {exc}")
+
+    metadata = st.session_state.get("wb_grid_metadata")
+    if metadata:
+        st.markdown("#### Spec metadata")
+        st.dataframe(pd.DataFrame([metadata]))
+
+    if preview_clicked:
+        try:
+            preview_df = preview_parametric_grid_ui_scenarios(spec_path_text)
+            st.session_state["wb_grid_preview_df"] = preview_df
+            st.success(f"Previewed {len(preview_df)} scenario(s).")
+        except Exception as exc:
+            st.session_state.pop("wb_grid_preview_df", None)
+            st.error(f"Could not preview scenarios: {exc}")
+
+    preview_df = st.session_state.get("wb_grid_preview_df")
+    if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
+        st.markdown("#### Scenario preview")
+        st.dataframe(preview_df)
+
+    if run_clicked:
+        try:
+            with st.spinner("Running parametric grid study..."):
+                result = run_parametric_grid_ui_study(
+                    spec_path_text,
+                    db_path=db_path_text,
+                    project_name=project_name,
+                    study_name=study_name,
+                    limit=int(limit_value),
+                    strict=bool(strict_mode),
+                    persist_results=bool(persist_results),
+                )
+            st.session_state["wb_grid_summary_df"] = result.summary
+            st.session_state["wb_grid_db_path"] = db_path_text
+            st.session_state["wb_grid_project_name"] = project_name
+            st.session_state["wb_grid_study_name"] = study_name
+            if result.persistent_result is not None:
+                st.session_state["wb_db_path"] = str(result.persistent_result.db.path)
+                st.session_state["wb_project_id"] = result.persistent_result.project.id
+                st.session_state["wb_last_study_id"] = result.persistent_result.study.id
+                st.success(
+                    f"Study stored: {result.persistent_result.study.name} "
+                    f"({len(result.summary)} scenario(s))"
+                )
+            else:
+                st.success(f"Study completed in memory: {len(result.summary)} scenario(s)")
+        except Exception as exc:
+            st.error(f"Could not run parametric grid study: {exc}")
+
+    summary_df = st.session_state.get("wb_grid_summary_df")
+    if isinstance(summary_df, pd.DataFrame):
+        _render_parametric_grid_outputs(st, summary_df, key_prefix="wb_grid")
+
+    if active_db is not None and active_project_id is not None:
+        st.markdown("#### Saved parametric grid studies")
+        studies = list_parametric_grid_studies(active_db, active_project_id)
+        if not studies:
+            st.info("No saved parametric grid studies in this project yet.")
+        else:
+            study_options = {f"{s.created_at} | {s.name} | {s.status} | {s.id}": s for s in studies}
+            label = st.selectbox(
+                "Saved study",
+                list(study_options),
+                key="wb_grid_saved_study",
+            )
+            selected_study = study_options[label]
+            records = StudyRepository(active_db).list_run_records_for_study(selected_study.id)
+            st.dataframe(_run_records_dataframe(records))
+
+
 def render_project_workbench(params: dict[str, Any]) -> None:
     """Render the persisted project/study/SRS workflow inside Streamlit."""
     import streamlit as st
@@ -407,12 +792,16 @@ def render_project_workbench(params: dict[str, Any]) -> None:
     db_path = st.session_state.get("wb_db_path")
     if not db_path:
         st.info("Create or open a project database to enable persisted studies.")
+        st.markdown("### Parametric studies")
+        _render_custom_parametric_grid_section(active_db_path=DEFAULT_PARAMETRIC_DB_PATH)
         return
 
     try:
         db, project = _open_db_context(db_path)
     except Exception as exc:
         st.error(f"Active project database is not usable: {exc}")
+        st.markdown("### Parametric studies")
+        _render_custom_parametric_grid_section(active_db_path=db_path)
         return
 
     project_root = project.normalized_root()
@@ -422,9 +811,20 @@ def render_project_workbench(params: dict[str, Any]) -> None:
     config_repo = ConfigSnapshotRepository(db)
     spectrum_repo = SpectrumRepository(db)
 
-    sub_launch, sub_compare, sub_report, sub_browser = st.tabs(
-        ["Launch full-train study", "SRS comparison", "Report bundle", "Database browser"]
+    sub_grid, sub_launch, sub_compare, sub_report, sub_browser = st.tabs(
+        ["Parametric studies", "Launch full-train study", "SRS comparison", "Report bundle", "Database browser"]
     )
+
+    # ------------------------------------------------------------------
+    # Generic YAML parametric grid launcher
+    # ------------------------------------------------------------------
+    with sub_grid:
+        st.markdown("### Parametric studies")
+        _render_custom_parametric_grid_section(
+            active_db_path=db.path,
+            active_db=db,
+            active_project_id=project.id,
+        )
 
     # ------------------------------------------------------------------
     # Full-train launcher

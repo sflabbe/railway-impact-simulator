@@ -158,10 +158,37 @@ class SpectrumService:
 
     @staticmethod
     def ratio(numerator: pd.DataFrame, denominator: pd.DataFrame, *, value_column: str = "Feq_MN") -> pd.DataFrame:
+        if "Tn_ms" not in numerator.columns or "Tn_ms" not in denominator.columns:
+            raise KeyError("period column not found: Tn_ms")
         if value_column not in numerator.columns or value_column not in denominator.columns:
             raise KeyError(f"value column not found: {value_column}")
-        periods = numerator["Tn_ms"].to_numpy(dtype=float)
-        den = np.interp(periods, denominator["Tn_ms"].to_numpy(dtype=float), denominator[value_column].to_numpy(dtype=float))
-        num = numerator[value_column].to_numpy(dtype=float)
+
+        num_periods = numerator["Tn_ms"].to_numpy(dtype=float)
+        den_periods = denominator["Tn_ms"].to_numpy(dtype=float)
+        num_values = numerator[value_column].to_numpy(dtype=float)
+        den_values = denominator[value_column].to_numpy(dtype=float)
+        for label, periods, values in (
+            ("numerator", num_periods, num_values),
+            ("denominator", den_periods, den_values),
+        ):
+            if periods.ndim != 1 or periods.size == 0 or not np.all(np.isfinite(periods)):
+                raise ValueError(f"{label} Tn_ms must be a finite, non-empty 1D period grid")
+            if np.any(np.diff(periods) <= 0.0):
+                raise ValueError(f"{label} Tn_ms must be strictly increasing")
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f"{label} {value_column} must contain only finite values")
+
+        overlap_low = max(float(num_periods[0]), float(den_periods[0]))
+        overlap_high = min(float(num_periods[-1]), float(den_periods[-1]))
+        if overlap_high < overlap_low:
+            raise ValueError("period grids do not overlap")
+
+        mask = (num_periods >= overlap_low) & (num_periods <= overlap_high)
+        periods = num_periods[mask]
+        num = num_values[mask]
+        den = np.interp(periods, den_periods, den_values, left=np.nan, right=np.nan)
+        if np.any(~np.isfinite(den)):
+            raise ValueError("ratio interpolation produced periods outside the denominator grid")
+
         ratio = np.divide(num, den, out=np.full_like(num, np.nan, dtype=float), where=np.abs(den) > 0.0)
         return pd.DataFrame({"Tn_ms": periods, f"{value_column}_ratio": ratio})

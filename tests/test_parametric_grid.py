@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from railway_simulator.core.engine import run_simulation
+from railway_simulator.studies import normalize_contact_law_after_contact_model_override
 from railway_simulator.studies.parametric_grid import (
     ParametricGridSpec,
     SweepDimension,
@@ -280,6 +281,64 @@ def _contact_model_override_scenario(value: str):
         ),
     )
     return build_parametric_scenarios(spec)[0]
+
+
+def test_contact_law_normalization_removes_law_without_mutating_input() -> None:
+    base = {
+        "contact_model": "hooke",
+        "contact_law": {"points": [[0.0, 0.0], [0.1, 1.0]]},
+        "collision_meta": {"preset": "en15227"},
+    }
+
+    modified = normalize_contact_law_after_contact_model_override(
+        base,
+        contact_model_overridden=True,
+    )
+
+    assert modified["contact_law"] is None
+    assert modified["collision_meta"]["contact_law_removed_due_to_contact_model_override"] is True
+    assert base == {
+        "contact_model": "hooke",
+        "contact_law": {"points": [[0.0, 0.0], [0.1, 1.0]]},
+        "collision_meta": {"preset": "en15227"},
+    }
+
+
+def test_contact_law_normalization_preserves_tabulated_law_without_mutating_input() -> None:
+    base = {
+        "contact_model": "tabulated",
+        "contact_law": {"points": [[0.0, 0.0], [0.1, 1.0]]},
+        "collision_meta": {"preset": "en15227"},
+    }
+
+    modified = normalize_contact_law_after_contact_model_override(
+        base,
+        contact_model_overridden=True,
+    )
+
+    assert modified["contact_law"] == {"points": [[0.0, 0.0], [0.1, 1.0]]}
+    assert "contact_law_removed_due_to_contact_model_override" not in modified["collision_meta"]
+    assert base == {
+        "contact_model": "tabulated",
+        "contact_law": {"points": [[0.0, 0.0], [0.1, 1.0]]},
+        "collision_meta": {"preset": "en15227"},
+    }
+
+
+def test_contact_law_normalization_isolates_output_metadata() -> None:
+    base = {
+        "contact_model": "tabulated",
+        "contact_law": {"points": [[0.0, 0.0], [0.1, 1.0]]},
+        "collision_meta": {"preset": "en15227"},
+    }
+
+    modified = normalize_contact_law_after_contact_model_override(
+        base,
+        contact_model_overridden=True,
+    )
+    modified["collision_meta"]["new_key"] = "output-only"
+
+    assert base["collision_meta"] == {"preset": "en15227"}
 
 
 def test_contact_model_override_removes_inherited_tabulated_contact_law() -> None:

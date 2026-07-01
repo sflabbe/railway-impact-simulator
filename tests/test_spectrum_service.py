@@ -55,3 +55,41 @@ def test_spectrum_envelope_rejects_non_overlapping_period_grids() -> None:
 
     with pytest.raises(ValueError, match="period grids do not overlap"):
         SpectrumService.envelope([c1, c2])
+
+
+def test_spectrum_ratio_same_grid_is_elementwise() -> None:
+    numerator = pd.DataFrame({"Tn_ms": [100.0, 200.0, 300.0], "Feq_MN": [2.0, 6.0, 12.0]})
+    denominator = pd.DataFrame({"Tn_ms": [100.0, 200.0, 300.0], "Feq_MN": [1.0, 2.0, 3.0]})
+
+    ratio = SpectrumService.ratio(numerator, denominator)
+
+    assert ratio["Tn_ms"].tolist() == [100.0, 200.0, 300.0]
+    assert ratio["Feq_MN_ratio"].tolist() == pytest.approx([2.0, 3.0, 4.0])
+
+
+def test_spectrum_ratio_partial_overlap_uses_only_valid_numerator_periods() -> None:
+    numerator = pd.DataFrame({"Tn_ms": [100.0, 200.0, 300.0], "Feq_MN": [9.0, 6.0, 12.0]})
+    denominator = pd.DataFrame({"Tn_ms": [200.0, 300.0, 400.0], "Feq_MN": [2.0, 3.0, 4.0]})
+
+    ratio = SpectrumService.ratio(numerator, denominator)
+
+    assert ratio["Tn_ms"].tolist() == [200.0, 300.0]
+    assert ratio["Feq_MN_ratio"].tolist() == pytest.approx([3.0, 4.0])
+
+
+def test_spectrum_ratio_rejects_non_overlapping_period_grids() -> None:
+    numerator = pd.DataFrame({"Tn_ms": [100.0, 150.0], "Feq_MN": [2.0, 3.0]})
+    denominator = pd.DataFrame({"Tn_ms": [300.0, 400.0], "Feq_MN": [4.0, 5.0]})
+
+    with pytest.raises(ValueError, match="period grids do not overlap"):
+        SpectrumService.ratio(numerator, denominator)
+
+
+def test_spectrum_ratio_does_not_use_endpoint_clamping_outside_overlap() -> None:
+    numerator = pd.DataFrame({"Tn_ms": [100.0, 200.0, 300.0], "Feq_MN": [999.0, 6.0, 12.0]})
+    denominator = pd.DataFrame({"Tn_ms": [200.0, 300.0, 400.0], "Feq_MN": [0.5, 3.0, 4.0]})
+
+    ratio = SpectrumService.ratio(numerator, denominator)
+
+    assert 100.0 not in ratio["Tn_ms"].tolist()
+    assert ratio["Feq_MN_ratio"].tolist() == pytest.approx([12.0, 4.0])

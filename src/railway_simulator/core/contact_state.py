@@ -9,6 +9,10 @@ engine convention is preserved:
 
 ContactModels then converts du_contact to signed penetration rate
 ``delta_dot = -du_contact``.
+
+If a body starts already penetrating while moving away, there is no captured
+impact approach speed. In that state ``v0_contact=np.inf`` is used as an
+explicit no-damping sentinel for restitution-based contact laws.
 """
 
 from __future__ import annotations
@@ -64,7 +68,8 @@ class ContactState:
             if take:
                 v0_new[:take] = v0[:take]
             v0 = v0_new
-        v0[:n] = np.where(np.isfinite(v0[:n]) & (np.abs(v0[:n]) > 1.0e-8), np.abs(v0[:n]), 1.0)
+        valid_finite = np.isfinite(v0[:n]) & (np.abs(v0[:n]) > 1.0e-8)
+        v0[:n] = np.where(valid_finite | np.isinf(v0[:n]), np.abs(v0[:n]), 1.0)
         return cls(active=active_arr, v0_contact=v0)
 
     @staticmethod
@@ -84,9 +89,12 @@ class ContactState:
     def update(self, q: np.ndarray, qp: np.ndarray, *, n_masses: int | None = None) -> "ContactState":
         """Update active flags and v0_contact from the current state.
 
-        New contact is registered only for masses that are both penetrating and
-        approaching the wall.  Lost contact resets the corresponding v0 to 1.0,
-        preserving historical engine behavior outside contact.
+        Valid impact speeds are captured only for masses that are penetrating
+        and approaching the wall. Masses already penetrating while moving away
+        are marked active with ``v0_contact=np.inf`` so contact damping that
+        depends on initial impact speed is disabled instead of using the
+        historical default of 1.0 m/s. Lost contact resets the corresponding
+        v0 to 1.0, preserving historical engine behavior outside contact.
         """
         n = int(n_masses or self.active.size)
         q_arr = np.asarray(q, dtype=float)
@@ -109,10 +117,16 @@ class ContactState:
             return ContactState(active=active, v0_contact=v0)
 
         approaching = in_contact & (qp_arr[:n] < 0.0)
-        new_contact = approaching & (~active)
+        invalid_v0 = ~np.isfinite(v0[:n])
+        new_contact = approaching & ((~active) | invalid_v0)
         if np.any(new_contact):
             active[new_contact] = True
             v0[:n][new_contact] = np.maximum(np.abs(qp_arr[:n][new_contact]), 1.0e-8)
+
+        already_penetrating_without_impact_speed = in_contact & (~approaching) & (~active)
+        if np.any(already_penetrating_without_impact_speed):
+            active[already_penetrating_without_impact_speed] = True
+            v0[:n][already_penetrating_without_impact_speed] = np.inf
 
         lost_contact = (~in_contact) & active
         if np.any(lost_contact):

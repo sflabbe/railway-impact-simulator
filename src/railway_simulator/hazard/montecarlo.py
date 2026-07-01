@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 import numpy as np
@@ -422,9 +422,15 @@ def inverse_iso_demand_region(
     Tn_ms: float = 100.0,
     feq_fn: Callable[[float], float] | None = None,
     mc_params: MCParams | None = None,
+    common_random_numbers: bool = True,
 ) -> pd.DataFrame:
     """
     Construct inverse iso-demand region in (v0, beta_wall) space.
+
+    By default, every grid cell reuses the same Monte Carlo seed
+    (common_random_numbers=True). This intentionally reduces sampling noise
+    when comparing neighboring cells. Set common_random_numbers=False to derive
+    deterministic cell-specific seeds from mc_params.seed and the grid indices.
 
     For each (v0, beta_wall):
         df = sample_mc_scenarios(...)
@@ -467,13 +473,19 @@ def inverse_iso_demand_region(
     period = _positive_float("Tn_ms", Tn_ms)
 
     rows: list[dict[str, object]] = []
-    for v0 in v0_values:
-        for beta_wall in beta_values:
+    base_mc_params = mc_params if mc_params is not None else MCParams()
+    for v_index, v0 in enumerate(v0_values):
+        for beta_index, beta_wall in enumerate(beta_values):
+            cell_mc_params = base_mc_params
+            if not common_random_numbers and base_mc_params.seed is not None:
+                seed_sequence = np.random.SeedSequence([int(base_mc_params.seed), int(v_index), int(beta_index)])
+                cell_seed = int(seed_sequence.generate_state(1, dtype=np.uint32)[0])
+                cell_mc_params = replace(base_mc_params, seed=cell_seed)
             df = sample_mc_scenarios(
                 v0,
                 a,
                 beta_wall,
-                mc_params=mc_params,
+                mc_params=cell_mc_params,
                 feq_fn=feq_fn,
                 Tn_ms=period,
             )

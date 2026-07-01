@@ -68,15 +68,36 @@ def set_by_path(cfg: Dict[str, Any], path: str, value: Any) -> Dict[str, Any]:
     d: Any = new_cfg
     tokens = _parse_path_tokens(path)
     for (key, idx) in tokens[:-1]:
-        if key not in d or not isinstance(d[key], dict):
+        if not isinstance(d, dict):
+            raise TypeError(f"Path '{path}' cannot descend through {type(d).__name__} at '{key}'")
+        if key not in d:
+            if idx is not None:
+                raise KeyError(f"Path '{path}' not found at key '{key}'")
             d[key] = {}
-        d = d[key]
-        if idx is not None:
-            if not isinstance(d, (list, tuple)):
-                raise TypeError(f"Path '{path}' expects list at '{key}', got {type(d)}")
-            d = d[idx]
+        child = d[key]
+        if idx is None:
+            if not isinstance(child, dict):
+                raise TypeError(
+                    f"Path '{path}' cannot descend through non-dict key '{key}' "
+                    f"(got {type(child).__name__})"
+                )
+            d = child
+        else:
+            if not isinstance(child, (list, tuple)):
+                raise TypeError(f"Path '{path}' expects list at '{key}', got {type(child)}")
+            try:
+                d = child[idx]
+            except IndexError as e:
+                raise IndexError(f"Path '{path}' index {idx} out of range for '{key}'") from e
+            if not isinstance(d, dict):
+                raise TypeError(
+                    f"Path '{path}' cannot descend through non-dict item '{key}[{idx}]' "
+                    f"(got {type(d).__name__})"
+                )
 
     last_key, last_idx = tokens[-1]
+    if not isinstance(d, dict):
+        raise TypeError(f"Path '{path}' cannot set key on {type(d).__name__}")
     if last_key not in d:
         # allow setting new key
         d[last_key] = [] if last_idx is not None else None
@@ -89,6 +110,35 @@ def set_by_path(cfg: Dict[str, Any], path: str, value: Any) -> Dict[str, Any]:
             raise IndexError(f"Path '{path}' index {last_idx} out of range for '{last_key}'")
         d[last_key][last_idx] = value
     return new_cfg
+
+
+def normalize_contact_law_after_contact_model_override(
+    cfg: Dict[str, Any],
+    *,
+    contact_model_overridden: bool,
+) -> Dict[str, Any]:
+    """Clear inherited tabulated laws when a workflow overrides contact_model.
+
+    Collision presets may expand to ``contact_model='tabulated'`` plus a
+    concrete ``contact_law`` object. Parametric workflows are allowed to sweep
+    ``contact_model`` away from ``tabulated``; in that specific override path
+    the inherited tabulated law no longer applies and must be removed before
+    strict contact-model validation runs.
+    """
+    if not contact_model_overridden:
+        return cfg
+
+    model = str(cfg.get("contact_model", "")).strip().lower()
+    if model == "tabulated" or cfg.get("contact_law") is None:
+        return cfg
+
+    cfg["contact_law"] = None
+    meta = cfg.get("collision_meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        cfg["collision_meta"] = meta
+    meta["contact_law_removed_due_to_contact_model_override"] = True
+    return cfg
 
 
 # ----------------------------

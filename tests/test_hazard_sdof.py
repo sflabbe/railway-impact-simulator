@@ -190,9 +190,40 @@ def test_response_spectrum_default_grid_columns_length_and_nonnegative_feq() -> 
 
 def test_response_spectrum_tn_100_ms_equals_scalar_call() -> None:
     t, F = half_sine_pulse(Tp=0.10, F_peak=1.0, dt=1e-4)
-    spectrum = compute_response_spectrum(t, F, Tn_grid_ms=np.array([50.0, 100.0, 200.0]))
+    spectrum = compute_response_spectrum(
+        t,
+        F,
+        Tn_grid_ms=np.array([50.0, 100.0, 200.0]),
+        free_vibration_padding=False,
+    )
     scalar = equivalent_static_force_sdof(t, F, Tn_s=0.100)
     assert spectrum.loc[1, "Feq"] == pytest.approx(scalar)
+
+
+def test_response_spectrum_padding_captures_post_pulse_peak() -> None:
+    t = np.arange(0.0, 0.021, 1.0e-3)
+    F = np.zeros_like(t)
+    F[t <= 0.005] = 1.0
+    periods = np.array([2000.0])
+
+    unpadded = compute_response_spectrum(
+        t,
+        F,
+        Tn_grid_ms=periods,
+        zeta=0.0,
+        free_vibration_padding=False,
+    )
+    padded = compute_response_spectrum(
+        t,
+        F,
+        Tn_grid_ms=periods,
+        zeta=0.0,
+        free_vibration_padding=True,
+        padding_periods=1.0,
+    )
+
+    assert float(padded.loc[0, "Feq"]) > float(unpadded.loc[0, "Feq"])
+    assert np.isfinite(float(padded.loc[0, "Feq"]))
 
 
 @pytest.mark.parametrize(

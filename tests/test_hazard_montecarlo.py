@@ -279,6 +279,16 @@ def test_in_iso_demand_is_boolean(mc_fast: MCParams) -> None:
     assert df["in_iso_demand"].dtype == bool
 
 
+def test_inverse_cell_specific_random_numbers_are_deterministic(mc_fast: MCParams) -> None:
+    args = (
+        np.array([60.0, 100.0]),
+        np.array([1.0, 5.0]),
+    )
+    df1 = inverse_iso_demand_region(*args, a_m=1.0, F_EN=6.0, mc_params=mc_fast, common_random_numbers=False)
+    df2 = inverse_iso_demand_region(*args, a_m=1.0, F_EN=6.0, mc_params=mc_fast, common_random_numbers=False)
+    pd.testing.assert_frame_equal(df1, df2)
+
+
 def test_result_is_region_not_point(mc_fast: MCParams) -> None:
     v0_grid = np.linspace(60.0, 200.0, 20)
     bw_grid = np.linspace(1.0, 60.0, 20)

@@ -13,7 +13,8 @@ from railway_simulator.persistence.repositories import ProjectRepository, StudyR
 from railway_simulator.studies.parametric_grid_persistence import run_parametric_grid_persistent
 
 
-MINI_SPEC_PATH = Path("configs/studies/impact_parametric_mini.yml")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MINI_SPEC_PATH = REPO_ROOT / "configs" / "studies" / "impact_parametric_mini.yml"
 
 
 def _fake_frame() -> pd.DataFrame:
@@ -219,4 +220,3 @@ def test_run_grid_cli_strict_fails_on_service_failure(
 
     assert result.exit_code != 0
     assert "service boom" in result.output
-

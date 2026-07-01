@@ -17,6 +17,9 @@ from railway_simulator.config.loader import (
 from railway_simulator.core.engine import run_simulation
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_invalid_partner_validation() -> None:
     cfg = {
         "collision": {
@@ -62,7 +65,7 @@ def test_en15227_c2_energy_computation(tmp_path: Path) -> None:
 
 
 def test_migrated_config_matches_legacy_results() -> None:
-    config_path = Path("configs/ice1_aluminum.yml")
+    config_path = REPO_ROOT / "configs" / "ice1_aluminum.yml"
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     raw["T_max"] = 0.02
     raw["h_init"] = 1.0e-4

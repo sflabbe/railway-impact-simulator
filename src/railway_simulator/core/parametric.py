@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
@@ -219,7 +220,7 @@ def build_speed_scenarios(
     scenarios = []
     for v_kmh, w in zip(speeds_kmh, weights):
         name = f"{prefix}{int(round(v_kmh))}"
-        params_i = dict(base_params)
+        params_i = copy.deepcopy(base_params)
         params_i["v0_init"] = -v_kmh / 3.6  # Convert to m/s, negative for barrier approach
 
         scenarios.append(

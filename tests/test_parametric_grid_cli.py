@@ -11,7 +11,8 @@ from railway_simulator.studies import parametric_grid_cli
 from railway_simulator.studies.parametric_grid_cli import run_grid_from_yaml
 
 
-MINI_SPEC_PATH = Path("configs/studies/impact_parametric_mini.yml")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MINI_SPEC_PATH = REPO_ROOT / "configs" / "studies" / "impact_parametric_mini.yml"
 
 
 def test_run_grid_dry_run_cli_finishes_ok() -> None:

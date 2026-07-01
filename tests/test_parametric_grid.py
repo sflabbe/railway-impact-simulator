@@ -1,5 +1,10 @@
+import contextlib
+import io
+from pathlib import Path
+
 import pytest
 
+from railway_simulator.core.engine import run_simulation
 from railway_simulator.studies.parametric_grid import (
     ParametricGridSpec,
     SweepDimension,
@@ -8,6 +13,10 @@ from railway_simulator.studies.parametric_grid import (
     preview_parametric_grid,
     run_parametric_grid_in_memory,
 )
+from railway_simulator.studies.parametric_grid_cli import load_base_config_for_grid
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _two_by_two_spec() -> ParametricGridSpec:
@@ -256,3 +265,45 @@ def test_apply_scenario_to_config_ignores_pathless_metadata_dimension() -> None:
 
     assert modified == {"speed_kmh": 20}
     assert scenario.metadata == {"case_group": "baseline", "speed_kmh": 20}
+
+
+def _contact_model_override_scenario(value: str):
+    spec = ParametricGridSpec(
+        name="contact_override",
+        dimensions=(
+            SweepDimension(
+                name="contact_model",
+                kind="parameter",
+                path="contact_model",
+                values=(value,),
+            ),
+        ),
+    )
+    return build_parametric_scenarios(spec)[0]
+
+
+def test_contact_model_override_removes_inherited_tabulated_contact_law() -> None:
+    base = load_base_config_for_grid(REPO_ROOT / "configs" / "mi_en15227_c1.yml")
+    assert base["contact_model"] == "tabulated"
+    assert base["contact_law"] is not None
+
+    modified = apply_scenario_to_config(base, _contact_model_override_scenario("hooke"))
+
+    assert modified["contact_model"] == "hooke"
+    assert modified["contact_law"] is None
+    assert modified["collision_meta"]["contact_law_removed_due_to_contact_model_override"] is True
+
+    modified.update({"T_max": 1.0e-4, "h_init": 1.0e-4, "step": 1, "T_int": (0.0, 1.0e-4)})
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        run_simulation(modified, emit_peak_diagnostics=False)
+
+
+def test_tabulated_contact_model_override_preserves_inherited_contact_law() -> None:
+    base = load_base_config_for_grid(REPO_ROOT / "configs" / "mi_en15227_c1.yml")
+
+    modified = apply_scenario_to_config(base, _contact_model_override_scenario("tabulated"))
+
+    assert modified["contact_model"] == "tabulated"
+    assert modified["contact_law"] is not None
+    assert "contact_law_removed_due_to_contact_model_override" not in modified.get("collision_meta", {})

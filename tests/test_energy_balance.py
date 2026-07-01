@@ -25,6 +25,7 @@ def _base_params() -> dict:
             "h_init": h_init,
             "step": int(np.ceil(T_max / h_init)),
             "T_int": (0.0, T_max),
+            "d0": -1.49,
         }
     )
     return params
@@ -35,6 +36,7 @@ def test_energy_residual_is_reasonable() -> None:
 
     df = run_simulation(params)
 
+    assert df["Impact_Force_MN"].max() > 0.0
     assert "E_num_ratio" in df.columns
     max_ratio = float(np.nanmax(np.abs(df["E_num_ratio"].to_numpy())))
     assert max_ratio < 0.05, f"Energy residual too large: {max_ratio:.4f}"
@@ -45,6 +47,7 @@ def test_dissipation_is_monotone_non_negative() -> None:
 
     df = run_simulation(params)
 
+    assert df["Impact_Force_MN"].max() > 0.0
     diss = df["E_diss_total_J"].to_numpy(dtype=float)
     assert diss.min() >= -1e-6
     assert np.diff(diss).min() >= -1e-6

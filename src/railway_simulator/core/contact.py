@@ -138,7 +138,8 @@ class ContactModels:
             - Linear models (hooke, ye, etc.): N/m
             - Hertzian models (hertz, hunt-crossley, etc.): N/m^1.5
         cr_wall : float
-            Coefficient of restitution (0 = perfectly plastic, 1 = perfectly elastic).
+            Coefficient of restitution. Some models permit cr_wall=0, but
+            models with damping terms divided by cr_wall require cr_wall > 0.
             Typical values: 0.3-0.8 for structural impacts.
         model : str
             Name of the contact model to use. Must be one of the keys in
@@ -172,6 +173,28 @@ class ContactModels:
         ...     model="hunt-crossley"
         ... )
         """
+        model_lower = (model or "").strip().lower()
+
+        if contact_law is not None and model_lower != "tabulated":
+            raise ValueError(
+                "contact_law was provided but contact_model is "
+                f"{model!r}; use contact_model='tabulated' for tabulated laws."
+            )
+        if model_lower == "tabulated" and contact_law is None:
+            raise ValueError("contact_law must be provided when using model 'tabulated'")
+        if model_lower != "tabulated" and model_lower not in ContactModels.MODELS:
+            raise ValueError(f"Unknown contact model: {model}")
+
+        requires_positive_cr = {
+            "flores",
+            "gonthier",
+            "ye",
+            "pant-wijeyewickrema",
+            "anagnostopoulos",
+        }
+        if model_lower in requires_positive_cr and cr_wall <= 0.0:
+            raise ValueError(f"{model_lower} requires cr_wall > 0 because its damping term divides by cr_wall.")
+
         u = np.asarray(u_contact, dtype=float)
         du = np.asarray(du_contact, dtype=float)
         v0_arr = np.asarray(v0, dtype=float)
@@ -200,18 +223,11 @@ class ContactModels:
         # Prevent division by zero in damping terms
         v0m = np.where(v0m < 1e-8, 1e-8, v0m)
 
-        model_lower = model.lower()
-
-        if contact_law is not None or model_lower == "tabulated":
-            if contact_law is None:
-                raise ValueError("contact_law must be provided when using model 'tabulated'")
+        if model_lower == "tabulated":
             R_tab = np.zeros_like(u)
             for idx, dval in zip(np.where(mask)[0], d):
                 R_tab[idx] = -contact_law.evaluate(float(dval))
             return R_tab
-
-        if model_lower not in ContactModels.MODELS:
-            raise ValueError(f"Unknown contact model: {model}")
 
         model_func = ContactModels.MODELS[model_lower]
 

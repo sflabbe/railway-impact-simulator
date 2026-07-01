@@ -11,6 +11,9 @@ import yaml
 from railway_simulator.core.engine import run_simulation
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _load_config(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
@@ -30,7 +33,7 @@ def _apply_short_run(params: dict) -> dict:
 
 
 def test_max_iter_without_picard_fields_is_ok() -> None:
-    params = _load_config(Path("configs/ice1_aluminum.yml"))
+    params = _load_config(REPO_ROOT / "configs" / "ice1_aluminum.yml")
     params = _apply_short_run(params)
 
     df = run_simulation(params)
@@ -40,7 +43,7 @@ def test_max_iter_without_picard_fields_is_ok() -> None:
 
 
 def test_picard_config_with_explicit_limits_is_ok() -> None:
-    params = _load_config(Path("configs/ice1_full_dissertation.yml"))
+    params = _load_config(REPO_ROOT / "configs" / "ice1_full_dissertation.yml")
     params = _apply_short_run(params)
 
     df = run_simulation(params)

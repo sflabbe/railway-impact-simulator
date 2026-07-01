@@ -26,6 +26,8 @@ class ForceDisplacementLaw:
         if disp_m <= self.gap_m:
             return 0.0
         disp = disp_m - self.gap_m
+        if disp >= self.disp_m[-1]:
+            return 0.0
         idx = np.searchsorted(self.disp_m, disp, side="right") - 1
         idx = int(np.clip(idx, 0, len(self.disp_m) - 2))
         x0, x1 = self.disp_m[idx], self.disp_m[idx + 1]
@@ -42,7 +44,10 @@ class ForceDisplacementLaw:
         if disp_m <= self.gap_m:
             return 0.0
         disp = disp_m - self.gap_m
-        disp = float(np.clip(disp, 0.0, self.disp_m[-1]))
+        disp = max(float(disp), 0.0)
+        if disp >= self.disp_m[-1]:
+            base = float(np.trapezoid(self.force_N, self.disp_m))
+            return base + float(self.force_N[-1]) * (disp - float(self.disp_m[-1]))
         x = np.concatenate([self.disp_m[self.disp_m <= disp], [disp]])
         y = np.concatenate([self.force_N[self.disp_m <= disp], [self.evaluate(disp_m)]])
         return float(np.trapezoid(y, x))

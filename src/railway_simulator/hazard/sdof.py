@@ -176,6 +176,8 @@ def compute_response_spectrum(
     Tn_grid_ms: np.ndarray | None = None,
     zeta: float = 0.05,
     oscillator_mass: float = 1.0,
+    free_vibration_padding: bool = True,
+    padding_periods: float = 1.0,
 ) -> pd.DataFrame:
     """
     Compute Feq(Tn) over a natural-period grid.
@@ -184,6 +186,13 @@ def compute_response_spectrum(
         Tn_grid_ms:
             If None, use 30 log-spaced values from 10 to 3000 ms.
             Otherwise must be finite, positive, 1D.
+
+    free_vibration_padding:
+        If True, append zero-force free vibration after the input record so
+        long-period oscillator peaks after a short pulse are captured.
+    padding_periods:
+        Number of maximum requested oscillator periods to append when
+        free_vibration_padding is True.
 
     Return:
         pd.DataFrame with columns exactly ["Tn_ms", "Feq"].
@@ -196,10 +205,33 @@ def compute_response_spectrum(
         if np.any(periods_ms <= 0.0):
             raise ValueError("all Tn_grid_ms values must be > 0")
 
+    time_values = _finite_1d_array("time_s", time_s)
+    force_values = _finite_1d_array("force", force)
+    if time_values.shape != force_values.shape:
+        raise ValueError("time_s and force must have the same length")
+    if time_values.size < 2:
+        raise ValueError("time_s and force must have length >= 2")
+    dt = np.diff(time_values)
+    if np.any(dt <= 0.0):
+        raise ValueError("time_s must be strictly increasing")
+
+    if free_vibration_padding:
+        pad_periods = _finite_float("padding_periods", padding_periods)
+        if pad_periods < 0.0:
+            raise ValueError("padding_periods must be >= 0")
+        pad_duration = pad_periods * float(np.max(periods_ms)) / 1000.0
+        if pad_duration > 0.0:
+            h_pad = float(dt[-1])
+            n_pad = int(math.ceil(pad_duration / h_pad))
+            if n_pad > 0:
+                extra_time = time_values[-1] + h_pad * np.arange(1, n_pad + 1, dtype=float)
+                time_values = np.concatenate([time_values, extra_time])
+                force_values = np.concatenate([force_values, np.zeros(n_pad, dtype=float)])
+
     feq = [
         equivalent_static_force_sdof(
-            time_s,
-            force,
+            time_values,
+            force_values,
             Tn_s=float(period_ms) / 1000.0,
             zeta=zeta,
             oscillator_mass=oscillator_mass,

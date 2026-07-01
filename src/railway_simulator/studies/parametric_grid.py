@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import get_by_path, set_by_path
+from . import get_by_path, normalize_contact_law_after_contact_model_override, set_by_path
 
 _PATHLESS_KINDS = {"metadata", "derived"}
 _LABEL_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -125,6 +125,7 @@ def apply_scenario_to_config(
         )
 
     config = copy.deepcopy(base_config)
+    contact_model_overridden = False
     for dimension in dimensions:
         if dimension.name not in scenario.parameters:
             raise ValueError(
@@ -156,8 +157,12 @@ def apply_scenario_to_config(
                 f"Cannot apply dimension '{dimension.name}' to path "
                 f"'{dimension.path}': value could not be written ({exc})."
             ) from exc
+        contact_model_overridden = contact_model_overridden or dimension.path == "contact_model"
 
-    return config
+    return normalize_contact_law_after_contact_model_override(
+        config,
+        contact_model_overridden=contact_model_overridden,
+    )
 
 
 def preview_parametric_grid(spec: ParametricGridSpec) -> list[dict[str, Any]]:

@@ -17,6 +17,7 @@ from railway_simulator.domain.study import StudyDefinition
 from railway_simulator.domain.vehicle import build_traxx_full_freight_proxy, consist_from_engine_config
 from railway_simulator.persistence.repositories import StudyRepository
 from railway_simulator.services.simulation_service import SimulationService
+from railway_simulator.studies import normalize_contact_law_after_contact_model_override
 from railway_simulator.spectrum.service import SpectrumService
 
 
@@ -105,6 +106,10 @@ class FullTrainStudyRunner:
                                     "mu_s": float(mu),
                                     "mu_k": float(mu),
                                 }
+                            )
+                            params = normalize_contact_law_after_contact_model_override(
+                                params,
+                                contact_model_overridden=True,
                             )
                             scenarios.append(
                                 Scenario(

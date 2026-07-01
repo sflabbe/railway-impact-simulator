@@ -16,7 +16,8 @@ from railway_simulator.studies.parametric_grid_io import (
 )
 
 
-MINI_SPEC_PATH = Path("configs/studies/impact_parametric_mini.yml")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MINI_SPEC_PATH = REPO_ROOT / "configs" / "studies" / "impact_parametric_mini.yml"
 FIXTURE_DIR = Path("build/test_parametric_grid_io")
 
 

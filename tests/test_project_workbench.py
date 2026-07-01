@@ -40,7 +40,8 @@ from railway_simulator.ui.project_workbench import (
 )
 
 
-MINI_PARAMETRIC_SPEC = Path("configs/studies/impact_parametric_mini.yml")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MINI_PARAMETRIC_SPEC = REPO_ROOT / "configs" / "studies" / "impact_parametric_mini.yml"
 
 
 def test_parse_float_csv_and_period_grid() -> None:

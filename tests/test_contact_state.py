@@ -34,6 +34,49 @@ def test_contact_state_resets_lost_contact_only_for_that_mass() -> None:
     assert updated.v0_contact[:2].tolist() == pytest.approx([1.0, 4.0])
 
 
+def test_already_penetrating_moving_away_disables_initial_speed_damping() -> None:
+    state = ContactState.initial(1).update(
+        np.array([-0.01, 0.0]),
+        np.array([+0.5, 0.0]),
+        n_masses=1,
+    )
+
+    assert state.active.tolist() == [True]
+    assert np.isinf(state.v0_contact[0])
+
+    force = ContactModels.compute_force(
+        np.array([-0.01]),
+        np.array([+0.5]),
+        state.v0_contact[:1],
+        1.0e8,
+        0.8,
+        "lankarani-nikravesh",
+    )
+
+    assert force[0] == pytest.approx(-1.0e8 * 0.01**1.5)
+
+
+def test_new_approach_contact_captures_valid_initial_speed_and_applies_damping() -> None:
+    state = ContactState.initial(1).update(
+        np.array([-0.01, 0.0]),
+        np.array([-0.5, 0.0]),
+        n_masses=1,
+    )
+    backbone = -1.0e8 * 0.01**1.5
+
+    force = ContactModels.compute_force(
+        np.array([-0.01]),
+        np.array([-0.5]),
+        state.v0_contact[:1],
+        1.0e8,
+        0.8,
+        "lankarani-nikravesh",
+    )
+
+    assert state.v0_contact[0] == pytest.approx(0.5)
+    assert force[0] < backbone
+
+
 def test_contact_kinematics_uses_engine_sign_convention() -> None:
     kin = ContactState.kinematics(
         np.array([-0.01, 0.02, 0.0, 0.0]),

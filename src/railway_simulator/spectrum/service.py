@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,8 @@ class SpectrumService:
             Tn_grid_ms=periods,
             zeta=float(settings.zeta),
             oscillator_mass=float(settings.oscillator_mass),
+            free_vibration_padding=bool(settings.free_vibration_padding),
+            padding_periods=float(settings.padding_periods),
         )
         out = out.rename(columns={"Feq": "Feq_MN" if settings.force_column.endswith("_MN") else "Feq"})
         out.insert(0, "zeta", float(settings.zeta))
@@ -75,18 +78,83 @@ class SpectrumService:
         return df
 
     @staticmethod
-    def envelope(curves: Iterable[pd.DataFrame], *, value_column: str = "Feq_MN") -> pd.DataFrame:
+    def envelope(
+        curves: Iterable[pd.DataFrame],
+        *,
+        value_column: str = "Feq_MN",
+        allow_partial_overlap: bool = False,
+    ) -> pd.DataFrame:
         frames = [c.copy() for c in curves]
         if not frames:
             raise ValueError("at least one curve is required")
-        base_periods = frames[0]["Tn_ms"].to_numpy(dtype=float)
-        values = []
+
+        period_grids: list[np.ndarray] = []
+        value_grids: list[np.ndarray] = []
         for frame in frames:
+            if "Tn_ms" not in frame.columns:
+                raise KeyError("period column not found: Tn_ms")
             if value_column not in frame.columns:
                 raise KeyError(f"value column not found: {value_column}")
-            values.append(np.interp(base_periods, frame["Tn_ms"].to_numpy(dtype=float), frame[value_column].to_numpy(dtype=float)))
+            source_periods = frame["Tn_ms"].to_numpy(dtype=float)
+            source_values = frame[value_column].to_numpy(dtype=float)
+            if source_periods.ndim != 1 or source_periods.size == 0 or not np.all(np.isfinite(source_periods)):
+                raise ValueError("Tn_ms must be a finite, non-empty 1D period grid")
+            if np.any(np.diff(source_periods) <= 0.0):
+                raise ValueError("Tn_ms must be strictly increasing")
+            if not np.all(np.isfinite(source_values)):
+                raise ValueError(f"{value_column} must contain only finite values")
+            period_grids.append(source_periods)
+            value_grids.append(source_values)
+
+        overlap_low = max(float(periods[0]) for periods in period_grids)
+        overlap_high = min(float(periods[-1]) for periods in period_grids)
+        if overlap_high < overlap_low:
+            raise ValueError("period grids do not overlap")
+
+        if allow_partial_overlap:
+            target_periods = np.unique(np.concatenate(period_grids))
+        else:
+            target_periods = np.unique(
+                np.concatenate(
+                    [
+                        np.array([overlap_low, overlap_high], dtype=float),
+                        *[
+                            periods[(periods >= overlap_low) & (periods <= overlap_high)]
+                            for periods in period_grids
+                        ],
+                    ]
+                )
+            )
+
+        values = [
+            np.interp(
+                target_periods,
+                source_periods,
+                source_values,
+                left=np.nan,
+                right=np.nan,
+            )
+            for source_periods, source_values in zip(period_grids, value_grids)
+        ]
         arr = np.vstack(values)
-        return pd.DataFrame({"Tn_ms": base_periods, f"{value_column}_envelope": np.nanmax(arr, axis=0)})
+        contributing = np.sum(np.isfinite(arr), axis=0)
+        if not allow_partial_overlap and np.any(contributing != len(frames)):
+            raise ValueError("internal envelope grid includes periods outside the common overlap")
+        if allow_partial_overlap and np.any(contributing < len(frames)):
+            warnings.warn(
+                "Spectrum envelope evaluated with partial period overlap; "
+                "see n_contributing_curves for per-period coverage.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        data = {
+            "Tn_ms": target_periods,
+            f"{value_column}_envelope": np.nanmax(arr, axis=0),
+        }
+        if allow_partial_overlap:
+            data["n_contributing_curves"] = contributing
+        return pd.DataFrame(data)
 
     @staticmethod
     def ratio(numerator: pd.DataFrame, denominator: pd.DataFrame, *, value_column: str = "Feq_MN") -> pd.DataFrame:

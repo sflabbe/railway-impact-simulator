@@ -23,6 +23,10 @@ venv/
 # Local data
 data/processed/
 data/raw/
+data.zip
+*.sqlite
+*.sqlite3
+projects/
 
 # Jupyter / pytest / Streamlit
 .ipynb_checkpoints/

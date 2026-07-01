@@ -19,9 +19,10 @@ class HHTAlphaIntegrator:
 
     Mathematical Formulation
     ------------------------
-    The HHT-α method integrates the equation of motion:
+    The HHT-α method integrates the equation of motion using the classical
+    negative-alpha convention:
 
-        M * a_{n+1} = (1-α)*F_{n+1} + α*F_n - (1-α)*C*v_{n+1} - α*C*v_n
+        M * a_{n+1} = (1+α)*F_{n+1} - α*F_n - (1+α)*C*v_{n+1} + α*C*v_n
 
     with displacement and velocity updates:
 
@@ -30,8 +31,8 @@ class HHTAlphaIntegrator:
 
     where:
         - α ∈ [-1/3, 0]: HHT parameter (α=0 reduces to Newmark)
-        - β = (1 + α)²/4: Newmark parameter (unconditional stability)
-        - γ = 1/2 + α: Newmark parameter
+        - β = (1 - α)²/4: Newmark parameter (unconditional stability)
+        - γ = 1/2 - α: Newmark parameter
 
     Attributes
     ----------
@@ -41,9 +42,9 @@ class HHTAlphaIntegrator:
         - α < 0: Numerical damping increases with |α|
         - α = -1/3: Maximum recommended damping
     beta : float
-        Newmark beta parameter, computed as (1 + α)²/4
+        Newmark beta parameter, computed as (1 - α)²/4
     gamma : float
-        Newmark gamma parameter, computed as 0.5 + α
+        Newmark gamma parameter, computed as 0.5 - α
     n_lu : int
         Counter for number of linear solves (LU factorizations) performed
 
@@ -111,17 +112,14 @@ class HHTAlphaIntegrator:
             If alpha is outside the stable range [-1/3, 0]
         """
         if not (-1.0 / 3.0 <= alpha <= 0.0):
-            import logging
-
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                f"HHT alpha={alpha} is outside stable range [-1/3, 0]. "
-                "Unconditional stability may be compromised."
+            raise ValueError(
+                f"HHT alpha={alpha} is outside stable range [-1/3, 0] "
+                "for the negative-alpha convention."
             )
 
         self.alpha = alpha
-        self.beta = 0.25 * (1.0 + alpha) ** 2
-        self.gamma = 0.5 + alpha
+        self.beta = 0.25 * (1.0 - alpha) ** 2
+        self.gamma = 0.5 - alpha
 
         # Count of linear solves (LU) performed in this run
         self.n_lu: int = 0
@@ -196,7 +194,7 @@ class HHTAlphaIntegrator:
 
         Solves the HHT-α form of the equation of motion:
 
-            M * a_{n+1} = (1-α)*F_{n+1} + α*F_n - (1-α)*C*v_{n+1} - α*C*v_n
+            M * a_{n+1} = (1+α)*F_{n+1} - α*F_n - (1+α)*C*v_{n+1} + α*C*v_n
 
         where F includes all force contributions (internal, contact, friction,
         and mass-contact forces).
@@ -246,12 +244,12 @@ class HHTAlphaIntegrator:
             R_internal_old + R_contact_old + R_friction_old + R_mass_contact_old
         )
 
-        # HHT-α weighted force term
+        # HHT-α weighted force term, negative-alpha convention.
         force = (
-            (1.0 - self.alpha) * R_total_new
-            + self.alpha * R_total_old
-            - (1.0 - self.alpha) * (C @ qp)
-            - self.alpha * (C @ qp_old)
+            (1.0 + self.alpha) * R_total_new
+            - self.alpha * R_total_old
+            - (1.0 + self.alpha) * (C @ qp)
+            + self.alpha * (C @ qp_old)
         )
 
         # Count this linear solve (dense LU)

@@ -87,4 +87,5 @@ def test_traxx_lankarani_has_no_isolated_force_spike_around_6ms() -> None:
     f625 = _run_traxx_lankarani_fpeak(6.25)
 
     assert f575 < f600 < f625
-    assert f600 / max(f575, f625) < 1.05
+    local_linear_mid = 0.5 * (f575 + f625)
+    assert f600 <= 1.05 * local_linear_mid

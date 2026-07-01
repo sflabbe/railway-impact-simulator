@@ -206,7 +206,11 @@ def apply_collision_to_params(
         params["k_wall"] = interface.get("k_N_per_m")
     if interface_law is not None and interface and interface.get("type") != "linear":
         params["contact_law"] = interface_law
-        params.setdefault("contact_model", "tabulated")
+        declared_model = params.get("contact_model")
+        if declared_model is not None and str(declared_model).strip().lower() != "tabulated":
+            params.setdefault("collision_meta", {})
+            params["collision_meta"].setdefault("contact_model_declared", declared_model)
+        params["contact_model"] = "tabulated"
     if interface_meta:
         params.setdefault("collision_meta", {})
         params["collision_meta"].update(interface_meta)

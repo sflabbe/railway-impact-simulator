@@ -346,13 +346,8 @@ class BoucWenModel:
                         (1.0 - a) * fy[i] * xfunc[i])
 
             # Distribute to nodes
-            if i == 0:
-                R[0] = -f_spring
-            else:
-                R[i] = R[i] - f_spring
-
-            if i < n_springs:
-                R[i + 1] = R[i + 1] + f_spring
+            R[i] -= f_spring
+            R[i + 1] += f_spring
 
         return R, xfunc
 
@@ -633,7 +628,12 @@ class ImpactSimulator:
         # Here we enable friction whenever:
         # - friction_model is not off/none
         # - and either mu is non-zero OR any sigma term is non-zero
-        fm = (p.friction_model or "none").strip().lower()
+        fm_raw = p.friction_model
+        fm = (fm_raw or "none").strip().lower()
+        allowed_friction_models = {"none", "off", "", "coulomb", "dahl", "brown-mcphee", "lugre"}
+        if fm not in allowed_friction_models:
+            raise ValueError(f"Unknown friction_model: {fm_raw!r}")
+        p.friction_model = fm
         mu_zero = (abs(p.mu_s) < SimulationConstants.ZERO_TOL and abs(p.mu_k) < SimulationConstants.ZERO_TOL)
         sigma_all_zero = (
             abs(p.sigma_0) < SimulationConstants.ZERO_TOL
@@ -762,18 +762,14 @@ class ImpactSimulator:
         u_contact[:, 0] = 0.0
         R_contact[:, 0] = 0.0
         if np.any(q[:n, 0] < 0.0):
-            u_contact[:n, 0] = np.where(q[:n, 0] < 0.0, q[:n, 0], 0.0)
-            du_contact0 = np.zeros(dof)
-            # Initialize v0_contact for approaching x-DOFs that are in contact
-            mask = (q[:n, 0] < 0.0) & (qp[:n, 0] < 0.0)
-            if np.any(mask):
-                contact_active[mask] = True
-                v0_contact[:n] = np.where(mask, np.abs(qp[:n, 0]), 1.0)
-                v0_contact[:n][v0_contact[:n] == 0.0] = 1.0
-            du_contact0[:n] = np.where(u_contact[:n, 0] < 0.0, qp[:n, 0], 0.0)
+            state0 = ContactState.initial(n).update(q[:, 0], qp[:, 0], n_masses=n)
+            kin0 = ContactState.kinematics(q[:, 0], qp[:, 0], n_masses=n)
+            contact_active = state0.active
+            v0_contact = state0.v0_contact
+            u_contact[:, 0] = kin0.u_contact
             R0 = ContactModels.compute_force(
                 u_contact[:, 0],
-                du_contact0,
+                kin0.du_contact,
                 v0_contact,
                 p.k_wall,
                 p.cr_wall,
@@ -931,6 +927,7 @@ class ImpactSimulator:
                     R_fric_new = np.zeros(dof)
                     z_new = z_old.copy()
                     if self.friction_enabled:
+                        fm = (p.friction_model or "none").strip().lower()
                         Fc_node = p.mu_k * np.abs(FN_node)
                         Fs_node = p.mu_s * np.abs(FN_node)
 
@@ -945,28 +942,25 @@ class ImpactSimulator:
                             fz = 0.0
 
                             if v_t > 1e-8:
-                                if p.friction_model == "dahl":
+                                if fm == "dahl":
                                     F_tmp, z_i = FrictionModels.dahl(
                                         z_prev, v_t, Fc_node[i], p.sigma_0, h
                                     )
-                                elif p.friction_model == "lugre":
+                                elif fm == "lugre":
                                     F_tmp, z_i = FrictionModels.lugre(
                                         z_prev, v_t, Fc_node[i], Fs_node[i], vs,
                                         float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
                                     )
-                                elif p.friction_model == "coulomb":
+                                elif fm == "coulomb":
                                     F_tmp = FrictionModels.coulomb_stribeck(
                                         v_t, Fc_node[i], Fs_node[i], vs, p.sigma_2
                                     )
-                                elif p.friction_model == "brown-mcphee":
+                                elif fm == "brown-mcphee":
                                     F_tmp = FrictionModels.brown_mcphee(
                                         v_t, Fc_node[i], Fs_node[i], vs
                                     )
                                 else:
-                                    F_tmp, z_i = FrictionModels.lugre(
-                                        z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                                        float(sigma0_node[i]), p.sigma_1, p.sigma_2, h
-                                    )
+                                    raise ValueError(f"Unknown friction_model: {p.friction_model!r}")
 
                                 F_mag = abs(F_tmp)
                                 fx = -F_mag * vx / v_t
@@ -1042,13 +1036,14 @@ class ImpactSimulator:
                     R_total_new = R_int_new + R_cont_new + R_fric_new + R_mc_new
                     Cv_new = self.C @ v_trial
 
-                    # Residual consistent with compute_acceleration():
-                    #   M a_{n+1} - [(1-α)R_{n+1} + αR_n - (1-α)C v_{n+1} - α C v_n] = 0
+                    # Residual consistent with compute_acceleration()
+                    # using the classical negative-alpha convention:
+                    #   M a_{n+1} - [(1+α)R_{n+1} - αR_n - (1+α)C v_{n+1} + α C v_n] = 0
                     force = (
-                        (1.0 - alpha) * R_total_new
-                        + alpha * R_total_old
-                        - (1.0 - alpha) * Cv_new
-                        - alpha * Cv_old
+                        (1.0 + alpha) * R_total_new
+                        - alpha * R_total_old
+                        - (1.0 + alpha) * Cv_new
+                        + alpha * Cv_old
                     )
                     r = (self.M @ a_trial) - force
 
@@ -1194,10 +1189,7 @@ class ImpactSimulator:
                         r2 = q[[i + 1, n + i + 1], step_idx + 1]
                         u_spring[i, step_idx + 1] = np.linalg.norm(r2 - r1) - self.u10[i]
 
-                    if step_idx > 0:
-                        du = (u_spring[:, step_idx + 1] - u_spring[:, step_idx]) / self.h
-                    else:
-                        du = np.zeros(n - 1)
+                    du = (u_spring[:, step_idx + 1] - u_spring[:, step_idx]) / self.h
 
                     # Bouc–Wen springs: compute scalar force and distribute in 2D (x/y) along current spring direction
                     u_comp = -u_spring[:, step_idx + 1]  # compression positive (legacy convention)
@@ -1355,7 +1347,7 @@ class ImpactSimulator:
             # Contact potential (elastic part only) at end level
             # Wall at x=0 → penetration δ = max(-x, 0)
             delta = np.maximum(-u_contact[:n, step_idx + 1], 0.0)
-            model = self.params.contact_model.lower()
+            model = (self.params.contact_model or "").strip().lower()
             contact_law = self.params.contact_law
             if contact_law is not None:
                 if np.any(delta > 0.0):
@@ -1718,6 +1710,7 @@ class ImpactSimulator:
         # Full friction computation (LuGre/Dahl/etc.)
         # --------------------------------------------------------------
         R_friction[:, step_idx + 1] = 0.0
+        fm = (p.friction_model or "none").strip().lower()
 
         Fc_node = p.mu_k * np.abs(FN_node)
         Fs_node = p.mu_s * np.abs(FN_node)
@@ -1730,7 +1723,7 @@ class ImpactSimulator:
             z_prev = z_friction[i, step_idx]
             # LuGre paper-grade: auto σ₀ from target bristle deflection
             sigma0_i = float(p.sigma_0)
-            if (p.friction_model == "lugre" and bool(getattr(p, "lugre_paper_grade", False))):
+            if (fm == "lugre" and bool(getattr(p, "lugre_paper_grade", False))):
                 z_ss = float(getattr(p, "lugre_bristle_deflection_m", 1.0e-4) or 1.0e-4)
                 z_ss = max(z_ss, 1.0e-12)
                 Fs_ref = max(abs(p.mu_s), abs(p.mu_k)) * float(abs(FN_node[i]))
@@ -1745,29 +1738,25 @@ class ImpactSimulator:
             fz = 0.0
 
             if v_t > 1e-8:
-                if p.friction_model == "dahl":
+                if fm == "dahl":
                     F_tmp, z_new = FrictionModels.dahl(
                         z_prev, v_t, Fc_node[i], p.sigma_0, self.h
                     )
-                elif p.friction_model == "lugre":
+                elif fm == "lugre":
                     F_tmp, z_new = FrictionModels.lugre(
                         z_prev, v_t, Fc_node[i], Fs_node[i], vs,
                         sigma0_i, p.sigma_1, p.sigma_2, self.h
                     )
-                elif p.friction_model == "coulomb":
+                elif fm == "coulomb":
                     F_tmp = FrictionModels.coulomb_stribeck(
                         v_t, Fc_node[i], Fs_node[i], vs, p.sigma_2
                     )
-                elif p.friction_model == "brown-mcphee":
+                elif fm == "brown-mcphee":
                     F_tmp = FrictionModels.brown_mcphee(
                         v_t, Fc_node[i], Fs_node[i], vs
                     )
                 else:
-                    # Fallback: LuGre
-                    F_tmp, z_new = FrictionModels.lugre(
-                        z_prev, v_t, Fc_node[i], Fs_node[i], vs,
-                        sigma0_i, p.sigma_1, p.sigma_2, self.h
-                    )
+                    raise ValueError(f"Unknown friction_model: {p.friction_model!r}")
 
                 F_mag = abs(F_tmp)
                 fx = -F_mag * vx / v_t
@@ -1926,15 +1915,25 @@ class ImpactSimulator:
     ) -> pd.DataFrame:
         """Build results DataFrame for export (including energy bookkeeping)."""
         n_masses = self.params.n_masses
-        F_total = R_contact[0, :]          # [N], positive in compression
-        F_total_clamped = np.maximum(F_total, 0.0)
+        F_front = R_contact[0, :]          # [N], positive in compression
+        F_front_clamped = np.maximum(F_front, 0.0)
+        F_wall_total_clamped = np.sum(np.maximum(R_contact[:n_masses, :], 0.0), axis=0)
+        secondary_wall = R_contact[1:n_masses, :] if n_masses > 1 else np.empty((0, R_contact.shape[1]))
+        max_secondary_wall_force = float(np.max(np.abs(secondary_wall))) if secondary_wall.size else 0.0
+        secondary_tol = max(1.0e-6, 1.0e-9 * float(np.max(F_front_clamped)) if F_front_clamped.size else 0.0)
+        if max_secondary_wall_force > secondary_tol:
+            logger.warning(
+                "Secondary masses contacted the wall; max secondary wall force = %.6e N. "
+                "Use Impact_Force_wall_total_MN for total wall reaction.",
+                max_secondary_wall_force,
+            )
 
         u_pen_mm = -u_contact[0, :] * 1000.0
         a_front = qpp[0, :] / GRAVITY
 
         delta = np.maximum(-u_contact[0, :], 0.0)
 
-        model = self.params.contact_model.lower()
+        model = (self.params.contact_model or "").strip().lower()
         if self.params.contact_law is not None:
             F_backbone_MN = np.array(
                 [self.params.contact_law.evaluate(float(dval)) / 1e6 for dval in delta]
@@ -1974,7 +1973,9 @@ class ImpactSimulator:
             {
                 "Time_s": self.t,
                 "Time_ms": self.t * 1000.0,
-                "Impact_Force_MN": F_total_clamped / 1e6,
+                "Impact_Force_MN": F_front_clamped / 1e6,
+                "Impact_Force_front_MN": F_front_clamped / 1e6,
+                "Impact_Force_wall_total_MN": F_wall_total_clamped / 1e6,
                 "Penetration_mm": u_pen_mm,
                 "Acceleration_g": a_front,
                 "Velocity_m_s": qp[0, :],
@@ -2068,6 +2069,9 @@ class ImpactSimulator:
             # Store actual timestep used (not requested h_init, but effective dt)
             df.attrs["dt_eff"] = self.h
             df.attrs["h_requested"] = self.params.h_init
+            df.attrs["T_max_requested"] = self.params.T_max
+            df.attrs["t_final_actual"] = float(self.t[-1])
+            df.attrs["max_secondary_wall_force_N"] = max_secondary_wall_force
             df.attrs["newton_tol"] = self.params.newton_tol
             df.attrs["alpha_hht"] = self.params.alpha_hht
 
@@ -2263,7 +2267,7 @@ def run_simulation(
     # derive `step = ceil(T_max / h_init)` and normalise T_int accordingly.
     if (not user_provided_step) and (user_provided_T_max or user_provided_h_init or user_provided_T_int):
         try:
-            if coerced.get("T_int") is not None:
+            if user_provided_T_int and coerced.get("T_int") is not None:
                 # Convention: T_int = (0.0, T_max)
                 t0, t1 = coerced["T_int"]
                 T_max_eff = float(t1) - float(t0)

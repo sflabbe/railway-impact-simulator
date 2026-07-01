@@ -17,6 +17,8 @@ class SRSSettings:
     zeta: float = 0.05
     oscillator_mass: float = 1.0
     Tn_grid_ms: tuple[float, ...] | None = None
+    free_vibration_padding: bool = True
+    padding_periods: float = 1.0
 
 
 @dataclass(frozen=True)

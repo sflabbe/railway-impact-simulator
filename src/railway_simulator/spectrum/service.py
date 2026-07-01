@@ -185,6 +185,8 @@ class SpectrumService:
 
         mask = (num_periods >= overlap_low) & (num_periods <= overlap_high)
         periods = num_periods[mask]
+        if periods.size == 0:
+            raise ValueError("Period grids overlap, but no numerator periods lie inside the common overlap.")
         num = num_values[mask]
         den = np.interp(periods, den_periods, den_values, left=np.nan, right=np.nan)
         if np.any(~np.isfinite(den)):

@@ -77,6 +77,14 @@ def test_spectrum_ratio_partial_overlap_uses_only_valid_numerator_periods() -> N
     assert ratio["Feq_MN_ratio"].tolist() == pytest.approx([3.0, 4.0])
 
 
+def test_spectrum_ratio_rejects_empty_effective_overlap() -> None:
+    numerator = pd.DataFrame({"Tn_ms": [100.0, 400.0], "Feq_MN": [2.0, 8.0]})
+    denominator = pd.DataFrame({"Tn_ms": [200.0, 300.0], "Feq_MN": [4.0, 6.0]})
+
+    with pytest.raises(ValueError, match="no numerator periods lie inside the common overlap"):
+        SpectrumService.ratio(numerator, denominator)
+
+
 def test_spectrum_ratio_rejects_non_overlapping_period_grids() -> None:
     numerator = pd.DataFrame({"Tn_ms": [100.0, 150.0], "Feq_MN": [2.0, 3.0]})
     denominator = pd.DataFrame({"Tn_ms": [300.0, 400.0], "Feq_MN": [4.0, 5.0]})

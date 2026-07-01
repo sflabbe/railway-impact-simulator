@@ -83,7 +83,8 @@ extend-exclude = [
 [tool.pytest.ini_options]
 # Keep pytest temp dirs inside the repository. On Windows some machines lock
 # %TEMP%/pytest-of-<user>, which otherwise breaks any test using tmp_path.
-addopts = "--basetemp=build/pytest-tmp"
+addopts = "--basetemp=.pytest-tmp"
+pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]

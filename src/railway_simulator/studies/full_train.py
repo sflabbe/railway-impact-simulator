@@ -7,6 +7,7 @@ delegates SRS curves to ``SpectrumService``.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -78,7 +79,7 @@ class FullTrainStudyRunner:
         spec: FullTrainStudySpec,
     ) -> list[Scenario]:
         scenarios: list[Scenario] = []
-        base = dict(base_config)
+        base = copy.deepcopy(base_config)
         base.setdefault("solver", "picard")
         base.setdefault("angle_rad", 0.0)
 
@@ -96,7 +97,7 @@ class FullTrainStudyRunner:
                 for contact_model in spec.contact_models:
                     for mu in spec.mu_values:
                         for speed_kmh in spec.speeds_kmh:
-                            params = dict(base)
+                            params = copy.deepcopy(base)
                             params.update(consist.to_engine_overrides())
                             params.update(
                                 {

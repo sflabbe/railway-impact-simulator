@@ -159,10 +159,12 @@ def apply_scenario_to_config(
             ) from exc
         contact_model_overridden = contact_model_overridden or dimension.path == "contact_model"
 
-    return normalize_contact_law_after_contact_model_override(
-        config,
-        contact_model_overridden=contact_model_overridden,
-    )
+    if contact_model_overridden:
+        return normalize_contact_law_after_contact_model_override(
+            config,
+            contact_model_overridden=True,
+        )
+    return config
 
 
 def preview_parametric_grid(spec: ParametricGridSpec) -> list[dict[str, Any]]:

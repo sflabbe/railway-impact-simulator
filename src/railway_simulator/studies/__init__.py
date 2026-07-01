@@ -125,6 +125,11 @@ def normalize_contact_law_after_contact_model_override(
     the inherited tabulated law no longer applies and must be removed before
     strict contact-model validation runs.
     """
+    cfg = copy.deepcopy(cfg)
+    raw_meta = cfg.get("collision_meta") or {}
+    meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+    cfg["collision_meta"] = meta
+
     if not contact_model_overridden:
         return cfg
 
@@ -133,10 +138,6 @@ def normalize_contact_law_after_contact_model_override(
         return cfg
 
     cfg["contact_law"] = None
-    meta = cfg.get("collision_meta")
-    if not isinstance(meta, dict):
-        meta = {}
-        cfg["collision_meta"] = meta
     meta["contact_law_removed_due_to_contact_model_override"] = True
     return cfg
 

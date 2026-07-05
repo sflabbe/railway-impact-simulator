@@ -2186,6 +2186,46 @@ def get_default_simulation_params() -> dict:
     }
 
 
+def _warn_if_yield_material_uses_default_bouc_wen(
+    user_overrides: Dict[str, Any],
+    defaults: Dict[str, Any],
+) -> None:
+    """Warn when a YAML/dict config defines yield properties but omits BW keys.
+
+    The default Bouc-Wen setting is intentionally linear-elastic (``bw_a=1``)
+    for generic examples and backward compatibility.  For vehicle crushing
+    configs that explicitly provide ``fy``/``uy``, however, silently inheriting
+    ``bw_a=1`` means the yield force is effectively not activated.  That is a
+    valid model only if it is explicitly requested in the case file.
+    """
+    if not isinstance(user_overrides, dict):
+        return
+
+    has_yield_material = (
+        user_overrides.get("fy") is not None
+        or user_overrides.get("uy") is not None
+        or user_overrides.get("k_train") is not None
+    )
+    if not has_yield_material:
+        return
+
+    bw_keys = ("bw_a", "bw_A", "bw_beta", "bw_gamma", "bw_n")
+    missing = [key for key in bw_keys if user_overrides.get(key) is None]
+    if not missing:
+        return
+
+    inherited = ", ".join(f"{key}={defaults.get(key)!r}" for key in missing)
+    logger.warning(
+        "Yield/crushing parameters (fy/uy/k_train) are present but Bouc-Wen "
+        "parameters are incomplete; missing %s will inherit defaults (%s). "
+        "The default bw_a=1.0 is purely linear-elastic and does not activate "
+        "fy as a yield-force limit. Add explicit bw_a/bw_A/bw_beta/bw_gamma/"
+        "bw_n to the config, or set bw_a=1.0 deliberately if a linear spring "
+        "is intended.",
+        ", ".join(missing),
+        inherited,
+    )
+
 def run_simulation(
     params: SimulationParams | Dict[str, Any],
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -2229,6 +2269,7 @@ def run_simulation(
         user_provided_h_init = ("h_init" in user_overrides) and (user_overrides.get("h_init") is not None)
 
         base = dict(defaults)
+        _warn_if_yield_material_uses_default_bouc_wen(user_overrides, defaults)
         base.update(user_overrides)
         raw = base
 

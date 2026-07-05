@@ -52,4 +52,14 @@ uy:
 - 0.064
 - 0.064
 
+# Bouc-Wen hysteresis parameters
+# Explicitly enable the crushing branch.  Without these keys the engine
+# falls back to bw_a=1.0, which is purely linear-elastic and does not use fy
+# as a yield-force limit.
+bw_a: 0.0
+bw_A: 1.0
+bw_beta: 0.10
+bw_gamma: 0.90
+bw_n: 8
+
 d0: 0.01

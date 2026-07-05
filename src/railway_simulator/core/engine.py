@@ -1848,10 +1848,10 @@ class ImpactSimulator:
                 self.mass_contact_active[i] = True
 
                 # Get positions and velocities of masses i and i+1
-                r1 = q[[i, n + i], step_idx + 1]
-                r2 = q[[i + 1, n + i + 1], step_idx + 1]
-                v1 = qp[[i, n + i], step_idx + 1]
-                v2 = qp[[i + 1, n + i + 1], step_idx + 1]
+                r1 = q[[i, n + i]]
+                r2 = q[[i + 1, n + i + 1]]
+                v1 = qp[[i, n + i]]
+                v2 = qp[[i + 1, n + i + 1]]
 
                 # Contact normal (from mass i to mass i+1)
                 dr = r2 - r1

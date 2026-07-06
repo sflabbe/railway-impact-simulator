@@ -1,65 +1,95 @@
-case_name: ICE1_powercar_discrete6
-notes: ICE 1 power car discretized into 6 equal masses (78 t total). Simplified uniform
-  stiffness/yield for all inter-mass springs.
-v0_init: -22.22
-T_max: 0.3
-h_init: 0.0001
-alpha_hht: -0.15
-contact_model: lankarani-nikravesh
-k_wall: 45_000_000.0   # 45 MN/m
-cr_wall: 0.8
-n_masses: 6
-solver: picard
-newton_tol: 1.0e-6
-max_iter: 50
-masses:
-- 13000.0
-- 13000.0
-- 13000.0
-- 13000.0
-- 13000.0
-- 13000.0
-x_init:
-- 0.0
-- 3.6
-- 7.2
-- 10.8
-- 14.4
-- 18.0
-y_init:
-- 0.0
-- 0.0
-- 0.0
-- 0.0
-- 0.0
-- 0.0
-k_train:
-- 140625000.0
-- 140625000.0
-- 140625000.0
-- 140625000.0
-- 140625000.0
-fy:
-- 9000000.0
-- 9000000.0
-- 9000000.0
-- 9000000.0
-- 9000000.0
-uy:
-- 0.064
-- 0.064
-- 0.064
-- 0.064
-- 0.064
+# ICE 1 Leading Powercar Configuration for Dissertation
+# Intra-vehicle discretization: 6 equal lumped masses (78 t total)
+#
+# Harmonized with the Chapter-8 dissertation family
+# (ice1_full_dissertation / ice1_single_wagon_dissertation):
+#   - Bouc-Wen block now EXPLICIT (bw_a = 0.0). Previously absent, which
+#     silently activated the engine default bw_a = 1.0 -> linear-elastic
+#     couplings, fy never mobilized.
+#   - friction block now explicit (previously absent -> engine default "none").
+#   - contact_model, k_wall, alpha_hht aligned with the family standard.
+#
+# Crushing behavior (intra-vehicle, Aluminium proxy):
+#   - fy = 9 MN, uy = 64 mm  ->  k = fy/uy = 140.625 MN/m
 
-# Bouc-Wen hysteresis parameters
-# Explicitly enable the crushing branch.  Without these keys the engine
-# falls back to bw_a=1.0, which is purely linear-elastic and does not use fy
-# as a yield-force limit.
-bw_a: 0.0
+case_name: ICE1_powercar_discrete6
+notes: >
+  ICE 1 power car discretized into 6 equal masses (78 t total).
+  Simplified uniform stiffness/yield for all inter-mass springs.
+  Bouc-Wen and LuGre parameters explicit for consistency with the
+  Chapter 8 dissertation config family.
+
+n_masses: 6
+
+masses:
+  - 13000.0
+  - 13000.0
+  - 13000.0
+  - 13000.0
+  - 13000.0
+  - 13000.0
+
+x_init:
+  - 0.0
+  - 3.6
+  - 7.2
+  - 10.8
+  - 14.4
+  - 18.0
+
+y_init: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Spring properties (5 links), k_train = fy / uy
+k_train:
+  - 140625000.0
+  - 140625000.0
+  - 140625000.0
+  - 140625000.0
+  - 140625000.0
+
+fy:   # [N] = 9 MN
+  - 9000000.0
+  - 9000000.0
+  - 9000000.0
+  - 9000000.0
+  - 9000000.0
+
+uy:   # [m] = 64 mm
+  - 0.064
+  - 0.064
+  - 0.064
+  - 0.064
+  - 0.064
+
+# Bouc-Wen hysteresis (elastoplastic crushing, family standard)
+bw_a: 0.0           # CHANGED: was absent -> engine default 1.0 (linear!)
 bw_A: 1.0
 bw_beta: 0.10
 bw_gamma: 0.90
 bw_n: 8
 
+# Wall / contact
+k_wall: 60000000.0  # CHANGED: 45 -> 60 MN/m, family standard (RC structure)
+cr_wall: 0.8
+contact_model: anagnostopoulos   # CHANGED: was lankarani-nikravesh
+
+# Friction (family standard; previously absent -> "none")
+friction_model: lugre
+mu_s: 0.40
+mu_k: 0.30
+sigma_0: 1.0e5
+sigma_1: 3.16e2
+sigma_2: 0.40
+
+# Integration / solver
+h_init: 1.0e-4
+T_max: 0.5          # CHANGED: 0.3 -> 0.5 (peak + unloading fit comfortably)
+alpha_hht: -0.10    # CHANGED: -0.15 -> -0.10, family standard
+solver: picard
+newton_tol: 1.0e-6
+max_iter: 50
+
+# Initial conditions
+v0_init: -22.2222   # 80 km/h = 22.2222 m/s towards wall
 d0: 0.01
+angle_rad: 0.0
